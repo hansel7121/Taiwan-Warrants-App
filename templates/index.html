@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Warrant Scanner</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        padding: 20px;
+        background: #f4f4f4;
+        margin: 0;
+      }
+      h1 {
+        color: #333;
+      }
+      .tab-bar {
+        display: flex;
+        gap: 4px;
+        margin-bottom: 16px;
+      }
+      .tab-bar button {
+        padding: 8px 20px;
+        border: none;
+        border-radius: 6px 6px 0 0;
+        cursor: pointer;
+        font-size: 14px;
+        background: #ccc;
+        color: #333;
+      }
+      .tab-bar button.active {
+        background: #0066cc;
+        color: white;
+      }
+      .tab-content {
+        display: none;
+      }
+      .tab-content.active {
+        display: block;
+      }
+      .filters {
+        background: white;
+        padding: 16px;
+        border-radius: 8px;
+        display: flex;
+        gap: 20px;
+        align-items: flex-end;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+      }
+      .filters label {
+        display: flex;
+        flex-direction: column;
+        font-size: 13px;
+        color: #555;
+        gap: 4px;
+      }
+      .filters input,
+      .filters select {
+        padding: 6px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 14px;
+      }
+      .stock-select {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        font-size: 13px;
+        color: #555;
+      }
+      .stock-select select {
+        height: 160px;
+        min-width: 220px;
+        padding: 4px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 14px;
+      }
+      .select-all-btn {
+        padding: 4px 8px;
+        font-size: 12px;
+        background: #eee;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        cursor: pointer;
+        width: fit-content;
+      }
+      .select-all-btn:hover {
+        background: #ddd;
+      }
+      button.primary {
+        padding: 8px 18px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+        background: #0066cc;
+        color: white;
+      }
+      button.success {
+        padding: 8px 18px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+        background: #28a745;
+        color: white;
+      }
+      .sort-btns {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      .sort-btns button {
+        background: #555;
+        color: white;
+        font-size: 13px;
+        padding: 6px 14px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      #status,
+      #iv-status {
+        margin: 10px 0;
+        color: #555;
+        font-size: 14px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        background: white;
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      th {
+        background: #0066cc;
+        color: white;
+        padding: 10px 8px;
+        font-size: 13px;
+        cursor: pointer;
+        user-select: none;
+      }
+      th:hover {
+        background: #0055aa;
+      }
+      td {
+        padding: 8px;
+        font-size: 13px;
+        border-bottom: 1px solid #eee;
+        text-align: right;
+      }
+      td:first-child,
+      td:nth-child(2),
+      td:nth-child(3) {
+        text-align: left;
+      }
+      tr:hover {
+        background: #f0f7ff;
+      }
+      .call {
+        color: #c00;
+        font-weight: bold;
+      }
+      .put {
+        color: #007700;
+        font-weight: bold;
+      }
+      #iv-plot {
+        width: 100%;
+        height: 680px;
+        background: white;
+        border-radius: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>📊 Warrant Scanner</h1>
+
+    <div class="tab-bar">
+      <button class="active" onclick="switchTab('scanner')">Scanner</button>
+      <button onclick="switchTab('ivsurface')">IV Surface</button>
+    </div>
+
+    <!-- SCANNER TAB -->
+    <div id="tab-scanner" class="tab-content active">
+      <div class="filters">
+        <div class="stock-select">
+          <span>Stock (multi-select)</span>
+          <select id="stockSelect" multiple>
+            <option value="2330" selected>2330 台積電 (TSMC)</option>
+            <option value="2454">2454 聯發科 (MediaTek)</option>
+            <option value="2317">2317 鴻海 (Foxconn)</option>
+            <option value="2303">2303 聯電 (UMC)</option>
+            <option value="3711">3711 日月光 (ASE)</option>
+            <option value="2882">2882 國泰金 (Cathay Financial)</option>
+            <option value="2881">2881 富邦金 (Fubon Financial)</option>
+            <option value="2886">2886 兆豐金 (Mega Financial)</option>
+          </select>
+          <button class="select-all-btn" onclick="toggleSelectAll()">
+            Select All
+          </button>
+        </div>
+        <label
+          >Option Type
+          <select id="optionType">
+            <option value="All">All</option>
+            <option value="Call">Call</option>
+            <option value="Put">Put</option>
+          </select>
+        </label>
+        <label
+          >Min Days to Expiry
+          <input type="number" id="minDays" value="0" min="0" max="365" />
+        </label>
+        <label
+          >Max Days to Expiry
+          <input type="number" id="maxDays" value="365" min="0" max="365" />
+        </label>
+        <label
+          >Min Leverage
+          <input type="number" id="minLeverage" value="0" step="0.1" min="0" />
+        </label>
+        <div style="display: flex; flex-direction: column; gap: 8px">
+          <button class="primary" onclick="fetchData()">Fetch Warrants</button>
+          <button
+            class="success"
+            id="downloadBtn"
+            onclick="downloadCSV()"
+            style="display: none"
+          >
+            Download CSV
+          </button>
+        </div>
+      </div>
+
+      <div class="sort-btns">
+        <button onclick="sortByColumn('leverage_calc', false)">
+          Leverage ↓
+        </button>
+        <button onclick="sortByColumn('time_value', true)">Time Value ↑</button>
+      </div>
+
+      <div id="status"></div>
+      <div id="tableContainer"></div>
+    </div>
+
+    <!-- IV SURFACE TAB -->
+    <div id="tab-ivsurface" class="tab-content">
+      <div class="filters">
+        <div class="stock-select">
+          <span>Stock (multi-select)</span>
+          <select id="ivStockSelect" multiple>
+            <option value="2330" selected>2330 台積電 (TSMC)</option>
+            <option value="2454">2454 聯發科 (MediaTek)</option>
+            <option value="2317">2317 鴻海 (Foxconn)</option>
+            <option value="2303">2303 聯電 (UMC)</option>
+            <option value="3711">3711 日月光 (ASE)</option>
+            <option value="2882">2882 國泰金 (Cathay Financial)</option>
+            <option value="2881">2881 富邦金 (Fubon Financial)</option>
+            <option value="2886">2886 兆豐金 (Mega Financial)</option>
+          </select>
+          <button class="select-all-btn" onclick="toggleSelectAllIV()">
+            Select All
+          </button>
+        </div>
+        <label
+          >Option Type
+          <select id="ivOptionType">
+            <option value="All">All</option>
+            <option value="Call">Call</option>
+            <option value="Put">Put</option>
+          </select>
+        </label>
+        <label
+          >Highlight Warrant Code (optional)
+          <input
+            type="text"
+            id="highlightCode"
+            placeholder="e.g. 061563"
+            style="width: 160px"
+          />
+        </label>
+        <button class="primary" onclick="fetchIVSurface()">
+          Plot IV Surface
+        </button>
+      </div>
+      <div id="iv-status"></div>
+      <div id="iv-plot"></div>
+    </div>
+
+    <script>
+      let currentData = [];
+      let sortCol = null;
+      let sortAsc = true;
+      let allSelected = false;
+      let allSelectedIV = false;
+
+      function switchTab(tab) {
+        document
+          .querySelectorAll(".tab-content")
+          .forEach((el) => el.classList.remove("active"));
+        document
+          .querySelectorAll(".tab-bar button")
+          .forEach((el) => el.classList.remove("active"));
+        document.getElementById("tab-" + tab).classList.add("active");
+        event.target.classList.add("active");
+      }
+
+      function toggleSelectAll() {
+        const select = document.getElementById("stockSelect");
+        allSelected = !allSelected;
+        for (let opt of select.options) opt.selected = allSelected;
+        document.querySelectorAll(".select-all-btn")[0].textContent =
+          allSelected ? "Deselect All" : "Select All";
+      }
+
+      function toggleSelectAllIV() {
+        const select = document.getElementById("ivStockSelect");
+        allSelectedIV = !allSelectedIV;
+        for (let opt of select.options) opt.selected = allSelectedIV;
+        document.querySelectorAll(".select-all-btn")[1].textContent =
+          allSelectedIV ? "Deselect All" : "Select All";
+      }
+
+      function getFilters() {
+        const select = document.getElementById("stockSelect");
+        return {
+          stock_codes: Array.from(select.selectedOptions).map((o) => o.value),
+          option_type: document.getElementById("optionType").value,
+          min_days: document.getElementById("minDays").value,
+          max_days: document.getElementById("maxDays").value,
+          min_leverage: document.getElementById("minLeverage").value,
+        };
+      }
+
+      async function fetchData() {
+        const filters = getFilters();
+        if (!filters.stock_codes.length) {
+          document.getElementById("status").textContent =
+            "Please select at least one stock.";
+          return;
+        }
+        document.getElementById("status").textContent =
+          "Fetching... this may take a while for multiple stocks.";
+        document.getElementById("tableContainer").innerHTML = "";
+        document.getElementById("downloadBtn").style.display = "none";
+
+        const res = await fetch("/fetch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(filters),
+        });
+        const data = await res.json();
+        currentData = data.rows;
+        document.getElementById("status").textContent =
+          `Showing ${data.count} warrants`;
+        document.getElementById("downloadBtn").style.display = "inline-block";
+        renderTable(currentData);
+      }
+
+      function renderTable(rows) {
+        if (!rows.length) {
+          document.getElementById("tableContainer").innerHTML =
+            "<p>No results.</p>";
+          return;
+        }
+        const cols = Object.keys(rows[0]);
+        let html = "<table><thead><tr>";
+        cols.forEach((c, i) => {
+          const arrow = sortCol === i ? (sortAsc ? " ▲" : " ▼") : "";
+          html += `<th onclick="sortBy(${i})">${c}${arrow}</th>`;
+        });
+        html += "</tr></thead><tbody>";
+        rows.forEach((row) => {
+          const cls = row.type === "Call" ? "call" : "put";
+          html += "<tr>";
+          cols.forEach((c) => {
+            const val = row[c];
+            html += `<td>${c === "type" ? `<span class="${cls}">${val}</span>` : val}</td>`;
+          });
+          html += "</tr>";
+        });
+        html += "</tbody></table>";
+        document.getElementById("tableContainer").innerHTML = html;
+      }
+
+      function sortBy(colIndex) {
+        const key = Object.keys(currentData[0])[colIndex];
+        if (sortCol === colIndex) sortAsc = !sortAsc;
+        else {
+          sortCol = colIndex;
+          sortAsc = true;
+        }
+        currentData.sort((a, b) => {
+          const av = a[key],
+            bv = b[key];
+          if (typeof av === "number") return sortAsc ? av - bv : bv - av;
+          return sortAsc
+            ? String(av).localeCompare(String(bv))
+            : String(bv).localeCompare(String(av));
+        });
+        renderTable(currentData);
+      }
+
+      function sortByColumn(key, asc) {
+        if (!currentData.length) return;
+        currentData.sort((a, b) => (asc ? a[key] - b[key] : b[key] - a[key]));
+        renderTable(currentData);
+      }
+
+      async function downloadCSV() {
+        const res = await fetch("/download", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(getFilters()),
+        });
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "warrants.csv";
+        a.click();
+      }
+
+      async function fetchIVSurface() {
+        const select = document.getElementById("ivStockSelect");
+        const stock_codes = Array.from(select.selectedOptions).map(
+          (o) => o.value,
+        );
+        if (!stock_codes.length) {
+          document.getElementById("iv-status").textContent =
+            "Please select at least one stock.";
+          return;
+        }
+
+        document.getElementById("iv-status").textContent =
+          "Fetching data and building surface...";
+        document.getElementById("iv-plot").innerHTML = "";
+
+        const payload = {
+          stock_codes,
+          option_type: document.getElementById("ivOptionType").value,
+          highlight_code: document.getElementById("highlightCode").value.trim(),
+        };
+
+        const res = await fetch("/iv_surface", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+
+        if (data.error) {
+          document.getElementById("iv-status").textContent =
+            "Error: " + data.error;
+          return;
+        }
+
+        document.getElementById("iv-status").textContent =
+          `Plotted ${data.scatter_x.length} warrants`;
+
+        const traces = [
+          {
+            type: "surface",
+            x: data.x,
+            y: data.y,
+            z: data.z,
+            colorscale: "Viridis",
+            opacity: 0.85,
+            colorbar: { title: "IV (%)" },
+            name: "IV Surface",
+          },
+          {
+            type: "scatter3d",
+            x: data.scatter_x,
+            y: data.scatter_y,
+            z: data.scatter_z,
+            mode: "markers",
+            marker: { size: 3, color: "red", opacity: 0.4 },
+            text: data.codes.map((c, i) => c + " " + data.names[i]),
+            hovertemplate:
+              "%{text}<br>Strike: %{x:.0f}<br>DTE: %{y}<br>IV: %{z:.1f}%<extra></extra>",
+            name: "Warrants",
+          },
+        ];
+
+        if (data.highlight) {
+          const h = data.highlight;
+          traces.push({
+            type: "scatter3d",
+            x: [h.x],
+            y: [h.y],
+            z: [h.z],
+            mode: "markers+text",
+            marker: {
+              size: 6,
+              color: "yellow",
+              symbol: "diamond",
+              opacity: 1.0,
+              line: { color: "black", width: 2 },
+            },
+            text: [h.code],
+            textposition: "top center",
+            textfont: { color: "white", size: 12 },
+            hovertemplate: `${h.code}<br>Strike: %{x:.0f}<br>DTE: %{y}<br>IV: %{z:.1f}%<extra></extra>`,
+            name: "Selected: " + h.code,
+          });
+        }
+
+        Plotly.newPlot(
+          "iv-plot",
+          traces,
+          {
+            title: "Warrant IV Surface",
+            scene: {
+              xaxis: { title: "Strike (NT$)" },
+              yaxis: { title: "Days to Expiry" },
+              zaxis: { title: "IV (%)", range: [0, 100] },
+              camera: { eye: { x: 1.5, y: -1.5, z: 1.0 } },
+            },
+            margin: { l: 0, r: 0, t: 40, b: 0 },
+          },
+          { responsive: true },
+        );
+      }
+    </script>
+  </body>
+</html>
