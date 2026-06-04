@@ -3,3 +3,5 @@ build/
 *.spec
 __pycache__/
 *.pyc
+__pycache__/
+*.pyc

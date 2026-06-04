@@ -11,6 +11,7 @@ import threading
 import webbrowser
 import warrant_logic
 import os
+import json
 import numpy as np
 from scipy.interpolate import griddata
 
@@ -20,12 +21,31 @@ app = Flask(
     template_folder=os.path.join(base_dir, "templates"),
     static_folder=os.path.join(base_dir, "static"),
 )
+
 app.json.sort_keys = False
+
+CUSTOM_STOCKS_FILE = os.path.join(base_dir, "custom_stocks.json")
 
 
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/get_custom_stocks")
+def get_custom_stocks():
+    if os.path.exists(CUSTOM_STOCKS_FILE):
+        with open(CUSTOM_STOCKS_FILE) as f:
+            return jsonify(json.load(f))
+    return jsonify([])
+
+
+@app.route("/save_custom_stocks", methods=["POST"])
+def save_custom_stocks():
+    stocks = request.json
+    with open(CUSTOM_STOCKS_FILE, "w", encoding="utf-8") as f:
+        json.dump(stocks, f, ensure_ascii=False)
+    return jsonify({"ok": True})
 
 
 @app.route("/fetch", methods=["POST"])
@@ -50,10 +70,6 @@ def fetch():
     )
     if error and df.empty:
         return jsonify({"rows": [], "count": 0, "error": error})
-
-    print("Column order:", df.columns.tolist())
-    print("First row keys:", list(df.to_dict(orient="records")[0].keys()))
-
     return jsonify({"rows": df.to_dict(orient="records"), "count": len(df)})
 
 

@@ -185,6 +185,17 @@
         background: white;
         border-radius: 8px;
       }
+      #addStockForm {
+        flex-direction: column;
+        gap: 4px;
+        margin-top: 6px;
+      }
+      #addStockForm input {
+        padding: 4px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 13px;
+      }
     </style>
   </head>
   <body>
@@ -203,18 +214,48 @@
         <div class="stock-select">
           <span>Stock (multi-select)</span>
           <select id="stockSelect" multiple>
-            <option value="2330" selected>2330 台積電 (TSMC)</option>
-            <option value="2454">2454 聯發科 (MediaTek)</option>
+            <option value="2330">2330 台積電 (TSMC)</option>
             <option value="2317">2317 鴻海 (Foxconn)</option>
+            <option value="2454">2454 聯發科 (MediaTek)</option>
+            <option value="2382">2382 廣達</option>
+            <option value="3231">3231 緯創</option>
+            <option value="6669">6669 緯穎</option>
+            <option value="2376">2376 技嘉</option>
+            <option value="3017">3017 奇鋐</option>
+            <option value="3324">3324 雙鴻</option>
+            <option value="2308">2308 台達電</option>
+            <option value="3711">3711 日月光投控</option>
+            <option value="3034">3034 聯詠</option>
+            <option value="2379">2379 瑞昱</option>
+            <option value="3661">3661 世芯-KY</option>
+            <option value="3443">3443 創意</option>
+            <option value="2603">2603 長榮</option>
+            <option value="3008">3008 大立光</option>
+            <option value="2881">2881 富邦金</option>
+            <option value="2882">2882 國泰金</option>
+            <option value="3037">3037 欣興</option>
             <option value="2303">2303 聯電 (UMC)</option>
-            <option value="3711">3711 日月光 (ASE)</option>
-            <option value="2882">2882 國泰金 (Cathay Financial)</option>
-            <option value="2881">2881 富邦金 (Fubon Financial)</option>
-            <option value="2886">2886 兆豐金 (Mega Financial)</option>
+            <option value="2886">2886 兆豐金</option>
           </select>
-          <button class="select-all-btn" onclick="toggleSelectAll()">
-            Select All
-          </button>
+          <div
+            style="display: flex; gap: 4px; flex-wrap: wrap; margin-top: 2px"
+          >
+            <button class="select-all-btn" onclick="toggleSelectAll()">
+              Select All
+            </button>
+            <button class="select-all-btn" onclick="toggleAddStock()">
+              + Add Stock
+            </button>
+          </div>
+          <div id="addStockForm" style="display: none">
+            <input type="text" id="newStockCode" placeholder="Code e.g. 2412" />
+            <input
+              type="text"
+              id="newStockName"
+              placeholder="Name e.g. 中華電"
+            />
+            <button class="select-all-btn" onclick="addStock()">Confirm</button>
+          </div>
         </div>
         <label
           >Option Type
@@ -277,14 +318,28 @@
         <div class="stock-select">
           <span>Stock (multi-select)</span>
           <select id="ivStockSelect" multiple>
-            <option value="2330" selected>2330 台積電 (TSMC)</option>
-            <option value="2454">2454 聯發科 (MediaTek)</option>
+            <option value="2330">2330 台積電 (TSMC)</option>
             <option value="2317">2317 鴻海 (Foxconn)</option>
+            <option value="2454">2454 聯發科 (MediaTek)</option>
+            <option value="2382">2382 廣達</option>
+            <option value="3231">3231 緯創</option>
+            <option value="6669">6669 緯穎</option>
+            <option value="2376">2376 技嘉</option>
+            <option value="3017">3017 奇鋐</option>
+            <option value="3324">3324 雙鴻</option>
+            <option value="2308">2308 台達電</option>
+            <option value="3711">3711 日月光投控</option>
+            <option value="3034">3034 聯詠</option>
+            <option value="2379">2379 瑞昱</option>
+            <option value="3661">3661 世芯-KY</option>
+            <option value="3443">3443 創意</option>
+            <option value="2603">2603 長榮</option>
+            <option value="3008">3008 大立光</option>
+            <option value="2881">2881 富邦金</option>
+            <option value="2882">2882 國泰金</option>
+            <option value="3037">3037 欣興</option>
             <option value="2303">2303 聯電 (UMC)</option>
-            <option value="3711">3711 日月光 (ASE)</option>
-            <option value="2882">2882 國泰金 (Cathay Financial)</option>
-            <option value="2881">2881 富邦金 (Fubon Financial)</option>
-            <option value="2886">2886 兆豐金 (Mega Financial)</option>
+            <option value="2886">2886 兆豐金</option>
           </select>
           <button class="select-all-btn" onclick="toggleSelectAllIV()">
             Select All
@@ -316,6 +371,31 @@
     </div>
 
     <script>
+      const DEFAULT_STOCKS = [
+        "2330",
+        "2317",
+        "2454",
+        "2382",
+        "3231",
+        "6669",
+        "2376",
+        "3017",
+        "3324",
+        "2308",
+        "3711",
+        "3034",
+        "2379",
+        "3661",
+        "3443",
+        "2603",
+        "3008",
+        "2881",
+        "2882",
+        "3037",
+        "2303",
+        "2886",
+      ];
+
       let currentData = [];
       let sortCol = null;
       let sortAsc = true;
@@ -347,6 +427,68 @@
         for (let opt of select.options) opt.selected = allSelectedIV;
         document.querySelectorAll(".select-all-btn")[1].textContent =
           allSelectedIV ? "Deselect All" : "Select All";
+      }
+
+      function toggleAddStock() {
+        const form = document.getElementById("addStockForm");
+        form.style.display = form.style.display === "none" ? "flex" : "none";
+      }
+
+      async function addStock() {
+        const code = document.getElementById("newStockCode").value.trim();
+        const name = document.getElementById("newStockName").value.trim();
+        if (!code) return;
+
+        const select = document.getElementById("stockSelect");
+        for (let opt of select.options) {
+          if (opt.value === code) {
+            toggleAddStock();
+            return;
+          }
+        }
+
+        const option = document.createElement("option");
+        option.value = code;
+        option.textContent = name ? `${code} ${name}` : code;
+        option.selected = true;
+        select.appendChild(option);
+
+        document.getElementById("newStockCode").value = "";
+        document.getElementById("newStockName").value = "";
+        toggleAddStock();
+        await saveCustomStocks();
+      }
+
+      async function loadCustomStocks() {
+        try {
+          const res = await fetch("/get_custom_stocks");
+          const stocks = await res.json();
+          const select = document.getElementById("stockSelect");
+          stocks.forEach((s) => {
+            for (let opt of select.options) {
+              if (opt.value === s.code) return;
+            }
+            const option = document.createElement("option");
+            option.value = s.code;
+            option.textContent = s.name ? `${s.code} ${s.name}` : s.code;
+            select.appendChild(option);
+          });
+        } catch (e) {}
+      }
+
+      async function saveCustomStocks() {
+        const select = document.getElementById("stockSelect");
+        const custom = Array.from(select.options)
+          .filter((o) => !DEFAULT_STOCKS.includes(o.value))
+          .map((o) => ({
+            code: o.value,
+            name: o.textContent.replace(o.value, "").trim(),
+          }));
+        await fetch("/save_custom_stocks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(custom),
+        });
       }
 
       function getFilters() {
@@ -551,6 +693,8 @@
           { responsive: true },
         );
       }
+
+      loadCustomStocks();
     </script>
   </body>
 </html>
