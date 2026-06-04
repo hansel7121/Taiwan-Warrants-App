@@ -111,6 +111,7 @@
         display: flex;
         gap: 8px;
         margin-bottom: 10px;
+        flex-wrap: wrap;
       }
       .sort-btns button {
         background: #555;
@@ -127,12 +128,16 @@
         color: #555;
         font-size: 14px;
       }
+      #tableContainer {
+        max-height: calc(100vh - 300px);
+        overflow-y: auto;
+        border-radius: 8px;
+      }
       table {
         width: 100%;
         border-collapse: collapse;
         background: white;
         border-radius: 8px;
-        overflow: hidden;
       }
       th {
         background: #0066cc;
@@ -141,6 +146,12 @@
         font-size: 13px;
         cursor: pointer;
         user-select: none;
+        white-space: nowrap;
+      }
+      thead th {
+        position: sticky;
+        top: 0;
+        z-index: 10;
       }
       th:hover {
         background: #0055aa;
@@ -150,6 +161,7 @@
         font-size: 13px;
         border-bottom: 1px solid #eee;
         text-align: right;
+        white-space: nowrap;
       }
       td:first-child,
       td:nth-child(2),
@@ -179,8 +191,10 @@
     <h1>📊 Warrant Scanner</h1>
 
     <div class="tab-bar">
-      <button class="active" onclick="switchTab('scanner')">Scanner</button>
-      <button onclick="switchTab('ivsurface')">IV Surface</button>
+      <button class="active" onclick="switchTab('scanner', this)">
+        Scanner
+      </button>
+      <button onclick="switchTab('ivsurface', this)">IV Surface</button>
     </div>
 
     <!-- SCANNER TAB -->
@@ -222,6 +236,14 @@
           >Min Leverage
           <input type="number" id="minLeverage" value="0" step="0.1" min="0" />
         </label>
+        <label
+          >Max Time Value %
+          <input type="number" id="maxTvPct" value="100" step="0.1" min="0" />
+        </label>
+        <label
+          >Min Volume
+          <input type="number" id="minVolume" value="0" min="0" />
+        </label>
         <div style="display: flex; flex-direction: column; gap: 8px">
           <button class="primary" onclick="fetchData()">Fetch Warrants</button>
           <button
@@ -239,7 +261,10 @@
         <button onclick="sortByColumn('leverage_calc', false)">
           Leverage ↓
         </button>
-        <button onclick="sortByColumn('time_value', true)">Time Value ↑</button>
+        <button onclick="sortByColumn('time_value_pct', true)">
+          Time Value % ↑
+        </button>
+        <button onclick="sortByColumn('volume', false)">Volume ↓</button>
       </div>
 
       <div id="status"></div>
@@ -297,7 +322,7 @@
       let allSelected = false;
       let allSelectedIV = false;
 
-      function switchTab(tab) {
+      function switchTab(tab, btn) {
         document
           .querySelectorAll(".tab-content")
           .forEach((el) => el.classList.remove("active"));
@@ -305,7 +330,7 @@
           .querySelectorAll(".tab-bar button")
           .forEach((el) => el.classList.remove("active"));
         document.getElementById("tab-" + tab).classList.add("active");
-        event.target.classList.add("active");
+        btn.classList.add("active");
       }
 
       function toggleSelectAll() {
@@ -332,6 +357,8 @@
           min_days: document.getElementById("minDays").value,
           max_days: document.getElementById("maxDays").value,
           min_leverage: document.getElementById("minLeverage").value,
+          max_tv_pct: document.getElementById("maxTvPct").value,
+          min_volume: document.getElementById("minVolume").value,
         };
       }
 
@@ -434,7 +461,6 @@
             "Please select at least one stock.";
           return;
         }
-
         document.getElementById("iv-status").textContent =
           "Fetching data and building surface...";
         document.getElementById("iv-plot").innerHTML = "";

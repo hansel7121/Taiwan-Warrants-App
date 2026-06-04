@@ -1,16 +1,26 @@
+import sys
+import io
+
+if sys.stdout is None:
+    sys.stdout = io.StringIO()
+if sys.stderr is None:
+    sys.stderr = io.StringIO()
+
 from flask import Flask, render_template, request, jsonify, Response
 import threading
 import webbrowser
 import warrant_logic
-import io
-import sys
 import os
 import numpy as np
 from scipy.interpolate import griddata
-import json
 
 base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-app = Flask(__name__, template_folder=os.path.join(base_dir, "templates"))
+app = Flask(
+    __name__,
+    template_folder=os.path.join(base_dir, "templates"),
+    static_folder=os.path.join(base_dir, "static"),
+)
+app.json.sort_keys = False
 
 
 @app.route("/")
@@ -26,12 +36,24 @@ def fetch():
     min_days = int(data.get("min_days", 0))
     max_days = int(data.get("max_days", 365))
     min_leverage = float(data.get("min_leverage", 0.0))
+    max_tv_pct = float(data.get("max_tv_pct", 100.0))
+    min_volume = int(data.get("min_volume", 0))
 
     df, error = warrant_logic.fetch_warrants(
-        stock_codes, option_type, min_days, max_days, min_leverage
+        stock_codes,
+        option_type,
+        min_days,
+        max_days,
+        min_leverage,
+        max_tv_pct,
+        min_volume,
     )
     if error and df.empty:
         return jsonify({"rows": [], "count": 0, "error": error})
+
+    print("Column order:", df.columns.tolist())
+    print("First row keys:", list(df.to_dict(orient="records")[0].keys()))
+
     return jsonify({"rows": df.to_dict(orient="records"), "count": len(df)})
 
 
@@ -43,9 +65,17 @@ def download():
     min_days = int(data.get("min_days", 0))
     max_days = int(data.get("max_days", 365))
     min_leverage = float(data.get("min_leverage", 0.0))
+    max_tv_pct = float(data.get("max_tv_pct", 100.0))
+    min_volume = int(data.get("min_volume", 0))
 
     df, error = warrant_logic.fetch_warrants(
-        stock_codes, option_type, min_days, max_days, min_leverage
+        stock_codes,
+        option_type,
+        min_days,
+        max_days,
+        min_leverage,
+        max_tv_pct,
+        min_volume,
     )
     output = io.StringIO()
     df.to_csv(output, index=False)
@@ -74,7 +104,6 @@ def iv_surface():
     codes = df_clean["warrant_code"].astype(str).tolist()
     names = df_clean["warrant_name"].tolist()
 
-    # interpolate surface
     xi = np.linspace(min(x), max(x), 80)
     yi = np.linspace(min(y), max(y), 80)
     xi_grid, yi_grid = np.meshgrid(xi, yi)

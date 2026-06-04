@@ -10,6 +10,25 @@ from scipy.optimize import brentq
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+COL_ORDER = [
+    "warrant_code",
+    "warrant_name",
+    "type",
+    "underlying_price",
+    "ask",
+    "bid",
+    "days_to_expiry",
+    "strike",
+    "exercise_ratio",
+    "volume",
+    "time_value",
+    "time_value_pct",
+    "iv_ask",
+    "iv_bid",
+    "delta_calc",
+    "leverage_calc",
+]
+
 
 def bs_price(S, K, T, r, sigma, ratio):
     if T <= 0 or sigma <= 0:
@@ -66,6 +85,7 @@ def get_warrant_info_batch(warrant_codes):
                 "FLD_N_STRIKE_PRC",
                 "FLD_N_UND_CONVER",
                 "FLD_RISK_RATE_FREE",
+                "FLD_WAR_TXN_VOLUME",
             ],
             "condition": [
                 {"field": "FLD_WAR_ID", "values": warrant_codes},
@@ -101,7 +121,7 @@ def get_warrant_info_batch(warrant_codes):
             exercise_ratio = float(raw["FLD_N_UND_CONVER"] or 0)
             r_free = float(raw["FLD_RISK_RATE_FREE"] or 0) / 100
 
-            if days_to_expiry <= 0 or ask <= 0 or bid <= 0:
+            if days_to_expiry <= 0 or ask <= 0:
                 continue
 
             T = days_to_expiry / 365.0
@@ -125,14 +145,18 @@ def get_warrant_info_batch(warrant_codes):
                 {
                     "warrant_code": raw["FLD_WAR_ID"],
                     "warrant_name": raw["FLD_WAR_NM"],
-                    "type": "Put" if raw["FLD_OPTION_TYPE"] == "1" else "Call",
+                    "type": "Put" if "售" in raw["FLD_WAR_NM"] else "Call",
                     "underlying_price": underlying_price,
                     "ask": ask,
                     "bid": bid,
                     "days_to_expiry": days_to_expiry,
                     "strike": strike,
                     "exercise_ratio": exercise_ratio,
+                    "volume": int(raw.get("FLD_WAR_TXN_VOLUME") or 0),
                     "time_value": round(time_value, 4),
+                    "time_value_pct": round(time_value / underlying_price * 100, 4)
+                    if underlying_price > 0
+                    else 0,
                     "iv_ask": round(iv_ask, 4),
                     "iv_bid": round(iv_bid, 4),
                     "delta_calc": round(calc_delta, 4),
@@ -142,11 +166,19 @@ def get_warrant_info_batch(warrant_codes):
         except Exception:
             continue
 
-    return pd.DataFrame(rows)
+    if not rows:
+        return pd.DataFrame(columns=COL_ORDER)
+    return pd.DataFrame(rows)[COL_ORDER]
 
 
 def fetch_warrants(
-    stock_codes, option_type="All", min_days=0, max_days=365, min_leverage=0.0
+    stock_codes,
+    option_type="All",
+    min_days=0,
+    max_days=365,
+    min_leverage=0.0,
+    max_tv_pct=100.0,
+    min_volume=0,
 ):
     today = datetime.today()
 
@@ -176,7 +208,7 @@ def fetch_warrants(
         ]
         all_codes.extend(codes)
 
-    all_codes = list(set(all_codes))  # deduplicate
+    all_codes = list(set(all_codes))
 
     if not all_codes:
         return pd.DataFrame(), "No warrants found"
@@ -188,8 +220,11 @@ def fetch_warrants(
         dfs.append(get_warrant_info_batch(chunk))
 
     df = pd.concat(dfs, ignore_index=True)
+    df = df[COL_ORDER]
     df = df[(df["days_to_expiry"] >= min_days) & (df["days_to_expiry"] <= max_days)]
     df = df[df["leverage_calc"] >= min_leverage]
+    df = df[df["time_value_pct"] <= max_tv_pct]
+    df = df[df["volume"] >= min_volume]
     if option_type != "All":
         df = df[df["type"] == option_type]
 
@@ -198,7 +233,13 @@ def fetch_warrants(
 
 def fetch_iv_surface(stock_codes, option_type="All"):
     df, error = fetch_warrants(
-        stock_codes, option_type=option_type, min_days=0, max_days=666, min_leverage=0.0
+        stock_codes,
+        option_type=option_type,
+        min_days=0,
+        max_days=666,
+        min_leverage=0.0,
+        max_tv_pct=100.0,
+        min_volume=0,
     )
     if df.empty:
         return None, error or "No data"
