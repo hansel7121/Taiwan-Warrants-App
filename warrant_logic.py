@@ -9,6 +9,14 @@ from scipy.optimize import brentq
 import json
 import re
 import asyncio
+import threading
+import os
+import sys
+
+if getattr(sys, "frozen", False):
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(
+        os.path.dirname(sys.executable), "ms-playwright"
+    )
 from playwright.async_api import async_playwright
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -40,6 +48,7 @@ COL_ORDER = [
 ]
 
 _cmoney_key = None
+_cmoney_key_event = threading.Event()
 
 
 def bs_price(S, K, T, r, sigma, ratio):
@@ -82,12 +91,15 @@ def implied_vol(price, S, K, T, r, ratio):
 
 
 async def _fetch_cmoney_key_async():
+    print("PW: launching chromium", flush=True)
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
+        print("PW: browser launched", flush=True)
+        context = await browser.new_context()
+        page = await context.new_page()
         cmkey = None
 
-        async def handle_request(request):
+        def handle_request(request):
             nonlocal cmkey
             if "mainpage.ashx" in request.url and "cmkey" in request.url:
                 match = re.search(r"cmkey=([^&]+)", request.url)
@@ -100,22 +112,48 @@ async def _fetch_cmoney_key_async():
         await page.goto(
             "https://www.cmoney.tw/finance/warrantsquery.aspx?warrant=051666"
         )
-        await page.wait_for_timeout(5000)
+        print("PW: page loaded, waiting for key", flush=True)
+        for _ in range(100):
+            if cmkey:
+                break
+            await asyncio.sleep(0.1)
+
+        print(f"PW: done, key={'found' if cmkey else 'NOT found'}", flush=True)
         await browser.close()
         return cmkey
+
+
+def _background_fetch_key():
+    global _cmoney_key
+    print("BG: starting key fetch", flush=True)
+    try:
+        _cmoney_key = asyncio.run(_fetch_cmoney_key_async())
+        print("BG: key fetched successfully", flush=True)
+    except Exception as e:
+        print(f"BG: key fetch failed: {e}", flush=True)
+        _cmoney_key = None
+    finally:
+        _cmoney_key_event.set()
+
+
+def prefetch_cmoney_key():
+    t = threading.Thread(target=_background_fetch_key, daemon=True)
+    t.start()
 
 
 def get_cmoney_key():
     global _cmoney_key
     if _cmoney_key is None:
-        _cmoney_key = asyncio.run(_fetch_cmoney_key_async())
+        _cmoney_key_event.wait(timeout=30)
     return _cmoney_key
 
 
 def refresh_cmoney_key():
     global _cmoney_key
+    _cmoney_key_event.clear()
     _cmoney_key = None
-    return get_cmoney_key()
+    _background_fetch_key()
+    return _cmoney_key
 
 
 def fetch_one_cmoney(code, cmkey):

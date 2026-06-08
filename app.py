@@ -158,5 +158,9 @@ def open_browser():
 
 
 if __name__ == "__main__":
+    print("Step 1: starting browser timer", flush=True)
     threading.Timer(1.5, open_browser).start()
+    print("Step 2: starting cmoney key prefetch", flush=True)
+    warrant_logic.prefetch_cmoney_key()
+    print("Step 3: starting flask", flush=True)
     app.run(debug=False)
