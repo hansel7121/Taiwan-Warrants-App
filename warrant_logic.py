@@ -1,14 +1,24 @@
 import twstock
 import requests
-import json
 import pandas as pd
 import urllib3
 from datetime import datetime
 import numpy as np
 from scipy.stats import norm
 from scipy.optimize import brentq
+import json
+import re
+import asyncio
+from playwright.async_api import async_playwright
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+CMONEY_URL = "https://www.cmoney.tw/finance/ashx/mainpage.ashx"
+CMONEY_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://www.cmoney.tw/finance/warrantsquery.aspx",
+}
 
 COL_ORDER = [
     "warrant_code",
@@ -28,6 +38,8 @@ COL_ORDER = [
     "delta_calc",
     "leverage_calc",
 ]
+
+_cmoney_key = None
 
 
 def bs_price(S, K, T, r, sigma, ratio):
@@ -69,71 +81,136 @@ def implied_vol(price, S, K, T, r, ratio):
         return np.nan
 
 
-def get_warrant_info_batch(warrant_codes):
-    url = "https://www.warrantwin.com.tw/eyuanta/ws/GetWarData.ashx"
-    payload = {
-        "format": "JSON",
-        "factor": {
-            "columns": [
-                "FLD_WAR_ID",
-                "FLD_WAR_NM",
-                "FLD_OPTION_TYPE",
-                "FLD_OBJ_TXN_PRICE",
-                "FLD_WAR_BUY_PRICE",
-                "FLD_WAR_SELL_PRICE",
-                "FLD_DUR_END",
-                "FLD_N_STRIKE_PRC",
-                "FLD_N_UND_CONVER",
-                "FLD_RISK_RATE_FREE",
-                "FLD_WAR_TXN_VOLUME",
-            ],
-            "condition": [
-                {"field": "FLD_WAR_ID", "values": warrant_codes},
-                {"field": "FLD_WAR_TYPE", "values": ["1", "2"]},
-            ],
-            "orderby": {
-                "field": "FLD_WAR_TXN_VOLUME",
-                "sort": "DESC",
-                "agtfirst": "980",
+async def _fetch_cmoney_key_async():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        cmkey = None
+
+        async def handle_request(request):
+            nonlocal cmkey
+            if "mainpage.ashx" in request.url and "cmkey" in request.url:
+                match = re.search(r"cmkey=([^&]+)", request.url)
+                if match:
+                    import urllib.parse
+
+                    cmkey = urllib.parse.unquote(match.group(1))
+
+        page.on("request", handle_request)
+        await page.goto(
+            "https://www.cmoney.tw/finance/warrantsquery.aspx?warrant=051666"
+        )
+        await page.wait_for_timeout(5000)
+        await browser.close()
+        return cmkey
+
+
+def get_cmoney_key():
+    global _cmoney_key
+    if _cmoney_key is None:
+        _cmoney_key = asyncio.run(_fetch_cmoney_key_async())
+    return _cmoney_key
+
+
+def refresh_cmoney_key():
+    global _cmoney_key
+    _cmoney_key = None
+    return get_cmoney_key()
+
+
+def fetch_one_cmoney(code, cmkey):
+    try:
+        r = requests.get(
+            CMONEY_URL,
+            params={
+                "action": "GetWarrantData",
+                "cmkey": cmkey,
+                "commKey": code,
             },
-        },
-        "pagination": {"row": len(warrant_codes), "page": "1"},
-    }
-    headers = {
-        "Referer": "https://www.warrantwin.com.tw/eyuanta/Warrant/Info.aspx",
-        "User-Agent": "Mozilla/5.0",
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
-    r = requests.post(
-        url, data={"data": json.dumps(payload)}, headers=headers, verify=False
-    )
-    results = r.json().get("result", [])
+            headers=CMONEY_HEADERS,
+            verify=False,
+            timeout=5,
+        )
+        data = r.json()
+        if "Warrant" in data and "Stock" in data:
+            return code, data
+        if data.get("Error") == -3:
+            return code, "KEY_EXPIRED"
+    except Exception:
+        pass
+    return code, None
 
+
+def get_cmoney_prices(codes):
+    global _cmoney_key
+    cmkey = get_cmoney_key()
+
+    results = {}
+    key_expired = False
+
+    with ThreadPoolExecutor(max_workers=100) as executor:
+        futures = {
+            executor.submit(fetch_one_cmoney, code, cmkey): code for code in codes
+        }
+        for future in as_completed(futures):
+            code, data = future.result()
+            if data == "KEY_EXPIRED":
+                key_expired = True
+            elif data is not None:
+                results[code] = data
+
+    if key_expired:
+        cmkey = refresh_cmoney_key()
+        results = {}
+        with ThreadPoolExecutor(max_workers=100) as executor:
+            futures = {
+                executor.submit(fetch_one_cmoney, code, cmkey): code for code in codes
+            }
+            for future in as_completed(futures):
+                code, data = future.result()
+                if data and data != "KEY_EXPIRED":
+                    results[code] = data
+
+    return results
+
+
+def build_warrant_df(cmoney_results):
+    r_free_default = 0.02
     rows = []
-    for raw in results:
-        try:
-            expiry = datetime.strptime(raw["FLD_DUR_END"], "%Y%m%d")
-            days_to_expiry = (expiry - datetime.today()).days
-            underlying_price = float(raw["FLD_OBJ_TXN_PRICE"] or 0)
-            ask = float(raw["FLD_WAR_SELL_PRICE"] or 0)
-            bid = float(raw["FLD_WAR_BUY_PRICE"] or 0)
-            strike = float(raw["FLD_N_STRIKE_PRC"] or 0)
-            exercise_ratio = float(raw["FLD_N_UND_CONVER"] or 0)
-            r_free = float(raw["FLD_RISK_RATE_FREE"] or 0) / 100
 
-            if days_to_expiry <= 0 or ask <= 0:
+    for code, data in cmoney_results.items():
+        try:
+            w = data["Warrant"]
+            s = data["Stock"]
+
+            underlying_price = float(s.get("SalePr") or 0)
+            ask = float(w.get("SellPr1") or 0)
+            bid = float(w.get("BuyPr1") or 0)
+            volume = int(w.get("SaleQty") or 0)
+            warrant_name = w.get("CommName", "")
+            days_to_expiry = int(w.get("LastDays") or 0)
+            strike = float(w.get("StrikePr") or 0)
+            exercise_ratio = float(w.get("UserRate") or 0)
+            r_free = r_free_default
+
+            if ask <= 0 or underlying_price <= 0 or days_to_expiry <= 0:
                 continue
 
             T = days_to_expiry / 365.0
+
             iv_ask = implied_vol(
                 ask, underlying_price, strike, T, r_free, exercise_ratio
             )
-            iv_bid = implied_vol(
-                bid, underlying_price, strike, T, r_free, exercise_ratio
+            iv_bid = (
+                implied_vol(bid, underlying_price, strike, T, r_free, exercise_ratio)
+                if bid > 0
+                else np.nan
             )
 
-            if np.isnan(iv_ask) or np.isnan(iv_bid):
+            if np.isnan(iv_ask):
                 continue
+            if np.isnan(iv_bid):
+                iv_bid = iv_ask
 
             calc_delta = bs_delta(
                 underlying_price, strike, T, r_free, iv_ask, exercise_ratio
@@ -143,16 +220,16 @@ def get_warrant_info_batch(warrant_codes):
 
             rows.append(
                 {
-                    "warrant_code": raw["FLD_WAR_ID"],
-                    "warrant_name": raw["FLD_WAR_NM"],
-                    "type": "Put" if "售" in raw["FLD_WAR_NM"] else "Call",
+                    "warrant_code": code,
+                    "warrant_name": warrant_name,
+                    "type": "Put" if int(w.get("CallorPut") or 1) == 2 else "Call",
                     "underlying_price": underlying_price,
                     "ask": ask,
                     "bid": bid,
                     "days_to_expiry": days_to_expiry,
                     "strike": strike,
                     "exercise_ratio": exercise_ratio,
-                    "volume": int(raw.get("FLD_WAR_TXN_VOLUME") or 0),
+                    "volume": volume,
                     "time_value": round(time_value, 4),
                     "time_value_pct": round(time_value / underlying_price * 100, 4)
                     if underlying_price > 0
@@ -213,13 +290,16 @@ def fetch_warrants(
     if not all_codes:
         return pd.DataFrame(), "No warrants found"
 
-    chunk_size = 200
-    dfs = []
-    for i in range(0, len(all_codes), chunk_size):
-        chunk = all_codes[i : i + chunk_size]
-        dfs.append(get_warrant_info_batch(chunk))
+    cmoney_results = get_cmoney_prices(all_codes)
 
-    df = pd.concat(dfs, ignore_index=True)
+    if not cmoney_results:
+        return pd.DataFrame(), "No active warrants found"
+
+    df = build_warrant_df(cmoney_results)
+
+    if df.empty:
+        return pd.DataFrame(), "No warrants passed filters"
+
     df = df[COL_ORDER]
     df = df[(df["days_to_expiry"] >= min_days) & (df["days_to_expiry"] <= max_days)]
     df = df[df["leverage_calc"] >= min_leverage]
