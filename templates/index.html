@@ -472,46 +472,80 @@
     <!-- IV SURFACE TAB -->
     <div id="tab-ivsurface" class="tab-content">
       <main>
-        <div class="filters">
-          <div class="stock-select">
-            <span>Stock (multi-select)</span>
-            <select id="ivStockSelect" multiple>
-              <option value="2330">2330 台積電 (TSMC)</option>
-              <option value="2317">2317 鴻海 (Foxconn)</option>
-              <option value="2454">2454 聯發科 (MediaTek)</option>
-              <option value="2382">2382 廣達</option>
-              <option value="3231">3231 緯創</option>
-              <option value="6669">6669 緯穎</option>
-              <option value="2376">2376 技嘉</option>
-              <option value="3017">3017 奇鋐</option>
-              <option value="3324">3324 雙鴻</option>
-              <option value="2308">2308 台達電</option>
-              <option value="3711">3711 日月光投控</option>
-              <option value="3034">3034 聯詠</option>
-              <option value="2379">2379 瑞昱</option>
-              <option value="3661">3661 世芯-KY</option>
-              <option value="3443">3443 創意</option>
-              <option value="2603">2603 長榮</option>
-              <option value="3008">3008 大立光</option>
-              <option value="2881">2881 富邦金</option>
-              <option value="2882">2882 國泰金</option>
-              <option value="3037">3037 欣興</option>
-              <option value="2303">2303 聯電 (UMC)</option>
-              <option value="2886">2886 兆豐金</option>
-            </select>
-            <button class="sm" onclick="toggleSelectAllIV()">Select All</button>
+        <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
+
+          <!-- Source toggle -->
+          <div style="display:flex;gap:0;border:1px solid var(--border);border-radius:5px;overflow:hidden">
+            <button id="iv-src-warrants" onclick="setIVSource('warrants')"
+              style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--accent);color:#fff">
+              Warrants
+            </button>
+            <button id="iv-src-options" onclick="setIVSource('options')"
+              style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--surface);color:var(--muted)">
+              Options
+            </button>
           </div>
-          <label>Option Type
-            <select id="ivOptionType">
-              <option value="All">All</option>
-              <option value="Call">Call</option>
-              <option value="Put">Put</option>
-            </select>
-          </label>
-          <label>Highlight Warrant Code
-            <input type="text" id="highlightCode" placeholder="e.g. 061563" style="width:160px" />
-          </label>
-          <button class="primary" onclick="fetchIVSurface()">Plot IV Surface</button>
+
+          <!-- Warrants controls -->
+          <div id="iv-warrants-controls" style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
+            <div class="stock-select">
+              <span>Stock (multi-select)</span>
+              <select id="ivStockSelect" multiple>
+                <option value="2330">2330 台積電 (TSMC)</option>
+                <option value="2317">2317 鴻海 (Foxconn)</option>
+                <option value="2454">2454 聯發科 (MediaTek)</option>
+                <option value="2382">2382 廣達</option>
+                <option value="3231">3231 緯創</option>
+                <option value="6669">6669 緯穎</option>
+                <option value="2376">2376 技嘉</option>
+                <option value="3017">3017 奇鋐</option>
+                <option value="3324">3324 雙鴻</option>
+                <option value="2308">2308 台達電</option>
+                <option value="3711">3711 日月光投控</option>
+                <option value="3034">3034 聯詠</option>
+                <option value="2379">2379 瑞昱</option>
+                <option value="3661">3661 世芯-KY</option>
+                <option value="3443">3443 創意</option>
+                <option value="2603">2603 長榮</option>
+                <option value="3008">3008 大立光</option>
+                <option value="2881">2881 富邦金</option>
+                <option value="2882">2882 國泰金</option>
+                <option value="3037">3037 欣興</option>
+                <option value="2303">2303 聯電 (UMC)</option>
+                <option value="2886">2886 兆豐金</option>
+              </select>
+              <button class="sm" onclick="toggleSelectAllIV()">Select All</button>
+            </div>
+            <label>Option Type
+              <select id="ivOptionType">
+                <option value="All">All</option>
+                <option value="Call">Call</option>
+                <option value="Put">Put</option>
+              </select>
+            </label>
+            <label>Highlight Warrant Code
+              <input type="text" id="highlightCode" placeholder="e.g. 061563" style="width:160px" />
+            </label>
+            <button class="primary" onclick="fetchIVSurface()">Plot IV Surface</button>
+          </div>
+
+          <!-- Options controls -->
+          <div id="iv-options-controls" style="display:none;gap:20px;align-items:flex-end;flex-wrap:wrap">
+            <label>Product
+              <select id="ivOptProduct">
+                <option value="TXO">TXO 台指選擇權</option>
+                <option value="2330">2330 台積電選擇權</option>
+              </select>
+            </label>
+            <label>Call / Put
+              <select id="ivOptType">
+                <option value="Call">Call</option>
+                <option value="Put">Put</option>
+              </select>
+            </label>
+            <button class="primary" onclick="fetchIVSurfaceOptions()">Plot IV Surface</button>
+          </div>
+
         </div>
 
         <div id="iv-status"></div>
@@ -697,6 +731,79 @@
         a.href = url;
         a.download = "warrants.csv";
         a.click();
+      }
+
+      function setIVSource(src) {
+        const isOpt = src === "options";
+        document.getElementById("iv-warrants-controls").style.display = isOpt ? "none" : "flex";
+        document.getElementById("iv-options-controls").style.display  = isOpt ? "flex" : "none";
+        document.getElementById("iv-src-warrants").style.background = isOpt ? "var(--surface)" : "var(--accent)";
+        document.getElementById("iv-src-warrants").style.color = isOpt ? "var(--muted)" : "#fff";
+        document.getElementById("iv-src-options").style.background  = isOpt ? "var(--accent)" : "var(--surface)";
+        document.getElementById("iv-src-options").style.color  = isOpt ? "#fff" : "var(--muted)";
+        document.getElementById("iv-plot").innerHTML = "";
+        document.getElementById("iv-status").textContent = "";
+      }
+
+      async function fetchIVSurfaceOptions() {
+        document.getElementById("iv-status").textContent = "Building surface…";
+        document.getElementById("iv-plot").innerHTML = "";
+        const payload = {
+          stock_codes: [document.getElementById("ivOptProduct").value],
+          option_type: document.getElementById("ivOptType").value,
+        };
+        let data;
+        try {
+          const res = await fetch("/iv_surface_options", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          data = await res.json();
+        } catch(e) {
+          document.getElementById("iv-status").textContent = "Error: " + e.message;
+          return;
+        }
+        if (data.error) {
+          document.getElementById("iv-status").textContent = "Error: " + data.error;
+          return;
+        }
+        const product = document.getElementById("ivOptProduct").options[document.getElementById("ivOptProduct").selectedIndex].text;
+        const callPut = document.getElementById("ivOptType").value;
+        document.getElementById("iv-status").textContent = `${data.scatter_x.length} contracts plotted`;
+        const traces = [
+          {
+            type: "surface",
+            x: data.x, y: data.y, z: data.z,
+            colorscale: "Viridis",
+            opacity: 0.85,
+            colorbar: { title: "IV (%)", tickfont: { color: "#8b90a0" }, titlefont: { color: "#8b90a0" } },
+            name: "IV Surface",
+          },
+          {
+            type: "scatter3d",
+            x: data.scatter_x, y: data.scatter_y, z: data.scatter_z,
+            mode: "markers",
+            marker: { size: 4, color: callPut === "Call" ? "#f87171" : "#4ade80", opacity: 0.7 },
+            text: data.labels,
+            hovertemplate: "%{text}<br>Strike: %{x:.0f}<br>DTE: %{y}<br>IV: %{z:.1f}%<extra></extra>",
+            name: callPut + "s",
+          },
+        ];
+        Plotly.newPlot("iv-plot", traces, {
+          title: { text: `${product} ${callPut} IV Surface`, font: { color: "#e2e8f0", size: 15 } },
+          paper_bgcolor: "#13161f",
+          plot_bgcolor: "#13161f",
+          scene: {
+            bgcolor: "#0d0f16",
+            xaxis: { title: "Strike", color: "#8b90a0", gridcolor: "#252836", zerolinecolor: "#252836" },
+            yaxis: { title: "Days to Expiry", color: "#8b90a0", gridcolor: "#252836", zerolinecolor: "#252836" },
+            zaxis: { title: "IV (%)", range: [0, 150], color: "#8b90a0", gridcolor: "#252836", zerolinecolor: "#252836" },
+            camera: { eye: { x: 1.5, y: -1.5, z: 1.0 } },
+          },
+          legend: { font: { color: "#8b90a0" }, bgcolor: "#13161f" },
+          margin: { l: 0, r: 0, t: 48, b: 0 },
+        }, { responsive: true });
       }
 
       async function fetchIVSurface() {

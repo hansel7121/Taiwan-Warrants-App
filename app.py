@@ -150,6 +150,42 @@ def download_options():
     )
 
 
+@app.route("/iv_surface_options", methods=["POST"])
+def iv_surface_options():
+    data = request.json
+    stock_codes = data.get("stock_codes", ["TXO"])
+    option_type = data.get("option_type", "Call")
+    try:
+        df = options_logic.fetch_options(stock_codes, option_type, min_days=1)
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+    df = df[df["iv_ask"].notna() & (df["iv_ask"] > 0)]
+    if len(df) < 4:
+        return jsonify({"error": "Not enough data points to build a surface."})
+
+    x = df["strike"].values.tolist()
+    y = df["days_to_expiry"].values.tolist()
+    z = (df["iv_ask"].values * 100).tolist()
+    labels = df["contract"].tolist()
+
+    xi = np.linspace(min(x), max(x), 60)
+    yi = np.linspace(min(y), max(y), 60)
+    xi_grid, yi_grid = np.meshgrid(xi, yi)
+    zi = griddata((x, y), z, (xi_grid, yi_grid), method="linear")
+    zi = np.where(np.isnan(zi), None, zi)
+
+    return jsonify({
+        "x": xi.tolist(),
+        "y": yi.tolist(),
+        "z": zi.tolist(),
+        "scatter_x": x,
+        "scatter_y": y,
+        "scatter_z": z,
+        "labels": labels,
+    })
+
+
 @app.route("/iv_surface", methods=["POST"])
 def iv_surface():
     data = request.json
