@@ -41,6 +41,7 @@ COL_ORDER = [
     "volume",
     "time_value",
     "time_value_pct",
+    "time_value_am",
     "iv_ask",
     "iv_bid",
     "delta_calc",
@@ -51,18 +52,22 @@ _cmoney_key = None
 _cmoney_key_event = threading.Event()
 
 
-def bs_price(S, K, T, r, sigma, ratio):
+def bs_price(S, K, T, r, sigma, ratio, is_put=False):
     if T <= 0 or sigma <= 0:
         return 0.0
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
+    if is_put:
+        return ratio * (K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1))
     return ratio * (S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2))
 
 
-def bs_delta(S, K, T, r, sigma, ratio):
+def bs_delta(S, K, T, r, sigma, ratio, is_put=False):
     if T <= 0 or sigma <= 0:
         return 0.0
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    if is_put:
+        return (norm.cdf(d1) - 1) * ratio
     return norm.cdf(d1) * ratio
 
 
@@ -72,15 +77,15 @@ def calc_real_leverage(S, delta, ask):
     return S * delta / ask
 
 
-def implied_vol(price, S, K, T, r, ratio):
+def implied_vol(price, S, K, T, r, ratio, is_put=False):
     if price <= 0 or T <= 0:
         return np.nan
-    intrinsic = max(0, (S - K) * ratio)
+    intrinsic = max(0, (K - S) * ratio) if is_put else max(0, (S - K) * ratio)
     if price <= intrinsic:
         return np.nan
     try:
         return brentq(
-            lambda sigma: bs_price(S, K, T, r, sigma, ratio) - price,
+            lambda sigma: bs_price(S, K, T, r, sigma, ratio, is_put) - price,
             1e-6,
             10.0,
             xtol=1e-6,
@@ -231,16 +236,18 @@ def build_warrant_df(cmoney_results):
             exercise_ratio = float(w.get("UserRate") or 0)
             r_free = r_free_default
 
+            is_put = int(w.get("CallorPut") or 1) == 2
+
             if ask <= 0 or underlying_price <= 0 or days_to_expiry <= 0:
                 continue
 
             T = days_to_expiry / 365.0
 
             iv_ask = implied_vol(
-                ask, underlying_price, strike, T, r_free, exercise_ratio
+                ask, underlying_price, strike, T, r_free, exercise_ratio, is_put
             )
             iv_bid = (
-                implied_vol(bid, underlying_price, strike, T, r_free, exercise_ratio)
+                implied_vol(bid, underlying_price, strike, T, r_free, exercise_ratio, is_put)
                 if bid > 0
                 else np.nan
             )
@@ -251,16 +258,23 @@ def build_warrant_df(cmoney_results):
                 iv_bid = iv_ask
 
             calc_delta = bs_delta(
-                underlying_price, strike, T, r_free, iv_ask, exercise_ratio
+                underlying_price, strike, T, r_free, iv_ask, exercise_ratio, is_put
             )
-            calc_leverage = calc_real_leverage(underlying_price, calc_delta, ask)
-            time_value = (ask / exercise_ratio) + strike - underlying_price
+            calc_leverage = calc_real_leverage(underlying_price, abs(calc_delta), ask)
+
+            if is_put:
+                intrinsic = max(0, strike - underlying_price) * exercise_ratio
+                time_value = (ask / exercise_ratio) + underlying_price - strike
+            else:
+                intrinsic = max(0, underlying_price - strike) * exercise_ratio
+                time_value = (ask / exercise_ratio) + strike - underlying_price
+            time_value_am = ask - intrinsic
 
             rows.append(
                 {
                     "warrant_code": code,
                     "warrant_name": warrant_name,
-                    "type": "Put" if int(w.get("CallorPut") or 1) == 2 else "Call",
+                    "type": "Put" if is_put else "Call",
                     "underlying_price": underlying_price,
                     "ask": ask,
                     "bid": bid,
@@ -272,6 +286,7 @@ def build_warrant_df(cmoney_results):
                     "time_value_pct": round(time_value / underlying_price * 100, 4)
                     if underlying_price > 0
                     else 0,
+                    "time_value_am": round(time_value_am, 4),
                     "iv_ask": round(iv_ask, 4),
                     "iv_bid": round(iv_bid, 4),
                     "delta_calc": round(calc_delta, 4),
