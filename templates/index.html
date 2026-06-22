@@ -559,33 +559,57 @@
     <!-- ARB FINDER TAB -->
     <div id="tab-arb" class="tab-content">
       <main>
-        <div class="filters">
-          <label>Option Type
-            <select id="arbOptionType">
-              <option value="All">All</option>
-              <option value="Call">Call</option>
-              <option value="Put">Put</option>
-            </select>
-          </label>
-          <label>Max Strike Diff %
-            <input type="number" id="arbMaxStrikePct" value="3" step="0.5" min="0" max="20" style="width:80px"/>
-          </label>
-          <label>Max DTE Diff (days)
-            <input type="number" id="arbMaxDteDiff" value="5" min="0" max="30" style="width:70px"/>
-          </label>
-          <div class="action-group">
-            <button class="primary" onclick="fetchArbData()">Find Arb</button>
-            <button class="success" id="arbDownloadBtn" onclick="downloadArbCSV()" style="display:none">
-              Download CSV
+        <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
+
+          <!-- Mode toggle -->
+          <div style="display:flex;gap:0;border:1px solid var(--border);border-radius:5px;overflow:hidden">
+            <button id="arb-mode-direct" onclick="setArbMode('direct')"
+              style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--accent);color:#fff">
+              Direct Match
             </button>
+            <button id="arb-mode-pcp" onclick="setArbMode('pcp')"
+              style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--surface);color:var(--muted)">
+              PCP Match
+            </button>
+          </div>
+
+          <!-- Shared filters -->
+          <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
+            <label>Option Type
+              <select id="arbOptionType">
+                <option value="All">All</option>
+                <option value="Call">Call</option>
+                <option value="Put">Put</option>
+              </select>
+            </label>
+            <label>Max Strike Diff %
+              <input type="number" id="arbMaxStrikePct" value="3" step="0.5" min="0" max="20" style="width:80px"/>
+            </label>
+            <label>Max DTE Diff (days)
+              <input type="number" id="arbMaxDteDiff" value="5" min="0" max="30" style="width:70px"/>
+            </label>
+            <div class="action-group">
+              <button class="primary" id="arbFindBtn" onclick="runArb()">Find Arb</button>
+              <button class="success" id="arbDownloadBtn" onclick="downloadArbCSV()" style="display:none">
+                Download CSV
+              </button>
+            </div>
           </div>
         </div>
 
-        <div class="sort-btns">
+        <!-- Direct mode sort buttons -->
+        <div id="arb-sort-direct" class="sort-btns">
           <button onclick="sortArbBy('price_diff_pct', false)">Price Diff % ↓</button>
           <button onclick="sortArbBy('iv_diff', false)">IV Diff ↓</button>
           <button onclick="sortArbBy('dte_diff', true)">DTE Diff ↑</button>
           <button onclick="sortArbBy('strike_diff_pct', true)">Strike Diff ↑</button>
+        </div>
+
+        <!-- PCP mode sort buttons -->
+        <div id="arb-sort-pcp" class="sort-btns" style="display:none">
+          <button onclick="sortPcpBy('pcp_diff_pct', false)">PCP Diff % ↓</button>
+          <button onclick="sortPcpBy('dte_diff', true)">DTE Diff ↑</button>
+          <button onclick="sortPcpBy('strike_diff_pct', true)">Strike Diff ↑</button>
         </div>
 
         <div id="arb-status"></div>
@@ -927,6 +951,108 @@
         }, { responsive: true });
       }
 
+      // ── Arb PCP ────────────────────────────────────────────────────────
+      async function fetchPcpData() {
+        document.getElementById("arb-status").textContent = "Fetching warrants and options…";
+        document.getElementById("arb-tableContainer").innerHTML = "";
+        document.getElementById("arbDownloadBtn").style.display = "none";
+        let data;
+        try {
+          const res = await fetch("/arb_pcp", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(getArbFilters()),
+          });
+          data = await res.json();
+        } catch(e) {
+          document.getElementById("arb-status").textContent = "Error: " + e.message;
+          return;
+        }
+        if (data.error) {
+          document.getElementById("arb-status").textContent = "Error: " + data.error;
+          return;
+        }
+        currentPcpData = data.rows;
+        document.getElementById("arb-status").textContent =
+          `${data.count} PCP pairs — positive pcp_diff means warrant cheaper than synthetic (buy warrant, sell synthetic leg)`;
+        document.getElementById("arbDownloadBtn").style.display = "inline-block";
+        renderPcpTable(currentPcpData);
+      }
+
+      function renderPcpTable(rows) {
+        const container = document.getElementById("arb-tableContainer");
+        if (!rows.length) {
+          container.innerHTML = "<p style='padding:16px;color:var(--muted)'>No PCP matches found. Try relaxing thresholds.</p>";
+          return;
+        }
+        const cols = Object.keys(rows[0]);
+        let html = "<table><thead><tr>";
+        cols.forEach((c, i) => {
+          const arrow = pcpSortCol === i ? (pcpSortAsc ? " ▲" : " ▼") : "";
+          html += `<th onclick="sortPcpByIndex(${i})">${c}${arrow}</th>`;
+        });
+        html += "</tr></thead><tbody>";
+        rows.forEach(row => {
+          const wCls = row.warrant_type === "Call" ? "call" : "put";
+          const oCls = row.opt_type === "Call" ? "call" : "put";
+          html += "<tr>";
+          cols.forEach(c => {
+            let val = row[c] === null ? "—" : row[c];
+            if (c === "warrant_type") val = `<span class="${wCls}">${val}</span>`;
+            else if (c === "opt_type") val = `<span class="${oCls}">${val}</span>`;
+            else if (c === "pcp_diff_pct" && row[c] !== null) {
+              const cls = row[c] > 0 ? "put" : "call";
+              val = `<span class="${cls}">${val}%</span>`;
+            } else if (c === "pcp_diff" && row[c] !== null) {
+              const cls = row[c] > 0 ? "put" : "call";
+              val = `<span class="${cls}">${val}</span>`;
+            }
+            html += `<td>${val}</td>`;
+          });
+          html += "</tr>";
+        });
+        html += "</tbody></table>";
+        container.innerHTML = html;
+      }
+
+      function sortPcpByIndex(colIndex) {
+        if (!currentPcpData.length) return;
+        const key = Object.keys(currentPcpData[0])[colIndex];
+        if (pcpSortCol === colIndex) pcpSortAsc = !pcpSortAsc;
+        else { pcpSortCol = colIndex; pcpSortAsc = true; }
+        currentPcpData.sort((a, b) => {
+          const av = a[key], bv = b[key];
+          if (av === null) return 1; if (bv === null) return -1;
+          if (typeof av === "number") return pcpSortAsc ? av - bv : bv - av;
+          return pcpSortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+        });
+        renderPcpTable(currentPcpData);
+      }
+
+      function sortPcpBy(key, asc) {
+        if (!currentPcpData.length) return;
+        currentPcpData.sort((a, b) => {
+          const av = a[key] ?? (asc ? Infinity : -Infinity);
+          const bv = b[key] ?? (asc ? Infinity : -Infinity);
+          return asc ? av - bv : bv - av;
+        });
+        renderPcpTable(currentPcpData);
+      }
+
+      async function downloadArbCSV() {
+        const endpoint = arbMode === "pcp" ? "/arb_pcp_csv" : "/arb_finder_csv";
+        const filename = arbMode === "pcp" ? "arb_pcp.csv" : "arb_finder.csv";
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(getArbFilters()),
+        });
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = filename; a.click();
+      }
+
       // ── Options Scanner ────────────────────────────────────────────────
       function getOptionsFilters() {
         const select = document.getElementById("optionStockSelect");
@@ -1033,8 +1159,31 @@
 
       // ── Arb Finder ─────────────────────────────────────────────────────
       let currentArbData = [];
+      let currentPcpData = [];
       let arbSortCol = null;
       let arbSortAsc = true;
+      let pcpSortCol = null;
+      let pcpSortAsc = true;
+      let arbMode = "direct";
+
+      function setArbMode(mode) {
+        arbMode = mode;
+        const isDirect = mode === "direct";
+        document.getElementById("arb-mode-direct").style.background = isDirect ? "var(--accent)" : "var(--surface)";
+        document.getElementById("arb-mode-direct").style.color = isDirect ? "#fff" : "var(--muted)";
+        document.getElementById("arb-mode-pcp").style.background = isDirect ? "var(--surface)" : "var(--accent)";
+        document.getElementById("arb-mode-pcp").style.color = isDirect ? "var(--muted)" : "#fff";
+        document.getElementById("arb-sort-direct").style.display = isDirect ? "flex" : "none";
+        document.getElementById("arb-sort-pcp").style.display = isDirect ? "none" : "flex";
+        document.getElementById("arb-tableContainer").innerHTML = "";
+        document.getElementById("arb-status").textContent = "";
+        document.getElementById("arbDownloadBtn").style.display = "none";
+      }
+
+      function runArb() {
+        if (arbMode === "direct") fetchArbData();
+        else fetchPcpData();
+      }
 
       function getArbFilters() {
         return {
@@ -1128,18 +1277,6 @@
           return asc ? av - bv : bv - av;
         });
         renderArbTable(currentArbData);
-      }
-
-      async function downloadArbCSV() {
-        const res = await fetch("/arb_finder_csv", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(getArbFilters()),
-        });
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url; a.download = "arb_finder.csv"; a.click();
       }
 
       loadCustomStocks();
