@@ -1362,6 +1362,7 @@
       // ── PCP Trade Modal ─────────────────────────────────────────────────
       const R_FREE = 0.01875;
       let _pcpRow = null;
+      let _contractSize = 2000;
 
       function normCDF(x) {
         const a1=0.254829592,a2=-0.284496736,a3=1.421413741,a4=-1.453152027,a5=1.061405429,p=0.3275911;
@@ -1406,6 +1407,7 @@
         // Contract size = how many underlying shares one option contract controls
         const contractSize = (n && row.warrant_ask && row.warrant_per_share)
           ? Math.round(n * row.warrant_ask / row.warrant_per_share) : 2000;
+        _contractSize = contractSize;
 
         const modeLabel = mode === "direct" ? "Direct Match" : "PCP Arb";
         document.getElementById("pcp-modal-title").textContent =
@@ -1557,6 +1559,7 @@
 
       function renderPcpChart(dte) {
         const row = _pcpRow;
+        const contractSize = _contractSize;
         const S0 = row.underlying_price;
         const tau = dte / 365;
         const spots = [];
