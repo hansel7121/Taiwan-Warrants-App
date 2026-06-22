@@ -10,11 +10,10 @@ R = 0.01875  # Taiwan CBC benchmark rate
 
 TAIFEX_URL = "https://www.taifex.com.tw/cht/3/optDataDown"
 
-# TSMC individual stock options (commodity_id "2330") return no data from
-# TAIFEX's optDataDown endpoint — they appear to use a separate API.
-# Only TXO (TAIEX index options) is supported here.
 COMMODITY_MAP = {
-    "TXO": {"commodity_id": "TXO", "ticker": "^TWII", "exercise_ratio": 50},
+    "TXO":  {"commodity_ids": ["TXO"],         "ticker": "^TWII",   "exercise_ratio": 50},
+    # TSMC individual stock options use product codes CDA (A-series) + CDO (O-series)
+    "2330": {"commodity_ids": ["CDA", "CDO"],   "ticker": "2330.TW", "exercise_ratio": 1000},
 }
 
 # Module-level cache: (commodity_id -> (timestamp, DataFrame))
@@ -32,37 +31,37 @@ def _decode(content):
     return content.decode("big5", errors="replace")
 
 
-def _fetch_taifex(commodity_id):
+def _fetch_taifex(commodity_ids: list[str]) -> pd.DataFrame:
+    cache_key = ",".join(commodity_ids)
     now = time.time()
-    if commodity_id in _taifex_cache:
-        ts, cached_df = _taifex_cache[commodity_id]
+    if cache_key in _taifex_cache:
+        ts, cached_df = _taifex_cache[cache_key]
         if now - ts < _CACHE_TTL:
             return cached_df
 
     today = pd.Timestamp.today()
-    # Single request covering last 7 days — avoids one HTTP call per day
     start = (today - pd.Timedelta(days=7)).strftime("%Y/%m/%d")
     end = today.strftime("%Y/%m/%d")
-    r = requests.post(
-        TAIFEX_URL,
-        data={
-            "down_type": "1",
-            "commodity_id": commodity_id,
-            "queryStartDate": start,
-            "queryEndDate": end,
-        },
-        headers={"User-Agent": "Mozilla/5.0", "Referer": TAIFEX_URL},
-        timeout=15,
-    )
-    r.raise_for_status()
-    text = _decode(r.content)
-    lines = [l for l in text.strip().splitlines() if l.strip()]
-    if len(lines) <= 2:
-        raise RuntimeError(f"No data for {commodity_id} in last 7 trading days")
 
-    df = pd.read_csv(io.StringIO(text))
-    if df.empty:
-        raise RuntimeError(f"Empty response for {commodity_id}")
+    frames = []
+    for cid in commodity_ids:
+        r = requests.post(
+            TAIFEX_URL,
+            data={"down_type": "1", "commodity_id": cid,
+                  "queryStartDate": start, "queryEndDate": end},
+            headers={"User-Agent": "Mozilla/5.0", "Referer": TAIFEX_URL},
+            timeout=15,
+        )
+        r.raise_for_status()
+        text = _decode(r.content)
+        lines = [l for l in text.strip().splitlines() if l.strip()]
+        if len(lines) > 2:
+            frames.append(pd.read_csv(io.StringIO(text)))
+
+    if not frames:
+        raise RuntimeError(f"No data for {cache_key} in last 7 trading days")
+
+    df = pd.concat(frames, ignore_index=True)
 
     # Find the most recent date that has valid settlement prices
     date_col = next((c for c in df.columns if "交易日期" in c.strip()), None)
@@ -71,19 +70,15 @@ def _fetch_taifex(commodity_id):
         df["_settle_num"] = pd.to_numeric(
             df[settle_col].astype(str).str.strip().replace("-", ""), errors="coerce"
         )
-        dates_with_data = (
-            df[df["_settle_num"] > 0]
-            .groupby(date_col)
-            .size()
-        )
+        dates_with_data = df[df["_settle_num"] > 0].groupby(date_col).size()
         if dates_with_data.empty:
-            raise RuntimeError(f"No usable settlement data for {commodity_id}")
+            raise RuntimeError(f"No usable settlement data for {cache_key}")
         latest = dates_with_data.index.max()
         df = df[df[date_col] == latest].drop(columns=["_settle_num"])
     else:
         df = df.drop(columns=["_settle_num"], errors="ignore")
 
-    _taifex_cache[commodity_id] = (now, df)
+    _taifex_cache[cache_key] = (now, df)
     return df
 
 
@@ -253,7 +248,7 @@ def fetch_options(
         cfg = COMMODITY_MAP[code]
         try:
             S = _get_spot(cfg["ticker"])
-            raw = _fetch_taifex(cfg["commodity_id"])
+            raw = _fetch_taifex(cfg["commodity_ids"])
             df = _parse_and_compute(raw, S, cfg["exercise_ratio"])
             if not df.empty:
                 dfs.append(df)
