@@ -305,6 +305,7 @@
       }
       td:first-child, td:nth-child(2), td:nth-child(3) { text-align: left; }
       tbody tr:hover { background: var(--surface); }
+      tbody tr[onclick]:hover { background: #1e2535; }
       tbody tr:last-child td { border-bottom: none; }
 
       .call { color: var(--call); font-weight: 600; }
@@ -615,6 +616,45 @@
         <div id="arb-status"></div>
         <div id="arb-tableContainer"></div>
       </main>
+    </div>
+
+    <!-- PCP Trade Modal -->
+    <div id="pcpModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;max-width:920px;margin:36px auto 60px;padding:28px;position:relative">
+        <button onclick="closePcpModal()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
+
+        <h2 id="pcp-modal-title" style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:20px"></h2>
+
+        <!-- Trade legs -->
+        <div style="margin-bottom:20px">
+          <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin-bottom:10px">Trade Legs (per 1 options contract = 1,000 shares)</p>
+          <table id="pcp-legs-table" style="width:100%;border-collapse:collapse;font-size:13px">
+            <thead>
+              <tr>
+                <th style="text-align:left;padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--border)">Action</th>
+                <th style="text-align:left;padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--border)">Instrument</th>
+                <th style="text-align:right;padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--border)">Qty</th>
+                <th style="text-align:right;padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--border)">Price/unit</th>
+                <th style="text-align:right;padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--border)">Cash flow (NT$)</th>
+              </tr>
+            </thead>
+            <tbody id="pcp-legs-body"></tbody>
+            <tfoot id="pcp-legs-foot"></tfoot>
+          </table>
+        </div>
+
+        <!-- DTE slider -->
+        <div style="margin-bottom:16px;display:flex;align-items:center;gap:16px">
+          <span style="font-size:12px;color:var(--muted);white-space:nowrap">DTE:</span>
+          <input type="range" id="pcp-dte-slider" min="0" step="1"
+            style="flex:1;accent-color:var(--accent)"
+            oninput="onPcpSlider(this.value)">
+          <span id="pcp-dte-label" style="font-size:13px;font-weight:500;color:var(--text);min-width:60px;text-align:right">62 days</span>
+        </div>
+
+        <!-- P&L chart -->
+        <div id="pcp-pnl-chart" style="width:100%;height:380px"></div>
+      </div>
     </div>
 
     <script>
@@ -992,10 +1032,11 @@
           html += `<th onclick="sortPcpByIndex(${i})">${c}${arrow}</th>`;
         });
         html += "</tr></thead><tbody>";
-        rows.forEach(row => {
+        rows.forEach((row, ri) => {
           const wCls = row.warrant_type === "Call" ? "call" : "put";
           const oCls = row.opt_type === "Call" ? "call" : "put";
-          html += "<tr>";
+          html += `<tr style="cursor:pointer" onclick="openPcpModal(currentPcpData[${ri}])" title="Click to view trade breakdown">`;
+
           cols.forEach(c => {
             let val = row[c] === null ? "—" : row[c];
             if (c === "warrant_type") val = `<span class="${wCls}">${val}</span>`;
@@ -1277,6 +1318,160 @@
           return asc ? av - bv : bv - av;
         });
         renderArbTable(currentArbData);
+      }
+
+      // ── PCP Trade Modal ────────────────────────────────────────────────
+      const R_FREE = 0.01875;
+      let _pcpRow = null;
+
+      function normCDF(x) {
+        const a1=0.254829592,a2=-0.284496736,a3=1.421413741,a4=-1.453152027,a5=1.061405429,p=0.3275911;
+        const sign = x < 0 ? -1 : 1;
+        const t = 1 / (1 + p * Math.abs(x) / Math.SQRT2);
+        const y = 1 - ((((a5*t+a4)*t+a3)*t+a2)*t+a1)*t*Math.exp(-x*x/2);
+        return 0.5*(1+sign*y);
+      }
+      function bsCall(S,K,T,r,sigma) {
+        if(T<=0) return Math.max(0,S-K);
+        const d1=(Math.log(S/K)+(r+.5*sigma*sigma)*T)/(sigma*Math.sqrt(T));
+        return S*normCDF(d1)-K*Math.exp(-r*T)*normCDF(d1-sigma*Math.sqrt(T));
+      }
+      function bsPut(S,K,T,r,sigma) {
+        if(T<=0) return Math.max(0,K-S);
+        const d1=(Math.log(S/K)+(r+.5*sigma*sigma)*T)/(sigma*Math.sqrt(T));
+        return K*Math.exp(-r*T)*normCDF(-(d1-sigma*Math.sqrt(T)))-S*normCDF(-d1);
+      }
+
+      function pnlPerShare(S, row, tau) {
+        const iv_w = row.warrant_iv || 0.4;
+        const iv_opt = row.opt_iv || 0.4;
+        const Kw = row.warrant_strike, Ko = row.opt_strike;
+        if (row.warrant_type === "Call") {
+          return row.pcp_diff + bsCall(S,Kw,tau,R_FREE,iv_w) - bsCall(S,Ko,tau,R_FREE,iv_opt);
+        } else {
+          return row.pcp_diff + bsPut(S,Kw,tau,R_FREE,iv_w) - bsPut(S,Ko,tau,R_FREE,iv_opt);
+        }
+      }
+
+      function openPcpModal(row) {
+        _pcpRow = row;
+        const isCall = row.warrant_type === "Call";
+        const S0 = row.underlying_price;
+        const Ko = row.opt_strike;
+        const Kw = row.warrant_strike;
+        const maxDte = row.opt_dte;
+        const bondPv = Ko * Math.exp(-R_FREE * maxDte / 365);
+        const n = row.warrants_needed;
+
+        document.getElementById("pcp-modal-title").textContent =
+          `${row.warrant_name} (${row.warrant_type}) ↔ ${row.option_contract} (${row.opt_type})  —  PCP Arb`;
+
+        // ── Trade legs ──────────────────────────────────────────────────
+        const legs = isCall ? [
+          { action:"BUY",   instrument:`${n} × ${row.warrant_code} (call warrant)`,  qty:n,      price:row.warrant_ask,       cf:-(n*row.warrant_ask) },
+          { action:"SHORT", instrument:"1,000 shares TSMC",                           qty:-1000,  price:S0,                    cf: 1000*S0 },
+          { action:"LEND",  instrument:`Bond (receive ${Ko.toFixed(0)} × 1,000 at expiry)`, qty:1000, price:bondPv.toFixed(2),  cf:-(1000*bondPv) },
+          { action:"SELL",  instrument:`${row.option_contract} put option (×1,000 shares)`, qty:1000, price:row.opt_ask,       cf: 1000*row.opt_ask },
+        ] : [
+          { action:"BUY",   instrument:`${n} × ${row.warrant_code} (put warrant)`,   qty:n,      price:row.warrant_ask,       cf:-(n*row.warrant_ask) },
+          { action:"BUY",   instrument:"1,000 shares TSMC",                           qty:1000,   price:S0,                    cf:-1000*S0 },
+          { action:"BORROW",instrument:`Bond (repay ${Ko.toFixed(0)} × 1,000 at expiry)`, qty:1000, price:bondPv.toFixed(2),   cf: 1000*bondPv },
+          { action:"SELL",  instrument:`${row.option_contract} call option (×1,000 shares)`, qty:1000, price:row.opt_ask,      cf: 1000*row.opt_ask },
+        ];
+        const netCf = legs.reduce((s,l)=>s+l.cf, 0);
+
+        const actionColor = a => a==="BUY"||a==="LEND" ? "var(--call)" : "var(--put)";
+        let tbody = "";
+        legs.forEach(l=>{
+          tbody+=`<tr>
+            <td style="padding:6px 10px;border-bottom:1px solid var(--border);color:${actionColor(l.action)};font-weight:600">${l.action}</td>
+            <td style="padding:6px 10px;border-bottom:1px solid var(--border);color:var(--text)">${l.instrument}</td>
+            <td style="padding:6px 10px;border-bottom:1px solid var(--border);color:var(--text);text-align:right">${Number(l.qty).toLocaleString()}</td>
+            <td style="padding:6px 10px;border-bottom:1px solid var(--border);color:var(--text);text-align:right">${Number(l.price).toLocaleString(undefined,{maximumFractionDigits:4})}</td>
+            <td style="padding:6px 10px;border-bottom:1px solid var(--border);color:${l.cf>=0?"var(--put)":"var(--call)"};text-align:right;font-variant-numeric:tabular-nums">${l.cf>=0?"+":""}${Math.round(l.cf).toLocaleString()}</td>
+          </tr>`;
+        });
+        document.getElementById("pcp-legs-body").innerHTML = tbody;
+        document.getElementById("pcp-legs-foot").innerHTML = `
+          <tr>
+            <td colspan="4" style="padding:8px 10px;font-weight:600;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.4px">Net premium received</td>
+            <td style="padding:8px 10px;font-weight:700;font-size:14px;color:${netCf>=0?"var(--put)":"var(--call)"};text-align:right;font-variant-numeric:tabular-nums">${netCf>=0?"+":""}${Math.round(netCf).toLocaleString()} NT$</td>
+          </tr>`;
+
+        // ── Slider ──────────────────────────────────────────────────────
+        const slider = document.getElementById("pcp-dte-slider");
+        slider.max = maxDte; slider.value = maxDte;
+        document.getElementById("pcp-dte-label").textContent = `${maxDte} days`;
+
+        // ── Chart ───────────────────────────────────────────────────────
+        renderPcpChart(maxDte);
+        document.getElementById("pcpModal").style.display = "block";
+      }
+
+      function closePcpModal() {
+        document.getElementById("pcpModal").style.display = "none";
+        _pcpRow = null;
+      }
+      document.getElementById("pcpModal").addEventListener("click", e => {
+        if (e.target === document.getElementById("pcpModal")) closePcpModal();
+      });
+
+      function onPcpSlider(val) {
+        document.getElementById("pcp-dte-label").textContent = `${val} days`;
+        renderPcpChart(parseInt(val));
+      }
+
+      function renderPcpChart(dte) {
+        const row = _pcpRow;
+        const S0 = row.underlying_price;
+        const tau = dte / 365;
+        const spots = [];
+        const pnls  = [];
+        const n = 200;
+        const lo = S0 * 0.65, hi = S0 * 1.35;
+        for (let i=0; i<=n; i++) {
+          const S = lo + (hi-lo)*i/n;
+          spots.push(parseFloat(S.toFixed(2)));
+          pnls.push(parseFloat((pnlPerShare(S, row, tau) * 1000).toFixed(0)));
+        }
+
+        // Also plot at expiry for reference
+        const pnlsExp = spots.map(S => parseFloat((pnlPerShare(S, row, 0) * 1000).toFixed(0)));
+
+        const zeroLine = [{x:[lo,hi],y:[0,0],mode:"lines",
+          line:{color:"rgba(255,255,255,0.15)",dash:"dash",width:1},
+          showlegend:false,hoverinfo:"skip"}];
+
+        const currentTrace = {
+          x:spots, y:pnls, mode:"lines", name:`DTE ${dte}`,
+          line:{color:"var(--accent)",width:2.5},
+          hovertemplate:"Spot: %{x:,.0f}<br>P&L: %{y:+,.0f} NT$<extra></extra>",
+        };
+        const expiryTrace = {
+          x:spots, y:pnlsExp, mode:"lines", name:"At expiry",
+          line:{color:"rgba(251,191,36,0.6)",width:1.5,dash:"dot"},
+          hovertemplate:"Spot: %{x:,.0f}<br>P&L at expiry: %{y:+,.0f} NT$<extra></extra>",
+        };
+
+        // Mark current spot
+        const spotPnl = parseFloat((pnlPerShare(S0, row, tau)*1000).toFixed(0));
+        const spotTrace = {
+          x:[S0], y:[spotPnl], mode:"markers+text", name:"Current spot",
+          marker:{color:"white",size:7,symbol:"circle"},
+          text:[`${spotPnl>=0?"+":""}${spotPnl.toLocaleString()}`],
+          textposition:"top center", textfont:{color:"white",size:11},
+          hovertemplate:"Current spot: %{x:,.0f}<br>P&L: %{y:+,.0f} NT$<extra></extra>",
+        };
+
+        Plotly.react("pcp-pnl-chart", [...zeroLine, expiryTrace, currentTrace, spotTrace], {
+          paper_bgcolor:"#13161f", plot_bgcolor:"#0d0f16",
+          font:{color:"#8b90a0",family:"Inter,system-ui,sans-serif",size:12},
+          xaxis:{title:"TSMC Spot Price (NT$)",gridcolor:"#252836",zerolinecolor:"#252836",tickformat:","},
+          yaxis:{title:"P&L (NT$, 1,000-share position)",gridcolor:"#252836",zerolinecolor:"#252836",tickformat:"+,"},
+          legend:{bgcolor:"#13161f",bordercolor:"#252836",borderwidth:1},
+          margin:{l:80,r:20,t:20,b:60},
+          hovermode:"x unified",
+        },{responsive:true});
       }
 
       loadCustomStocks();
