@@ -236,6 +236,120 @@ def iv_surface():
     )
 
 
+def _build_arb_df(option_type, max_strike_diff_pct, max_dte_diff):
+    warrant_df, err = warrant_logic.fetch_warrants(
+        ["2330"], option_type, 0, 365, 0, 100, 0
+    )
+    if warrant_df.empty:
+        raise RuntimeError(err or "No TSMC warrants found")
+
+    opt_df = options_logic.fetch_options(["2330"], option_type, min_days=1)
+    if opt_df.empty:
+        raise RuntimeError("No TSMC options found")
+
+    rows = []
+    for _, w in warrant_df.iterrows():
+        candidates = opt_df[opt_df["type"] == w["type"]].copy()
+        if candidates.empty:
+            continue
+
+        candidates["strike_diff_pct"] = (
+            (candidates["strike"] - w["strike"]).abs() / w["strike"] * 100
+        )
+        candidates["dte_diff"] = (
+            (candidates["days_to_expiry"] - w["days_to_expiry"]).abs()
+        )
+
+        candidates = candidates[
+            (candidates["strike_diff_pct"] <= max_strike_diff_pct)
+            & (candidates["dte_diff"] <= max_dte_diff)
+        ]
+        if candidates.empty:
+            continue
+
+        # Strike weighted 2× so closest strike wins over closest DTE
+        score = candidates["strike_diff_pct"] * 2 + candidates["dte_diff"] / max(max_dte_diff, 1)
+        best = candidates.loc[score.idxmin()]
+
+        ratio = float(w["exercise_ratio"])
+        warrants_needed = round(1000 / ratio)
+        warrant_per_share = round(float(w["ask"]) / ratio, 4)
+        opt_per_share = round(float(best["ask"]), 4)
+        price_diff = round(opt_per_share - warrant_per_share, 4)
+        price_diff_pct = (
+            round(price_diff / opt_per_share * 100, 2) if opt_per_share > 0 else None
+        )
+
+        rows.append(
+            {
+                "warrant_code": w["warrant_code"],
+                "warrant_name": w["warrant_name"],
+                "option_contract": best["contract"],
+                "type": w["type"],
+                "underlying_price": w["underlying_price"],
+                "warrant_dte": int(w["days_to_expiry"]),
+                "opt_dte": int(best["days_to_expiry"]),
+                "dte_diff": int(best["dte_diff"]),
+                "warrant_strike": w["strike"],
+                "opt_strike": int(best["strike"]),
+                "strike_diff_pct": round(float(best["strike_diff_pct"]), 2),
+                "warrants_needed": warrants_needed,
+                "warrant_ask": w["ask"],
+                "opt_ask": best["ask"],
+                "warrant_per_share": warrant_per_share,
+                "opt_per_share": opt_per_share,
+                "price_diff": price_diff,
+                "price_diff_pct": price_diff_pct,
+                "warrant_iv": round(float(w["iv_ask"]), 4) if pd.notna(w["iv_ask"]) else None,
+                "opt_iv": round(float(best["iv_ask"]), 4) if pd.notna(best["iv_ask"]) else None,
+                "iv_diff": round(
+                    (float(best["iv_ask"]) if pd.notna(best["iv_ask"]) else 0)
+                    - (float(w["iv_ask"]) if pd.notna(w["iv_ask"]) else 0),
+                    4,
+                ),
+            }
+        )
+
+    result = pd.DataFrame(rows)
+    if not result.empty and "price_diff_pct" in result.columns:
+        result = result.sort_values("price_diff_pct", ascending=False)
+    return result
+
+
+@app.route("/arb_finder", methods=["POST"])
+def arb_finder():
+    data = request.json
+    option_type = data.get("option_type", "All")
+    max_strike_diff_pct = float(data.get("max_strike_diff_pct", 3.0))
+    max_dte_diff = int(data.get("max_dte_diff", 5))
+    try:
+        df = _build_arb_df(option_type, max_strike_diff_pct, max_dte_diff)
+        rows = json.loads(df.to_json(orient="records")) if not df.empty else []
+        return jsonify({"rows": rows, "count": len(rows)})
+    except Exception as e:
+        return jsonify({"rows": [], "count": 0, "error": str(e)})
+
+
+@app.route("/arb_finder_csv", methods=["POST"])
+def arb_finder_csv():
+    data = request.json
+    option_type = data.get("option_type", "All")
+    max_strike_diff_pct = float(data.get("max_strike_diff_pct", 3.0))
+    max_dte_diff = int(data.get("max_dte_diff", 5))
+    try:
+        df = _build_arb_df(option_type, max_strike_diff_pct, max_dte_diff)
+    except Exception:
+        df = pd.DataFrame()
+    output = io.StringIO()
+    df.to_csv(output, index=False)
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=arb_finder.csv"},
+    )
+
+
 def open_browser():
     webbrowser.open("http://127.0.0.1:5000")
 

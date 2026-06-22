@@ -244,6 +244,7 @@
       .sort-btns button:hover { color: var(--text); border-color: var(--accent); }
 
       /* ── Status ── */
+      #arb-status,
       #opt-status,
       #status, #iv-status {
         margin: 8px 0;
@@ -253,6 +254,7 @@
       }
 
       /* ── Table ── */
+      #arb-tableContainer,
       #opt-tableContainer,
       #tableContainer {
         max-height: calc(100vh - 310px);
@@ -335,6 +337,7 @@
       <button class="active" onclick="switchTab('options', this)">Options Scanner</button>
       <button onclick="switchTab('scanner', this)">Warrant Scanner</button>
       <button onclick="switchTab('ivsurface', this)">IV Surface</button>
+      <button onclick="switchTab('arb', this)">Arb Finder</button>
     </div>
 
     <!-- OPTIONS TAB -->
@@ -550,6 +553,43 @@
 
         <div id="iv-status"></div>
         <div id="iv-plot"></div>
+      </main>
+    </div>
+
+    <!-- ARB FINDER TAB -->
+    <div id="tab-arb" class="tab-content">
+      <main>
+        <div class="filters">
+          <label>Option Type
+            <select id="arbOptionType">
+              <option value="All">All</option>
+              <option value="Call">Call</option>
+              <option value="Put">Put</option>
+            </select>
+          </label>
+          <label>Max Strike Diff %
+            <input type="number" id="arbMaxStrikePct" value="3" step="0.5" min="0" max="20" style="width:80px"/>
+          </label>
+          <label>Max DTE Diff (days)
+            <input type="number" id="arbMaxDteDiff" value="5" min="0" max="30" style="width:70px"/>
+          </label>
+          <div class="action-group">
+            <button class="primary" onclick="fetchArbData()">Find Arb</button>
+            <button class="success" id="arbDownloadBtn" onclick="downloadArbCSV()" style="display:none">
+              Download CSV
+            </button>
+          </div>
+        </div>
+
+        <div class="sort-btns">
+          <button onclick="sortArbBy('price_diff_pct', false)">Price Diff % ↓</button>
+          <button onclick="sortArbBy('iv_diff', false)">IV Diff ↓</button>
+          <button onclick="sortArbBy('dte_diff', true)">DTE Diff ↑</button>
+          <button onclick="sortArbBy('strike_diff_pct', true)">Strike Diff ↑</button>
+        </div>
+
+        <div id="arb-status"></div>
+        <div id="arb-tableContainer"></div>
       </main>
     </div>
 
@@ -989,6 +1029,117 @@
         a.href = url;
         a.download = "options.csv";
         a.click();
+      }
+
+      // ── Arb Finder ─────────────────────────────────────────────────────
+      let currentArbData = [];
+      let arbSortCol = null;
+      let arbSortAsc = true;
+
+      function getArbFilters() {
+        return {
+          option_type: document.getElementById("arbOptionType").value,
+          max_strike_diff_pct: parseFloat(document.getElementById("arbMaxStrikePct").value) || 3,
+          max_dte_diff: parseInt(document.getElementById("arbMaxDteDiff").value) || 5,
+        };
+      }
+
+      async function fetchArbData() {
+        document.getElementById("arb-status").textContent = "Fetching warrants and options…";
+        document.getElementById("arb-tableContainer").innerHTML = "";
+        document.getElementById("arbDownloadBtn").style.display = "none";
+        let data;
+        try {
+          const res = await fetch("/arb_finder", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(getArbFilters()),
+          });
+          data = await res.json();
+        } catch(e) {
+          document.getElementById("arb-status").textContent = "Error: " + e.message;
+          return;
+        }
+        if (data.error) {
+          document.getElementById("arb-status").textContent = "Error: " + data.error;
+          return;
+        }
+        currentArbData = data.rows;
+        document.getElementById("arb-status").textContent =
+          `${data.count} matched pairs — positive price_diff means warrant is cheaper (buy warrant, sell option)`;
+        document.getElementById("arbDownloadBtn").style.display = "inline-block";
+        renderArbTable(currentArbData);
+      }
+
+      function renderArbTable(rows) {
+        const container = document.getElementById("arb-tableContainer");
+        if (!rows.length) {
+          container.innerHTML = "<p style='padding:16px;color:var(--muted)'>No matches found. Try relaxing the thresholds.</p>";
+          return;
+        }
+        const cols = Object.keys(rows[0]);
+        let html = "<table><thead><tr>";
+        cols.forEach((c, i) => {
+          const arrow = arbSortCol === i ? (arbSortAsc ? " ▲" : " ▼") : "";
+          html += `<th onclick="sortArbByIndex(${i})">${c}${arrow}</th>`;
+        });
+        html += "</tr></thead><tbody>";
+        rows.forEach(row => {
+          const typeCls = row.type === "Call" ? "call" : "put";
+          html += "<tr>";
+          cols.forEach(c => {
+            let val = row[c] === null ? "—" : row[c];
+            if (c === "type") {
+              val = `<span class="${typeCls}">${val}</span>`;
+            } else if (c === "price_diff_pct" && row[c] !== null) {
+              const cls = row[c] > 0 ? "put" : "call";
+              val = `<span class="${cls}">${val}%</span>`;
+            } else if (c === "price_diff" && row[c] !== null) {
+              const cls = row[c] > 0 ? "put" : "call";
+              val = `<span class="${cls}">${val}</span>`;
+            }
+            html += `<td>${val}</td>`;
+          });
+          html += "</tr>";
+        });
+        html += "</tbody></table>";
+        container.innerHTML = html;
+      }
+
+      function sortArbByIndex(colIndex) {
+        if (!currentArbData.length) return;
+        const key = Object.keys(currentArbData[0])[colIndex];
+        if (arbSortCol === colIndex) arbSortAsc = !arbSortAsc;
+        else { arbSortCol = colIndex; arbSortAsc = true; }
+        currentArbData.sort((a, b) => {
+          const av = a[key], bv = b[key];
+          if (av === null) return 1; if (bv === null) return -1;
+          if (typeof av === "number") return arbSortAsc ? av - bv : bv - av;
+          return arbSortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+        });
+        renderArbTable(currentArbData);
+      }
+
+      function sortArbBy(key, asc) {
+        if (!currentArbData.length) return;
+        currentArbData.sort((a, b) => {
+          const av = a[key] ?? (asc ? Infinity : -Infinity);
+          const bv = b[key] ?? (asc ? Infinity : -Infinity);
+          return asc ? av - bv : bv - av;
+        });
+        renderArbTable(currentArbData);
+      }
+
+      async function downloadArbCSV() {
+        const res = await fetch("/arb_finder_csv", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(getArbFilters()),
+        });
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = "arb_finder.csv"; a.click();
       }
 
       loadCustomStocks();
