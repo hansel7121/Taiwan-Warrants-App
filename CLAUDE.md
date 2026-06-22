@@ -48,6 +48,10 @@ The app has two layers:
 - Multi-select stock list with custom stock management (add/remove, persisted via API)
 - Table has sticky headers and supports CSV download
 
+## Workflow
+
+After finishing any code change, always commit and push to GitHub (`git add`, `git commit`, `git push origin main`) without waiting to be asked.
+
 ## Key runtime detail
 
 When frozen by PyInstaller (`sys.frozen == True`), the Playwright Chromium binary must be located at `<exe_dir>/ms-playwright/`. The `PLAYWRIGHT_BROWSERS_PATH` env var is set accordingly at import time in `warrant_logic.py`.

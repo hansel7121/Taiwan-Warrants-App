@@ -10,9 +10,11 @@ from flask import Flask, render_template, request, jsonify, Response
 import threading
 import webbrowser
 import warrant_logic
+import options_logic
 import os
 import json
 import numpy as np
+import pandas as pd
 from scipy.interpolate import griddata
 
 base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -100,6 +102,50 @@ def download():
         output.getvalue(),
         mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=warrants.csv"},
+    )
+
+
+@app.route("/fetch_options", methods=["POST"])
+def fetch_options():
+    data = request.json
+    stock_codes = data.get("stock_codes", ["TXO"])
+    option_type = data.get("option_type", "All")
+    min_days = int(data.get("min_days", 0))
+    max_days = int(data.get("max_days", 365))
+    min_leverage = float(data.get("min_leverage", 0.0))
+    min_volume = int(data.get("min_volume", 0))
+    try:
+        df = options_logic.fetch_options(
+            stock_codes, option_type, min_days, max_days, min_leverage, min_volume
+        )
+        rows = df.where(pd.notnull(df), None).to_dict(orient="records")
+        return jsonify({"rows": rows, "count": len(df)})
+    except Exception as e:
+        return jsonify({"rows": [], "count": 0, "error": str(e)})
+
+
+@app.route("/download_options", methods=["POST"])
+def download_options():
+    data = request.json
+    stock_codes = data.get("stock_codes", ["TXO"])
+    option_type = data.get("option_type", "All")
+    min_days = int(data.get("min_days", 0))
+    max_days = int(data.get("max_days", 365))
+    min_leverage = float(data.get("min_leverage", 0.0))
+    min_volume = int(data.get("min_volume", 0))
+    try:
+        df = options_logic.fetch_options(
+            stock_codes, option_type, min_days, max_days, min_leverage, min_volume
+        )
+    except Exception:
+        df = pd.DataFrame()
+    output = io.StringIO()
+    df.to_csv(output, index=False)
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=options.csv"},
     )
 
 

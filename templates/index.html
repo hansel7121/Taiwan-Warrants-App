@@ -4,411 +4,539 @@
     <meta charset="UTF-8" />
     <title>Warrant Scanner</title>
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
     <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+      :root {
+        --bg:       #0d0f16;
+        --panel:    #13161f;
+        --surface:  #1a1d2a;
+        --border:   #252836;
+        --accent:   #4f8ef7;
+        --accent2:  #3a6fd8;
+        --success:  #22c55e;
+        --danger:   #ef4444;
+        --text:     #e2e8f0;
+        --muted:    #8b90a0;
+        --call:     #f87171;
+        --put:      #4ade80;
+        --radius:   8px;
+      }
+
       body {
-        font-family: Arial, sans-serif;
-        padding: 20px;
-        background: #f4f4f4;
-        margin: 0;
+        font-family: 'Inter', system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        min-height: 100vh;
+        padding: 0;
+        font-size: 13px;
       }
-      h1 {
-        color: #333;
+
+      /* ── Header ── */
+      header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 14px 24px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
       }
+      header h1 {
+        font-size: 16px;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+        color: var(--text);
+      }
+      header .badge {
+        font-size: 11px;
+        background: var(--accent);
+        color: #fff;
+        padding: 2px 8px;
+        border-radius: 20px;
+        font-weight: 500;
+        letter-spacing: 0.3px;
+      }
+
+      /* ── Tabs ── */
       .tab-bar {
         display: flex;
-        gap: 4px;
-        margin-bottom: 16px;
+        gap: 2px;
+        padding: 12px 24px 0;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
       }
       .tab-bar button {
-        padding: 8px 20px;
+        padding: 8px 18px;
         border: none;
-        border-radius: 6px 6px 0 0;
+        border-bottom: 2px solid transparent;
+        background: transparent;
+        color: var(--muted);
         cursor: pointer;
-        font-size: 14px;
-        background: #ccc;
-        color: #333;
+        font-size: 13px;
+        font-family: inherit;
+        font-weight: 500;
+        transition: color 0.15s, border-color 0.15s;
       }
+      .tab-bar button:hover { color: var(--text); }
       .tab-bar button.active {
-        background: #0066cc;
-        color: white;
+        color: var(--accent);
+        border-bottom-color: var(--accent);
       }
-      .tab-content {
-        display: none;
-      }
-      .tab-content.active {
-        display: block;
-      }
+
+      /* ── Main layout ── */
+      .tab-content { display: none; }
+      .tab-content.active { display: block; }
+
+      main { padding: 20px 24px; }
+
+      /* ── Filter panel ── */
       .filters {
-        background: white;
-        padding: 16px;
-        border-radius: 8px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 16px 20px;
         display: flex;
         gap: 20px;
         align-items: flex-end;
         flex-wrap: wrap;
-        margin-bottom: 16px;
+        margin-bottom: 14px;
       }
       .filters label {
         display: flex;
         flex-direction: column;
-        font-size: 13px;
-        color: #555;
-        gap: 4px;
+        gap: 5px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
       }
       .filters input,
       .filters select {
-        padding: 6px;
-        border: 1px solid #ccc;
-        border-radius: 4px;
-        font-size: 14px;
+        padding: 7px 10px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        color: var(--text);
+        font-size: 13px;
+        font-family: inherit;
+        outline: none;
+        transition: border-color 0.15s;
+        min-width: 90px;
       }
+      .filters input:focus,
+      .filters select:focus { border-color: var(--accent); }
+
+      /* ── Stock multi-select ── */
       .stock-select {
         display: flex;
         flex-direction: column;
-        gap: 4px;
-        font-size: 13px;
-        color: #555;
+        gap: 5px;
+      }
+      .stock-select > span {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
       }
       .stock-select select {
-        height: 160px;
-        min-width: 220px;
+        height: 150px;
+        min-width: 210px;
         padding: 4px;
-        border: 1px solid #ccc;
-        border-radius: 4px;
-        font-size: 14px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        color: var(--text);
+        font-size: 13px;
+        font-family: inherit;
+        outline: none;
       }
-      .select-all-btn {
-        padding: 4px 8px;
+      .stock-select select:focus { border-color: var(--accent); }
+
+      .btn-row {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-top: 4px;
+      }
+
+      /* ── Buttons ── */
+      button.sm {
+        padding: 4px 10px;
         font-size: 12px;
-        background: #eee;
-        border: 1px solid #ccc;
+        font-family: inherit;
+        background: var(--surface);
+        border: 1px solid var(--border);
         border-radius: 4px;
+        color: var(--text);
         cursor: pointer;
-        width: fit-content;
+        transition: background 0.15s, border-color 0.15s;
       }
-      .select-all-btn:hover {
-        background: #ddd;
-      }
+      button.sm:hover { background: var(--border); }
+
       button.primary {
         padding: 8px 18px;
         border: none;
-        border-radius: 4px;
+        border-radius: 5px;
         cursor: pointer;
-        font-size: 14px;
-        background: #0066cc;
-        color: white;
+        font-size: 13px;
+        font-family: inherit;
+        font-weight: 500;
+        background: var(--accent);
+        color: #fff;
+        transition: background 0.15s;
       }
+      button.primary:hover { background: var(--accent2); }
+
       button.success {
         padding: 8px 18px;
         border: none;
-        border-radius: 4px;
+        border-radius: 5px;
         cursor: pointer;
-        font-size: 14px;
-        background: #28a745;
-        color: white;
+        font-size: 13px;
+        font-family: inherit;
+        font-weight: 500;
+        background: var(--success);
+        color: #fff;
+        transition: opacity 0.15s;
       }
+      button.success:hover { opacity: 0.85; }
+
+      /* ── Add-stock form ── */
+      #addStockForm {
+        flex-direction: column;
+        gap: 5px;
+        margin-top: 4px;
+      }
+      #addStockForm input {
+        padding: 5px 8px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        color: var(--text);
+        font-size: 12px;
+        font-family: inherit;
+        outline: none;
+      }
+      #addStockForm input:focus { border-color: var(--accent); }
+
+      /* ── Sort buttons ── */
       .sort-btns {
         display: flex;
-        gap: 8px;
+        gap: 6px;
         margin-bottom: 10px;
         flex-wrap: wrap;
       }
       .sort-btns button {
-        background: #555;
-        color: white;
-        font-size: 13px;
-        padding: 6px 14px;
-        border: none;
+        background: var(--surface);
+        color: var(--muted);
+        font-size: 12px;
+        font-family: inherit;
+        padding: 5px 12px;
+        border: 1px solid var(--border);
         border-radius: 4px;
         cursor: pointer;
+        transition: color 0.15s, border-color 0.15s;
       }
-      #status,
-      #iv-status {
-        margin: 10px 0;
-        color: #555;
-        font-size: 14px;
+      .sort-btns button:hover { color: var(--text); border-color: var(--accent); }
+
+      /* ── Status ── */
+      #opt-status,
+      #status, #iv-status {
+        margin: 8px 0;
+        color: var(--muted);
+        font-size: 12px;
+        min-height: 18px;
       }
+
+      /* ── Table ── */
+      #opt-tableContainer,
       #tableContainer {
-        max-height: calc(100vh - 300px);
+        max-height: calc(100vh - 310px);
         overflow-y: auto;
-        border-radius: 8px;
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
       }
+      #tableContainer::-webkit-scrollbar { width: 6px; height: 6px; }
+      #tableContainer::-webkit-scrollbar-track { background: var(--bg); }
+      #tableContainer::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
       table {
         width: 100%;
         border-collapse: collapse;
-        background: white;
-        border-radius: 8px;
-      }
-      th {
-        background: #0066cc;
-        color: white;
-        padding: 10px 8px;
-        font-size: 13px;
-        cursor: pointer;
-        user-select: none;
-        white-space: nowrap;
+        background: var(--panel);
       }
       thead th {
         position: sticky;
         top: 0;
         z-index: 10;
+        background: var(--surface);
+        color: var(--muted);
+        padding: 9px 10px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+        text-transform: uppercase;
+        cursor: pointer;
+        user-select: none;
+        white-space: nowrap;
+        border-bottom: 1px solid var(--border);
+        text-align: right;
+        transition: color 0.15s;
       }
-      th:hover {
-        background: #0055aa;
-      }
+      thead th:first-child,
+      thead th:nth-child(2),
+      thead th:nth-child(3) { text-align: left; }
+      thead th:hover { color: var(--text); }
+
       td {
-        padding: 8px;
-        font-size: 13px;
-        border-bottom: 1px solid #eee;
+        padding: 7px 10px;
+        font-size: 12.5px;
+        border-bottom: 1px solid var(--border);
         text-align: right;
         white-space: nowrap;
+        color: var(--text);
+        font-variant-numeric: tabular-nums;
       }
-      td:first-child,
-      td:nth-child(2),
-      td:nth-child(3) {
-        text-align: left;
-      }
-      tr:hover {
-        background: #f0f7ff;
-      }
-      .call {
-        color: #c00;
-        font-weight: bold;
-      }
-      .put {
-        color: #007700;
-        font-weight: bold;
-      }
+      td:first-child, td:nth-child(2), td:nth-child(3) { text-align: left; }
+      tbody tr:hover { background: var(--surface); }
+      tbody tr:last-child td { border-bottom: none; }
+
+      .call { color: var(--call); font-weight: 600; }
+      .put  { color: var(--put);  font-weight: 600; }
+
+      /* ── IV plot ── */
       #iv-plot {
         width: 100%;
         height: 680px;
-        background: white;
-        border-radius: 8px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
       }
-      #addStockForm {
+
+      /* ── Action buttons group ── */
+      .action-group {
+        display: flex;
         flex-direction: column;
-        gap: 4px;
-        margin-top: 6px;
-      }
-      #addStockForm input {
-        padding: 4px;
-        border: 1px solid #ccc;
-        border-radius: 4px;
-        font-size: 13px;
+        gap: 8px;
       }
     </style>
   </head>
   <body>
-    <h1>📊 Warrant Scanner</h1>
+    <header>
+      <h1>Warrant Scanner</h1>
+      <span class="badge">TW</span>
+    </header>
 
     <div class="tab-bar">
-      <button class="active" onclick="switchTab('scanner', this)">
-        Scanner
-      </button>
+      <button class="active" onclick="switchTab('options', this)">Options Scanner</button>
+      <button onclick="switchTab('scanner', this)">Warrant Scanner</button>
       <button onclick="switchTab('ivsurface', this)">IV Surface</button>
     </div>
 
+    <!-- OPTIONS TAB -->
+    <div id="tab-options" class="tab-content active">
+      <main>
+        <div class="filters">
+          <div class="stock-select">
+            <span>Product</span>
+            <select id="optionStockSelect" multiple style="height:60px">
+              <option value="TXO" selected>TXO 台指選擇權</option>
+            </select>
+          </div>
+          <label>Option Type
+            <select id="optionsType">
+              <option value="All">All</option>
+              <option value="Call">Call</option>
+              <option value="Put">Put</option>
+            </select>
+          </label>
+          <label>Min Days to Expiry
+            <input type="number" id="optMinDays" value="0" min="0" max="365" />
+          </label>
+          <label>Max Days to Expiry
+            <input type="number" id="optMaxDays" value="365" min="0" max="365" />
+          </label>
+          <label>Min Leverage
+            <input type="number" id="optMinLeverage" value="0" step="0.1" min="0" />
+          </label>
+          <label>Min Volume
+            <input type="number" id="optMinVolume" value="0" min="0" />
+          </label>
+          <div class="action-group">
+            <button class="primary" onclick="fetchOptionsData()">Fetch Options</button>
+            <button class="success" id="optDownloadBtn" onclick="downloadOptionsCSV()" style="display:none">
+              Download CSV
+            </button>
+          </div>
+        </div>
+
+        <div class="sort-btns">
+          <button onclick="sortOptionsBy('leverage_calc', false)">Leverage ↓</button>
+          <button onclick="sortOptionsBy('volume', false)">Volume ↓</button>
+          <button onclick="sortOptionsBy('days_to_expiry', true)">DTE ↑</button>
+        </div>
+
+        <div id="opt-status"></div>
+        <div id="opt-tableContainer"></div>
+      </main>
+    </div>
+
     <!-- SCANNER TAB -->
-    <div id="tab-scanner" class="tab-content active">
-      <div class="filters">
-        <div class="stock-select">
-          <span>Stock (multi-select)</span>
-          <select id="stockSelect" multiple>
-            <option value="2330">2330 台積電 (TSMC)</option>
-            <option value="2317">2317 鴻海 (Foxconn)</option>
-            <option value="2454">2454 聯發科 (MediaTek)</option>
-            <option value="2382">2382 廣達</option>
-            <option value="3231">3231 緯創</option>
-            <option value="6669">6669 緯穎</option>
-            <option value="2376">2376 技嘉</option>
-            <option value="3017">3017 奇鋐</option>
-            <option value="3324">3324 雙鴻</option>
-            <option value="2308">2308 台達電</option>
-            <option value="3711">3711 日月光投控</option>
-            <option value="3034">3034 聯詠</option>
-            <option value="2379">2379 瑞昱</option>
-            <option value="3661">3661 世芯-KY</option>
-            <option value="3443">3443 創意</option>
-            <option value="2603">2603 長榮</option>
-            <option value="3008">3008 大立光</option>
-            <option value="2881">2881 富邦金</option>
-            <option value="2882">2882 國泰金</option>
-            <option value="3037">3037 欣興</option>
-            <option value="2303">2303 聯電 (UMC)</option>
-            <option value="2886">2886 兆豐金</option>
-          </select>
-          <div
-            style="display: flex; gap: 4px; flex-wrap: wrap; margin-top: 2px"
-          >
-            <button class="select-all-btn" onclick="toggleSelectAll()">
-              Select All
-            </button>
-            <button class="select-all-btn" onclick="toggleAddStock()">
-              + Add Stock
+    <div id="tab-scanner" class="tab-content">
+      <main>
+        <div class="filters">
+          <div class="stock-select">
+            <span>Stock (multi-select)</span>
+            <select id="stockSelect" multiple>
+              <option value="2330">2330 台積電 (TSMC)</option>
+              <option value="2317">2317 鴻海 (Foxconn)</option>
+              <option value="2454">2454 聯發科 (MediaTek)</option>
+              <option value="2382">2382 廣達</option>
+              <option value="3231">3231 緯創</option>
+              <option value="6669">6669 緯穎</option>
+              <option value="2376">2376 技嘉</option>
+              <option value="3017">3017 奇鋐</option>
+              <option value="3324">3324 雙鴻</option>
+              <option value="2308">2308 台達電</option>
+              <option value="3711">3711 日月光投控</option>
+              <option value="3034">3034 聯詠</option>
+              <option value="2379">2379 瑞昱</option>
+              <option value="3661">3661 世芯-KY</option>
+              <option value="3443">3443 創意</option>
+              <option value="2603">2603 長榮</option>
+              <option value="3008">3008 大立光</option>
+              <option value="2881">2881 富邦金</option>
+              <option value="2882">2882 國泰金</option>
+              <option value="3037">3037 欣興</option>
+              <option value="2303">2303 聯電 (UMC)</option>
+              <option value="2886">2886 兆豐金</option>
+            </select>
+            <div class="btn-row">
+              <button class="sm" onclick="toggleSelectAll()">Select All</button>
+              <button class="sm" onclick="toggleAddStock()">+ Add Stock</button>
+            </div>
+            <div id="addStockForm" style="display:none">
+              <input type="text" id="newStockCode" placeholder="Code e.g. 2412" />
+              <input type="text" id="newStockName" placeholder="Name e.g. 中華電" />
+              <button class="sm" onclick="addStock()">Confirm</button>
+            </div>
+          </div>
+
+          <label>Option Type
+            <select id="optionType">
+              <option value="All">All</option>
+              <option value="Call">Call</option>
+              <option value="Put">Put</option>
+            </select>
+          </label>
+          <label>Min Days to Expiry
+            <input type="number" id="minDays" value="0" min="0" max="365" />
+          </label>
+          <label>Max Days to Expiry
+            <input type="number" id="maxDays" value="365" min="0" max="365" />
+          </label>
+          <label>Min Leverage
+            <input type="number" id="minLeverage" value="0" step="0.1" min="0" />
+          </label>
+          <label>Max Time Value %
+            <input type="number" id="maxTvPct" value="100" step="0.1" min="0" />
+          </label>
+          <label>Min Volume
+            <input type="number" id="minVolume" value="0" min="0" />
+          </label>
+
+          <div class="action-group">
+            <button class="primary" onclick="fetchData()">Fetch Warrants</button>
+            <button class="success" id="downloadBtn" onclick="downloadCSV()" style="display:none">
+              Download CSV
             </button>
           </div>
-          <div id="addStockForm" style="display: none">
-            <input type="text" id="newStockCode" placeholder="Code e.g. 2412" />
-            <input
-              type="text"
-              id="newStockName"
-              placeholder="Name e.g. 中華電"
-            />
-            <button class="select-all-btn" onclick="addStock()">Confirm</button>
-          </div>
         </div>
-        <label
-          >Option Type
-          <select id="optionType">
-            <option value="All">All</option>
-            <option value="Call">Call</option>
-            <option value="Put">Put</option>
-          </select>
-        </label>
-        <label
-          >Min Days to Expiry
-          <input type="number" id="minDays" value="0" min="0" max="365" />
-        </label>
-        <label
-          >Max Days to Expiry
-          <input type="number" id="maxDays" value="365" min="0" max="365" />
-        </label>
-        <label
-          >Min Leverage
-          <input type="number" id="minLeverage" value="0" step="0.1" min="0" />
-        </label>
-        <label
-          >Max Time Value %
-          <input type="number" id="maxTvPct" value="100" step="0.1" min="0" />
-        </label>
-        <label
-          >Min Volume
-          <input type="number" id="minVolume" value="0" min="0" />
-        </label>
-        <div style="display: flex; flex-direction: column; gap: 8px">
-          <button class="primary" onclick="fetchData()">Fetch Warrants</button>
-          <button
-            class="success"
-            id="downloadBtn"
-            onclick="downloadCSV()"
-            style="display: none"
-          >
-            Download CSV
-          </button>
+
+        <div class="sort-btns">
+          <button onclick="sortByColumn('leverage_calc', false)">Leverage ↓</button>
+          <button onclick="sortByColumn('time_value_pct', true)">Time Value % ↑</button>
+          <button onclick="sortByColumn('volume', false)">Volume ↓</button>
         </div>
-      </div>
 
-      <div class="sort-btns">
-        <button onclick="sortByColumn('leverage_calc', false)">
-          Leverage ↓
-        </button>
-        <button onclick="sortByColumn('time_value_pct', true)">
-          Time Value % ↑
-        </button>
-        <button onclick="sortByColumn('volume', false)">Volume ↓</button>
-      </div>
-
-      <div id="status"></div>
-      <div id="tableContainer"></div>
+        <div id="status"></div>
+        <div id="tableContainer"></div>
+      </main>
     </div>
 
     <!-- IV SURFACE TAB -->
     <div id="tab-ivsurface" class="tab-content">
-      <div class="filters">
-        <div class="stock-select">
-          <span>Stock (multi-select)</span>
-          <select id="ivStockSelect" multiple>
-            <option value="2330">2330 台積電 (TSMC)</option>
-            <option value="2317">2317 鴻海 (Foxconn)</option>
-            <option value="2454">2454 聯發科 (MediaTek)</option>
-            <option value="2382">2382 廣達</option>
-            <option value="3231">3231 緯創</option>
-            <option value="6669">6669 緯穎</option>
-            <option value="2376">2376 技嘉</option>
-            <option value="3017">3017 奇鋐</option>
-            <option value="3324">3324 雙鴻</option>
-            <option value="2308">2308 台達電</option>
-            <option value="3711">3711 日月光投控</option>
-            <option value="3034">3034 聯詠</option>
-            <option value="2379">2379 瑞昱</option>
-            <option value="3661">3661 世芯-KY</option>
-            <option value="3443">3443 創意</option>
-            <option value="2603">2603 長榮</option>
-            <option value="3008">3008 大立光</option>
-            <option value="2881">2881 富邦金</option>
-            <option value="2882">2882 國泰金</option>
-            <option value="3037">3037 欣興</option>
-            <option value="2303">2303 聯電 (UMC)</option>
-            <option value="2886">2886 兆豐金</option>
-          </select>
-          <button class="select-all-btn" onclick="toggleSelectAllIV()">
-            Select All
-          </button>
+      <main>
+        <div class="filters">
+          <div class="stock-select">
+            <span>Stock (multi-select)</span>
+            <select id="ivStockSelect" multiple>
+              <option value="2330">2330 台積電 (TSMC)</option>
+              <option value="2317">2317 鴻海 (Foxconn)</option>
+              <option value="2454">2454 聯發科 (MediaTek)</option>
+              <option value="2382">2382 廣達</option>
+              <option value="3231">3231 緯創</option>
+              <option value="6669">6669 緯穎</option>
+              <option value="2376">2376 技嘉</option>
+              <option value="3017">3017 奇鋐</option>
+              <option value="3324">3324 雙鴻</option>
+              <option value="2308">2308 台達電</option>
+              <option value="3711">3711 日月光投控</option>
+              <option value="3034">3034 聯詠</option>
+              <option value="2379">2379 瑞昱</option>
+              <option value="3661">3661 世芯-KY</option>
+              <option value="3443">3443 創意</option>
+              <option value="2603">2603 長榮</option>
+              <option value="3008">3008 大立光</option>
+              <option value="2881">2881 富邦金</option>
+              <option value="2882">2882 國泰金</option>
+              <option value="3037">3037 欣興</option>
+              <option value="2303">2303 聯電 (UMC)</option>
+              <option value="2886">2886 兆豐金</option>
+            </select>
+            <button class="sm" onclick="toggleSelectAllIV()">Select All</button>
+          </div>
+          <label>Option Type
+            <select id="ivOptionType">
+              <option value="All">All</option>
+              <option value="Call">Call</option>
+              <option value="Put">Put</option>
+            </select>
+          </label>
+          <label>Highlight Warrant Code
+            <input type="text" id="highlightCode" placeholder="e.g. 061563" style="width:160px" />
+          </label>
+          <button class="primary" onclick="fetchIVSurface()">Plot IV Surface</button>
         </div>
-        <label
-          >Option Type
-          <select id="ivOptionType">
-            <option value="All">All</option>
-            <option value="Call">Call</option>
-            <option value="Put">Put</option>
-          </select>
-        </label>
-        <label
-          >Highlight Warrant Code (optional)
-          <input
-            type="text"
-            id="highlightCode"
-            placeholder="e.g. 061563"
-            style="width: 160px"
-          />
-        </label>
-        <button class="primary" onclick="fetchIVSurface()">
-          Plot IV Surface
-        </button>
-      </div>
-      <div id="iv-status"></div>
-      <div id="iv-plot"></div>
+
+        <div id="iv-status"></div>
+        <div id="iv-plot"></div>
+      </main>
     </div>
 
     <script>
       const DEFAULT_STOCKS = [
-        "2330",
-        "2317",
-        "2454",
-        "2382",
-        "3231",
-        "6669",
-        "2376",
-        "3017",
-        "3324",
-        "2308",
-        "3711",
-        "3034",
-        "2379",
-        "3661",
-        "3443",
-        "2603",
-        "3008",
-        "2881",
-        "2882",
-        "3037",
-        "2303",
-        "2886",
+        "2330","2317","2454","2382","3231","6669","2376","3017","3324",
+        "2308","3711","3034","2379","3661","3443","2603","3008","2881",
+        "2882","3037","2303","2886",
       ];
 
       let currentData = [];
+      let currentOptionsData = [];
       let sortCol = null;
       let sortAsc = true;
+      let optSortCol = null;
+      let optSortAsc = true;
       let allSelected = false;
       let allSelectedIV = false;
 
       function switchTab(tab, btn) {
-        document
-          .querySelectorAll(".tab-content")
-          .forEach((el) => el.classList.remove("active"));
-        document
-          .querySelectorAll(".tab-bar button")
-          .forEach((el) => el.classList.remove("active"));
+        document.querySelectorAll(".tab-content").forEach(el => el.classList.remove("active"));
+        document.querySelectorAll(".tab-bar button").forEach(el => el.classList.remove("active"));
         document.getElementById("tab-" + tab).classList.add("active");
         btn.classList.add("active");
       }
@@ -417,16 +545,14 @@
         const select = document.getElementById("stockSelect");
         allSelected = !allSelected;
         for (let opt of select.options) opt.selected = allSelected;
-        document.querySelectorAll(".select-all-btn")[0].textContent =
-          allSelected ? "Deselect All" : "Select All";
+        document.querySelectorAll(".btn-row .sm")[0].textContent = allSelected ? "Deselect All" : "Select All";
       }
 
       function toggleSelectAllIV() {
         const select = document.getElementById("ivStockSelect");
         allSelectedIV = !allSelectedIV;
         for (let opt of select.options) opt.selected = allSelectedIV;
-        document.querySelectorAll(".select-all-btn")[1].textContent =
-          allSelectedIV ? "Deselect All" : "Select All";
+        document.querySelector("#tab-ivsurface .sm").textContent = allSelectedIV ? "Deselect All" : "Select All";
       }
 
       function toggleAddStock() {
@@ -438,21 +564,15 @@
         const code = document.getElementById("newStockCode").value.trim();
         const name = document.getElementById("newStockName").value.trim();
         if (!code) return;
-
         const select = document.getElementById("stockSelect");
         for (let opt of select.options) {
-          if (opt.value === code) {
-            toggleAddStock();
-            return;
-          }
+          if (opt.value === code) { toggleAddStock(); return; }
         }
-
         const option = document.createElement("option");
         option.value = code;
         option.textContent = name ? `${code} ${name}` : code;
         option.selected = true;
         select.appendChild(option);
-
         document.getElementById("newStockCode").value = "";
         document.getElementById("newStockName").value = "";
         toggleAddStock();
@@ -464,10 +584,8 @@
           const res = await fetch("/get_custom_stocks");
           const stocks = await res.json();
           const select = document.getElementById("stockSelect");
-          stocks.forEach((s) => {
-            for (let opt of select.options) {
-              if (opt.value === s.code) return;
-            }
+          stocks.forEach(s => {
+            for (let opt of select.options) { if (opt.value === s.code) return; }
             const option = document.createElement("option");
             option.value = s.code;
             option.textContent = s.name ? `${s.code} ${s.name}` : s.code;
@@ -479,11 +597,8 @@
       async function saveCustomStocks() {
         const select = document.getElementById("stockSelect");
         const custom = Array.from(select.options)
-          .filter((o) => !DEFAULT_STOCKS.includes(o.value))
-          .map((o) => ({
-            code: o.value,
-            name: o.textContent.replace(o.value, "").trim(),
-          }));
+          .filter(o => !DEFAULT_STOCKS.includes(o.value))
+          .map(o => ({ code: o.value, name: o.textContent.replace(o.value, "").trim() }));
         await fetch("/save_custom_stocks", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -494,7 +609,7 @@
       function getFilters() {
         const select = document.getElementById("stockSelect");
         return {
-          stock_codes: Array.from(select.selectedOptions).map((o) => o.value),
+          stock_codes: Array.from(select.selectedOptions).map(o => o.value),
           option_type: document.getElementById("optionType").value,
           min_days: document.getElementById("minDays").value,
           max_days: document.getElementById("maxDays").value,
@@ -507,12 +622,10 @@
       async function fetchData() {
         const filters = getFilters();
         if (!filters.stock_codes.length) {
-          document.getElementById("status").textContent =
-            "Please select at least one stock.";
+          document.getElementById("status").textContent = "Please select at least one stock.";
           return;
         }
-        document.getElementById("status").textContent =
-          "Fetching... this may take a while for multiple stocks.";
+        document.getElementById("status").textContent = "Fetching…";
         document.getElementById("tableContainer").innerHTML = "";
         document.getElementById("downloadBtn").style.display = "none";
 
@@ -523,16 +636,14 @@
         });
         const data = await res.json();
         currentData = data.rows;
-        document.getElementById("status").textContent =
-          `Showing ${data.count} warrants`;
+        document.getElementById("status").textContent = `${data.count} warrants`;
         document.getElementById("downloadBtn").style.display = "inline-block";
         renderTable(currentData);
       }
 
       function renderTable(rows) {
         if (!rows.length) {
-          document.getElementById("tableContainer").innerHTML =
-            "<p>No results.</p>";
+          document.getElementById("tableContainer").innerHTML = "<p style='padding:16px;color:var(--muted)'>No results.</p>";
           return;
         }
         const cols = Object.keys(rows[0]);
@@ -542,10 +653,10 @@
           html += `<th onclick="sortBy(${i})">${c}${arrow}</th>`;
         });
         html += "</tr></thead><tbody>";
-        rows.forEach((row) => {
+        rows.forEach(row => {
           const cls = row.type === "Call" ? "call" : "put";
           html += "<tr>";
-          cols.forEach((c) => {
+          cols.forEach(c => {
             const val = row[c];
             html += `<td>${c === "type" ? `<span class="${cls}">${val}</span>` : val}</td>`;
           });
@@ -558,24 +669,18 @@
       function sortBy(colIndex) {
         const key = Object.keys(currentData[0])[colIndex];
         if (sortCol === colIndex) sortAsc = !sortAsc;
-        else {
-          sortCol = colIndex;
-          sortAsc = true;
-        }
+        else { sortCol = colIndex; sortAsc = true; }
         currentData.sort((a, b) => {
-          const av = a[key],
-            bv = b[key];
+          const av = a[key], bv = b[key];
           if (typeof av === "number") return sortAsc ? av - bv : bv - av;
-          return sortAsc
-            ? String(av).localeCompare(String(bv))
-            : String(bv).localeCompare(String(av));
+          return sortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
         });
         renderTable(currentData);
       }
 
       function sortByColumn(key, asc) {
         if (!currentData.length) return;
-        currentData.sort((a, b) => (asc ? a[key] - b[key] : b[key] - a[key]));
+        currentData.sort((a, b) => asc ? a[key] - b[key] : b[key] - a[key]);
         renderTable(currentData);
       }
 
@@ -595,16 +700,12 @@
 
       async function fetchIVSurface() {
         const select = document.getElementById("ivStockSelect");
-        const stock_codes = Array.from(select.selectedOptions).map(
-          (o) => o.value,
-        );
+        const stock_codes = Array.from(select.selectedOptions).map(o => o.value);
         if (!stock_codes.length) {
-          document.getElementById("iv-status").textContent =
-            "Please select at least one stock.";
+          document.getElementById("iv-status").textContent = "Please select at least one stock.";
           return;
         }
-        document.getElementById("iv-status").textContent =
-          "Fetching data and building surface...";
+        document.getElementById("iv-status").textContent = "Building surface…";
         document.getElementById("iv-plot").innerHTML = "";
 
         const payload = {
@@ -621,35 +722,28 @@
         const data = await res.json();
 
         if (data.error) {
-          document.getElementById("iv-status").textContent =
-            "Error: " + data.error;
+          document.getElementById("iv-status").textContent = "Error: " + data.error;
           return;
         }
 
-        document.getElementById("iv-status").textContent =
-          `Plotted ${data.scatter_x.length} warrants`;
+        document.getElementById("iv-status").textContent = `${data.scatter_x.length} warrants plotted`;
 
         const traces = [
           {
             type: "surface",
-            x: data.x,
-            y: data.y,
-            z: data.z,
+            x: data.x, y: data.y, z: data.z,
             colorscale: "Viridis",
             opacity: 0.85,
-            colorbar: { title: "IV (%)" },
+            colorbar: { title: "IV (%)", tickfont: { color: "#8b90a0" }, titlefont: { color: "#8b90a0" } },
             name: "IV Surface",
           },
           {
             type: "scatter3d",
-            x: data.scatter_x,
-            y: data.scatter_y,
-            z: data.scatter_z,
+            x: data.scatter_x, y: data.scatter_y, z: data.scatter_z,
             mode: "markers",
-            marker: { size: 3, color: "red", opacity: 0.4 },
+            marker: { size: 3, color: "#ef4444", opacity: 0.5 },
             text: data.codes.map((c, i) => c + " " + data.names[i]),
-            hovertemplate:
-              "%{text}<br>Strike: %{x:.0f}<br>DTE: %{y}<br>IV: %{z:.1f}%<extra></extra>",
+            hovertemplate: "%{text}<br>Strike: %{x:.0f}<br>DTE: %{y}<br>IV: %{z:.1f}%<extra></extra>",
             name: "Warrants",
           },
         ];
@@ -658,40 +752,135 @@
           const h = data.highlight;
           traces.push({
             type: "scatter3d",
-            x: [h.x],
-            y: [h.y],
-            z: [h.z],
+            x: [h.x], y: [h.y], z: [h.z],
             mode: "markers+text",
-            marker: {
-              size: 6,
-              color: "yellow",
-              symbol: "diamond",
-              opacity: 1.0,
-              line: { color: "black", width: 2 },
-            },
+            marker: { size: 6, color: "#fbbf24", symbol: "diamond", opacity: 1.0, line: { color: "#fff", width: 2 } },
             text: [h.code],
             textposition: "top center",
-            textfont: { color: "white", size: 12 },
+            textfont: { color: "#fbbf24", size: 12 },
             hovertemplate: `${h.code}<br>Strike: %{x:.0f}<br>DTE: %{y}<br>IV: %{z:.1f}%<extra></extra>`,
             name: "Selected: " + h.code,
           });
         }
 
-        Plotly.newPlot(
-          "iv-plot",
-          traces,
-          {
-            title: "Warrant IV Surface",
-            scene: {
-              xaxis: { title: "Strike (NT$)" },
-              yaxis: { title: "Days to Expiry" },
-              zaxis: { title: "IV (%)", range: [0, 100] },
-              camera: { eye: { x: 1.5, y: -1.5, z: 1.0 } },
-            },
-            margin: { l: 0, r: 0, t: 40, b: 0 },
+        Plotly.newPlot("iv-plot", traces, {
+          title: { text: "Warrant IV Surface", font: { color: "#e2e8f0", size: 15 } },
+          paper_bgcolor: "#13161f",
+          plot_bgcolor: "#13161f",
+          scene: {
+            bgcolor: "#0d0f16",
+            xaxis: { title: "Strike (NT$)", color: "#8b90a0", gridcolor: "#252836", zerolinecolor: "#252836" },
+            yaxis: { title: "Days to Expiry", color: "#8b90a0", gridcolor: "#252836", zerolinecolor: "#252836" },
+            zaxis: { title: "IV (%)", range: [0, 100], color: "#8b90a0", gridcolor: "#252836", zerolinecolor: "#252836" },
+            camera: { eye: { x: 1.5, y: -1.5, z: 1.0 } },
           },
-          { responsive: true },
-        );
+          legend: { font: { color: "#8b90a0" }, bgcolor: "#13161f" },
+          margin: { l: 0, r: 0, t: 48, b: 0 },
+        }, { responsive: true });
+      }
+
+      // ── Options Scanner ────────────────────────────────────────────────
+      function getOptionsFilters() {
+        const select = document.getElementById("optionStockSelect");
+        return {
+          stock_codes: Array.from(select.selectedOptions).map(o => o.value),
+          option_type: document.getElementById("optionsType").value,
+          min_days: document.getElementById("optMinDays").value,
+          max_days: document.getElementById("optMaxDays").value,
+          min_leverage: document.getElementById("optMinLeverage").value,
+          min_volume: document.getElementById("optMinVolume").value,
+        };
+      }
+
+      async function fetchOptionsData() {
+        const filters = getOptionsFilters();
+        if (!filters.stock_codes.length) {
+          document.getElementById("opt-status").textContent = "Please select at least one product.";
+          return;
+        }
+        document.getElementById("opt-status").textContent = "Fetching…";
+        document.getElementById("opt-tableContainer").innerHTML = "";
+        document.getElementById("optDownloadBtn").style.display = "none";
+
+        const res = await fetch("/fetch_options", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(filters),
+        });
+        const data = await res.json();
+        if (data.error) {
+          document.getElementById("opt-status").textContent = "Error: " + data.error;
+          return;
+        }
+        currentOptionsData = data.rows;
+        document.getElementById("opt-status").textContent = `${data.count} options`;
+        document.getElementById("optDownloadBtn").style.display = "inline-block";
+        renderOptionsTable(currentOptionsData);
+      }
+
+      function renderOptionsTable(rows) {
+        const container = document.getElementById("opt-tableContainer");
+        if (!rows.length) {
+          container.innerHTML = "<p style='padding:16px;color:var(--muted)'>No results.</p>";
+          return;
+        }
+        const cols = Object.keys(rows[0]);
+        let html = "<table><thead><tr>";
+        cols.forEach((c, i) => {
+          const arrow = optSortCol === i ? (optSortAsc ? " ▲" : " ▼") : "";
+          html += `<th onclick="sortOptBy(${i})">${c}${arrow}</th>`;
+        });
+        html += "</tr></thead><tbody>";
+        rows.forEach(row => {
+          const cls = row.type === "Call" ? "call" : "put";
+          html += "<tr>";
+          cols.forEach(c => {
+            const val = row[c] === null ? "—" : row[c];
+            html += `<td>${c === "type" ? `<span class="${cls}">${val}</span>` : val}</td>`;
+          });
+          html += "</tr>";
+        });
+        html += "</tbody></table>";
+        container.innerHTML = html;
+      }
+
+      function sortOptBy(colIndex) {
+        if (!currentOptionsData.length) return;
+        const key = Object.keys(currentOptionsData[0])[colIndex];
+        if (optSortCol === colIndex) optSortAsc = !optSortAsc;
+        else { optSortCol = colIndex; optSortAsc = true; }
+        currentOptionsData.sort((a, b) => {
+          const av = a[key], bv = b[key];
+          if (av === null) return 1;
+          if (bv === null) return -1;
+          if (typeof av === "number") return optSortAsc ? av - bv : bv - av;
+          return optSortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+        });
+        renderOptionsTable(currentOptionsData);
+      }
+
+      function sortOptionsBy(key, asc) {
+        if (!currentOptionsData.length) return;
+        currentOptionsData.sort((a, b) => {
+          const av = a[key] ?? (asc ? Infinity : -Infinity);
+          const bv = b[key] ?? (asc ? Infinity : -Infinity);
+          return asc ? av - bv : bv - av;
+        });
+        renderOptionsTable(currentOptionsData);
+      }
+
+      async function downloadOptionsCSV() {
+        const res = await fetch("/download_options", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(getOptionsFilters()),
+        });
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "options.csv";
+        a.click();
       }
 
       loadCustomStocks();
