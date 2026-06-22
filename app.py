@@ -272,7 +272,7 @@ def _build_arb_df(option_type, max_strike_diff_pct, max_dte_diff):
         best = candidates.loc[score.idxmin()]
 
         ratio = float(w["exercise_ratio"])
-        warrants_needed = round(1000 / ratio)
+        warrants_needed = round(2000 / ratio)
         warrant_per_share = round(float(w["ask"]) / ratio, 4)
         opt_per_share = round(float(best["ask"]), 4)
         price_diff = round(opt_per_share - warrant_per_share, 4)
@@ -391,7 +391,7 @@ def _build_arb_pcp_df(option_type, max_strike_diff_pct, max_dte_diff):
                 "warrant_strike": w["strike"],
                 "opt_strike": int(K),
                 "strike_diff_pct": round(float(best["strike_diff_pct"]), 2),
-                "warrants_needed": round(1000 / ratio),
+                "warrants_needed": round(2000 / ratio),
                 "warrant_ask": w["ask"],
                 "opt_ask": round(opt_ask, 4),
                 "warrant_per_share": round(warrant_per_share, 4),

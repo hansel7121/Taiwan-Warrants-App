@@ -13,7 +13,7 @@ TAIFEX_URL = "https://www.taifex.com.tw/cht/3/optDataDown"
 COMMODITY_MAP = {
     "TXO":  {"commodity_ids": ["TXO"],         "ticker": "^TWII",   "exercise_ratio": 50},
     # TSMC individual stock options use product codes CDA (A-series) + CDO (O-series)
-    "2330": {"commodity_ids": ["CDA", "CDO"],   "ticker": "2330.TW", "exercise_ratio": 1000},
+    "2330": {"commodity_ids": ["CDA", "CDO"],   "ticker": "2330.TW", "exercise_ratio": 2000},
 }
 
 # Module-level cache: (commodity_id -> (timestamp, DataFrame))

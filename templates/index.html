@@ -1403,6 +1403,9 @@
         const maxDte = row.opt_dte;
         const bondPv = Ko * Math.exp(-R_FREE * maxDte / 365);
         const n = row.warrants_needed;
+        // Contract size = how many underlying shares one option contract controls
+        const contractSize = (n && row.warrant_ask && row.warrant_per_share)
+          ? Math.round(n * row.warrant_ask / row.warrant_per_share) : 2000;
 
         const modeLabel = mode === "direct" ? "Direct Match" : "PCP Arb";
         document.getElementById("pcp-modal-title").textContent =
@@ -1418,26 +1421,26 @@
             // Warrant cheaper → buy warrant, sell option
             legs = [
               { action:"BUY",  instrument:wLabel,  qty:n,    price:row.warrant_ask, cf:-(n*row.warrant_ask) },
-              { action:"SELL", instrument:oLabel,  qty:1000, price:row.opt_ask,     cf: 1000*row.opt_ask },
+              { action:"SELL", instrument:oLabel,  qty:contractSize, price:row.opt_ask,     cf: contractSize*row.opt_ask },
             ];
           } else {
             // Option cheaper → sell warrant, buy option
             legs = [
               { action:"SELL", instrument:wLabel,  qty:n,    price:row.warrant_ask, cf: n*row.warrant_ask },
-              { action:"BUY",  instrument:oLabel,  qty:1000, price:row.opt_ask,     cf:-1000*row.opt_ask },
+              { action:"BUY",  instrument:oLabel,  qty:contractSize, price:row.opt_ask,     cf:-contractSize*row.opt_ask },
             ];
           }
         } else {
           legs = isCall ? [
             { action:"BUY",   instrument:`${n} × ${row.warrant_code} (call warrant)`,  qty:n,      price:row.warrant_ask,       cf:-(n*row.warrant_ask) },
-            { action:"SHORT", instrument:"1,000 shares TSMC",                           qty:-1000,  price:S0,                    cf: 1000*S0 },
-            { action:"LEND",  instrument:`Bond (receive ${Ko.toFixed(0)} × 1,000 at expiry)`, qty:1000, price:bondPv.toFixed(2),  cf:-(1000*bondPv) },
-            { action:"SELL",  instrument:`${row.option_contract} put option (×1,000 shares)`, qty:1000, price:row.opt_ask,       cf: 1000*row.opt_ask },
+            { action:"SHORT", instrument:`${contractSize.toLocaleString()} shares TSMC`,   qty:-contractSize, price:S0,           cf: contractSize*S0 },
+            { action:"LEND",  instrument:`Bond (receive ${Ko.toFixed(0)} × ${contractSize.toLocaleString()} at expiry)`, qty:contractSize, price:bondPv.toFixed(2), cf:-(contractSize*bondPv) },
+            { action:"SELL",  instrument:`${row.option_contract} put option (×${contractSize.toLocaleString()} shares)`, qty:contractSize, price:row.opt_ask, cf: contractSize*row.opt_ask },
           ] : [
             { action:"BUY",   instrument:`${n} × ${row.warrant_code} (put warrant)`,   qty:n,      price:row.warrant_ask,       cf:-(n*row.warrant_ask) },
-            { action:"BUY",   instrument:"1,000 shares TSMC",                           qty:1000,   price:S0,                    cf:-1000*S0 },
-            { action:"BORROW",instrument:`Bond (repay ${Ko.toFixed(0)} × 1,000 at expiry)`, qty:1000, price:bondPv.toFixed(2),   cf: 1000*bondPv },
-            { action:"SELL",  instrument:`${row.option_contract} call option (×1,000 shares)`, qty:1000, price:row.opt_ask,      cf: 1000*row.opt_ask },
+            { action:"BUY",   instrument:`${contractSize.toLocaleString()} shares TSMC`,  qty:contractSize, price:S0,           cf:-contractSize*S0 },
+            { action:"BORROW",instrument:`Bond (repay ${Ko.toFixed(0)} × ${contractSize.toLocaleString()} at expiry)`, qty:contractSize, price:bondPv.toFixed(2), cf: contractSize*bondPv },
+            { action:"SELL",  instrument:`${row.option_contract} call option (×${contractSize.toLocaleString()} shares)`, qty:contractSize, price:row.opt_ask, cf: contractSize*row.opt_ask },
           ];
         }
         const netCf = legs.reduce((s,l)=>s+l.cf, 0);
@@ -1494,7 +1497,7 @@
             <th style="${thS};text-align:right">IV</th>
             <th style="${thS};text-align:right">Exercise Ratio</th>
             <th style="${thS};text-align:right">Price / share</th>
-            <th style="${thS};text-align:right">Contract cost (×1,000)</th>
+            <th style="${thS};text-align:right">Contract cost (×${contractSize.toLocaleString()})</th>
           </tr></thead>
           <tbody>
             <tr>
@@ -1503,9 +1506,9 @@
               <td style="${tdR}">${Number(row.opt_strike).toLocaleString()}</td>
               <td style="${tdR}">${row.opt_dte}d</td>
               <td style="${tdR}">${row.opt_iv!=null?(row.opt_iv*100).toFixed(2)+"%" : "—"}</td>
-              <td style="${tdR}">1,000 shares/contract</td>
+              <td style="${tdR}">${contractSize.toLocaleString()} shares/contract</td>
               <td style="${tdR}">${fmt(optPrice,4)}</td>
-              <td style="${tdR}">${Math.round(optPrice*1000).toLocaleString()}</td>
+              <td style="${tdR}">${Math.round(optPrice*contractSize).toLocaleString()}</td>
             </tr>
             <tr>
               <td style="${tdL};color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.3px">Warrant</td>
@@ -1515,7 +1518,7 @@
               <td style="${tdR}">${row.warrant_iv!=null?(row.warrant_iv*100).toFixed(2)+"%" : "—"}</td>
               <td style="${tdR}">${wRatio!=null?wRatio.toFixed(4)+" shares/warrant":"—"}</td>
               <td style="${tdR}">${fmt(wPrice,4)}</td>
-              <td style="${tdR}">${Math.round(wPrice*1000).toLocaleString()}</td>
+              <td style="${tdR}">${Math.round(wPrice*contractSize).toLocaleString()}</td>
             </tr>
             <tr style="background:var(--surface)">
               <td style="${tdL};color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.3px">PCP diff</td>
@@ -1525,7 +1528,7 @@
               <td style="${tdR};color:${diffColor(ivDiff)}">${ivDiff!=null?fmtPct(ivDiff*100):"—"}</td>
               <td style="${tdRm}">—</td>
               <td style="${tdR};color:${diffColor(pcpDiff)};font-weight:600">${fmt(pcpDiff,4)} <span style="font-size:10px;opacity:.7">(${fmtPct(row.pcp_diff_pct)})</span></td>
-              <td style="${tdR};color:${diffColor(pcpDiff)};font-weight:600">${Math.round(pcpDiff*1000)>=0?"+":""}${Math.round(pcpDiff*1000).toLocaleString()}</td>
+              <td style="${tdR};color:${diffColor(pcpDiff)};font-weight:600">${Math.round(pcpDiff*contractSize)>=0?"+":""}${Math.round(pcpDiff*contractSize).toLocaleString()}</td>
             </tr>
           </tbody>`;
 
@@ -1563,11 +1566,11 @@
         for (let i=0; i<=n; i++) {
           const S = lo + (hi-lo)*i/n;
           spots.push(parseFloat(S.toFixed(2)));
-          pnls.push(parseFloat((pnlPerShare(S, row, tau) * 1000).toFixed(0)));
+          pnls.push(parseFloat((pnlPerShare(S, row, tau) * contractSize).toFixed(0)));
         }
 
         // Also plot at expiry for reference
-        const pnlsExp = spots.map(S => parseFloat((pnlPerShare(S, row, 0) * 1000).toFixed(0)));
+        const pnlsExp = spots.map(S => parseFloat((pnlPerShare(S, row, 0) * contractSize).toFixed(0)));
 
         const zeroLine = [{x:[lo,hi],y:[0,0],mode:"lines",
           line:{color:"rgba(255,255,255,0.15)",dash:"dash",width:1},
@@ -1585,7 +1588,7 @@
         };
 
         // Mark current spot
-        const spotPnl = parseFloat((pnlPerShare(S0, row, tau)*1000).toFixed(0));
+        const spotPnl = parseFloat((pnlPerShare(S0, row, tau)*contractSize).toFixed(0));
         const spotTrace = {
           x:[S0], y:[spotPnl], mode:"markers+text", name:"Current spot",
           marker:{color:"white",size:7,symbol:"circle"},
