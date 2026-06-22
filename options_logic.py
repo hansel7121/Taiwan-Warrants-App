@@ -1,4 +1,5 @@
 import io
+import time
 import requests
 import pandas as pd
 import numpy as np
@@ -16,6 +17,11 @@ COMMODITY_MAP = {
     "TXO": {"commodity_id": "TXO", "ticker": "^TWII", "exercise_ratio": 50},
 }
 
+# Module-level cache: (commodity_id -> (timestamp, DataFrame))
+_taifex_cache: dict = {}
+_spot_cache: dict = {}
+_CACHE_TTL = 1800  # 30 minutes
+
 
 def _decode(content):
     for enc in ("big5", "cp950", "utf-8-sig", "utf-8"):
@@ -27,37 +33,69 @@ def _decode(content):
 
 
 def _fetch_taifex(commodity_id):
+    now = time.time()
+    if commodity_id in _taifex_cache:
+        ts, cached_df = _taifex_cache[commodity_id]
+        if now - ts < _CACHE_TTL:
+            return cached_df
+
     today = pd.Timestamp.today()
-    for i in range(7):
-        d = today - pd.Timedelta(days=i)
-        r = requests.post(
-            TAIFEX_URL,
-            data={
-                "down_type": "1",
-                "commodity_id": commodity_id,
-                "queryStartDate": d.strftime("%Y/%m/%d"),
-                "queryEndDate": d.strftime("%Y/%m/%d"),
-            },
-            headers={"User-Agent": "Mozilla/5.0", "Referer": TAIFEX_URL},
-            timeout=15,
+    # Single request covering last 7 days — avoids one HTTP call per day
+    start = (today - pd.Timedelta(days=7)).strftime("%Y/%m/%d")
+    end = today.strftime("%Y/%m/%d")
+    r = requests.post(
+        TAIFEX_URL,
+        data={
+            "down_type": "1",
+            "commodity_id": commodity_id,
+            "queryStartDate": start,
+            "queryEndDate": end,
+        },
+        headers={"User-Agent": "Mozilla/5.0", "Referer": TAIFEX_URL},
+        timeout=15,
+    )
+    r.raise_for_status()
+    text = _decode(r.content)
+    lines = [l for l in text.strip().splitlines() if l.strip()]
+    if len(lines) <= 2:
+        raise RuntimeError(f"No data for {commodity_id} in last 7 trading days")
+
+    df = pd.read_csv(io.StringIO(text))
+    if df.empty:
+        raise RuntimeError(f"Empty response for {commodity_id}")
+
+    # Find the most recent date that has valid settlement prices
+    date_col = next((c for c in df.columns if "交易日期" in c.strip()), None)
+    settle_col = next((c for c in df.columns if "結算" in c.strip()), None)
+    if date_col and settle_col:
+        df["_settle_num"] = pd.to_numeric(
+            df[settle_col].astype(str).str.strip().replace("-", ""), errors="coerce"
         )
-        r.raise_for_status()
-        text = _decode(r.content)
-        lines = [l for l in text.strip().splitlines() if l.strip()]
-        if len(lines) > 2:
-            df = pd.read_csv(io.StringIO(text))
-            if len(df) > 0:
-                # Verify at least some settlement prices are usable
-                settle_col = next((c for c in df.columns if "結算" in c.strip()), None)
-                if settle_col:
-                    settle = pd.to_numeric(
-                        df[settle_col].astype(str).str.strip().replace("-", ""),
-                        errors="coerce",
-                    )
-                    if (settle > 0).sum() < 10:
-                        continue  # weekend/holiday: settlement data not yet available
-                return df
-    raise RuntimeError(f"No data for {commodity_id} in last 7 trading days")
+        dates_with_data = (
+            df[df["_settle_num"] > 0]
+            .groupby(date_col)
+            .size()
+        )
+        if dates_with_data.empty:
+            raise RuntimeError(f"No usable settlement data for {commodity_id}")
+        latest = dates_with_data.index.max()
+        df = df[df[date_col] == latest].drop(columns=["_settle_num"])
+    else:
+        df = df.drop(columns=["_settle_num"], errors="ignore")
+
+    _taifex_cache[commodity_id] = (now, df)
+    return df
+
+
+def _get_spot(ticker):
+    now = time.time()
+    if ticker in _spot_cache:
+        ts, price = _spot_cache[ticker]
+        if now - ts < _CACHE_TTL:
+            return price
+    price = yf.Ticker(ticker).fast_info["last_price"]
+    _spot_cache[ticker] = (now, price)
+    return price
 
 
 def _clean_num(series, fill=np.nan):
@@ -214,7 +252,7 @@ def fetch_options(
             continue
         cfg = COMMODITY_MAP[code]
         try:
-            S = yf.Ticker(cfg["ticker"]).fast_info["last_price"]
+            S = _get_spot(cfg["ticker"])
             raw = _fetch_taifex(cfg["commodity_id"])
             df = _parse_and_compute(raw, S, cfg["exercise_ratio"])
             if not df.empty:
