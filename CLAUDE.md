@@ -52,6 +52,13 @@ The app has two layers:
 
 After finishing any code change, always commit and push to GitHub (`git add`, `git commit`, `git push origin main`) without waiting to be asked.
 
+**Clear server cache / restart app (copy-paste ready):**
+```bash
+pkill -f "python app.py" 2>/dev/null; lsof -ti:5000 | xargs kill -9 2>/dev/null; sleep 1 && conda run -n godepy python app.py &> /tmp/app_fresh.log & sleep 5 && open http://127.0.0.1:5000/
+```
+
+**Hard-refresh browser cache:** `Cmd + Shift + R`
+
 ## Key runtime detail
 
 When frozen by PyInstaller (`sys.frozen == True`), the Playwright Chromium binary must be located at `<exe_dir>/ms-playwright/`. The `PLAYWRIGHT_BROWSERS_PATH` env var is set accordingly at import time in `warrant_logic.py`.
