@@ -118,7 +118,8 @@ def fetch_options():
         df = options_logic.fetch_options(
             stock_codes, option_type, min_days, max_days, min_leverage, min_volume
         )
-        rows = df.where(pd.notnull(df), None).to_dict(orient="records")
+        # Use pandas JSON serialisation so NaN → null (browser JSON.parse rejects bare NaN)
+        rows = json.loads(df.to_json(orient="records"))
         return jsonify({"rows": rows, "count": len(df)})
     except Exception as e:
         return jsonify({"rows": [], "count": 0, "error": str(e)})
