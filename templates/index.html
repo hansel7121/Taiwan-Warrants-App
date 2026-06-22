@@ -1280,9 +1280,9 @@
           html += `<th onclick="sortArbByIndex(${i})">${c}${arrow}</th>`;
         });
         html += "</tr></thead><tbody>";
-        rows.forEach(row => {
+        rows.forEach((row, ri) => {
           const typeCls = row.type === "Call" ? "call" : "put";
-          html += "<tr>";
+          html += `<tr style="cursor:pointer" onclick="openDirectModal(currentArbData[${ri}])" title="Click to view trade breakdown">`;
           cols.forEach(c => {
             let val = row[c] === null ? "—" : row[c];
             if (c === "type") {
@@ -1326,7 +1326,40 @@
         renderArbTable(currentArbData);
       }
 
-      // ── PCP Trade Modal ────────────────────────────────────────────────
+      // ── Direct Match Modal ─────────────────────────────────────────────
+      function openDirectModal(row) {
+        // Re-map Direct Match row fields to the shape openArbModal expects
+        const mapped = {
+          warrant_code:     row.warrant_code,
+          warrant_name:     row.warrant_name,
+          warrant_type:     row.type,
+          opt_type:         row.type,            // same type in Direct Match
+          option_contract:  row.option_contract,
+          underlying_price: row.underlying_price,
+          warrant_dte:      row.warrant_dte,
+          opt_dte:          row.opt_dte,
+          dte_diff:         row.dte_diff,
+          warrant_strike:   row.warrant_strike,
+          opt_strike:       row.opt_strike,
+          strike_diff_pct:  row.strike_diff_pct,
+          warrants_needed:  row.warrants_needed,
+          warrant_ask:      row.warrant_ask,
+          opt_ask:          row.opt_ask,
+          warrant_per_share:row.warrant_per_share,
+          opt_per_share:    row.opt_per_share,
+          // Use price_diff as the arb signal (opt_per_share - warrant_per_share)
+          pcp_diff:         row.price_diff,
+          pcp_diff_pct:     row.price_diff_pct,
+          // Synthetic price = opt_per_share (no PCP conversion needed — same type)
+          synthetic_price:  row.opt_per_share,
+          bond_pv:          null,
+          warrant_iv:       row.warrant_iv,
+          opt_iv:           row.opt_iv,
+        };
+        openArbModal(mapped, "direct");
+      }
+
+      // ── PCP Trade Modal ─────────────────────────────────────────────────
       const R_FREE = 0.01875;
       let _pcpRow = null;
 
@@ -1359,7 +1392,9 @@
         }
       }
 
-      function openPcpModal(row) {
+      function openPcpModal(row) { openArbModal(row, "pcp"); }
+
+      function openArbModal(row, mode) {
         _pcpRow = row;
         const isCall = row.warrant_type === "Call";
         const S0 = row.underlying_price;
@@ -1369,21 +1404,42 @@
         const bondPv = Ko * Math.exp(-R_FREE * maxDte / 365);
         const n = row.warrants_needed;
 
+        const modeLabel = mode === "direct" ? "Direct Match" : "PCP Arb";
         document.getElementById("pcp-modal-title").textContent =
-          `${row.warrant_name} (${row.warrant_type}) ↔ ${row.option_contract} (${row.opt_type})  —  PCP Arb`;
+          `${row.warrant_name} (${row.warrant_type}) ↔ ${row.option_contract} (${row.opt_type})  —  ${modeLabel}`;
 
         // ── Trade legs ──────────────────────────────────────────────────
-        const legs = isCall ? [
-          { action:"BUY",   instrument:`${n} × ${row.warrant_code} (call warrant)`,  qty:n,      price:row.warrant_ask,       cf:-(n*row.warrant_ask) },
-          { action:"SHORT", instrument:"1,000 shares TSMC",                           qty:-1000,  price:S0,                    cf: 1000*S0 },
-          { action:"LEND",  instrument:`Bond (receive ${Ko.toFixed(0)} × 1,000 at expiry)`, qty:1000, price:bondPv.toFixed(2),  cf:-(1000*bondPv) },
-          { action:"SELL",  instrument:`${row.option_contract} put option (×1,000 shares)`, qty:1000, price:row.opt_ask,       cf: 1000*row.opt_ask },
-        ] : [
-          { action:"BUY",   instrument:`${n} × ${row.warrant_code} (put warrant)`,   qty:n,      price:row.warrant_ask,       cf:-(n*row.warrant_ask) },
-          { action:"BUY",   instrument:"1,000 shares TSMC",                           qty:1000,   price:S0,                    cf:-1000*S0 },
-          { action:"BORROW",instrument:`Bond (repay ${Ko.toFixed(0)} × 1,000 at expiry)`, qty:1000, price:bondPv.toFixed(2),   cf: 1000*bondPv },
-          { action:"SELL",  instrument:`${row.option_contract} call option (×1,000 shares)`, qty:1000, price:row.opt_ask,      cf: 1000*row.opt_ask },
-        ];
+        let legs;
+        if (mode === "direct") {
+          // Simple 2-leg trade: buy cheaper warrant, sell pricier same-type option
+          const wLabel = `${n} × ${row.warrant_code} (${row.warrant_type.toLowerCase()} warrant)`;
+          const oLabel = `${row.option_contract} ${row.opt_type.toLowerCase()} option (×1,000 shares)`;
+          if (row.pcp_diff >= 0) {
+            // Warrant cheaper → buy warrant, sell option
+            legs = [
+              { action:"BUY",  instrument:wLabel,  qty:n,    price:row.warrant_ask, cf:-(n*row.warrant_ask) },
+              { action:"SELL", instrument:oLabel,  qty:1000, price:row.opt_ask,     cf: 1000*row.opt_ask },
+            ];
+          } else {
+            // Option cheaper → sell warrant, buy option
+            legs = [
+              { action:"SELL", instrument:wLabel,  qty:n,    price:row.warrant_ask, cf: n*row.warrant_ask },
+              { action:"BUY",  instrument:oLabel,  qty:1000, price:row.opt_ask,     cf:-1000*row.opt_ask },
+            ];
+          }
+        } else {
+          legs = isCall ? [
+            { action:"BUY",   instrument:`${n} × ${row.warrant_code} (call warrant)`,  qty:n,      price:row.warrant_ask,       cf:-(n*row.warrant_ask) },
+            { action:"SHORT", instrument:"1,000 shares TSMC",                           qty:-1000,  price:S0,                    cf: 1000*S0 },
+            { action:"LEND",  instrument:`Bond (receive ${Ko.toFixed(0)} × 1,000 at expiry)`, qty:1000, price:bondPv.toFixed(2),  cf:-(1000*bondPv) },
+            { action:"SELL",  instrument:`${row.option_contract} put option (×1,000 shares)`, qty:1000, price:row.opt_ask,       cf: 1000*row.opt_ask },
+          ] : [
+            { action:"BUY",   instrument:`${n} × ${row.warrant_code} (put warrant)`,   qty:n,      price:row.warrant_ask,       cf:-(n*row.warrant_ask) },
+            { action:"BUY",   instrument:"1,000 shares TSMC",                           qty:1000,   price:S0,                    cf:-1000*S0 },
+            { action:"BORROW",instrument:`Bond (repay ${Ko.toFixed(0)} × 1,000 at expiry)`, qty:1000, price:bondPv.toFixed(2),   cf: 1000*bondPv },
+            { action:"SELL",  instrument:`${row.option_contract} call option (×1,000 shares)`, qty:1000, price:row.opt_ask,      cf: 1000*row.opt_ask },
+          ];
+        }
         const netCf = legs.reduce((s,l)=>s+l.cf, 0);
 
         const actionColor = a => a==="BUY"||a==="LEND" ? "var(--call)" : "var(--put)";
