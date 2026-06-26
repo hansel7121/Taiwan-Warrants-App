@@ -1562,6 +1562,10 @@
         const contractSize = _contractSize;
         const S0 = row.underlying_price;
         const tau = dte / 365;
+        // dir flips the sign so the chart always shows P&L from the correct
+        // trade direction: buy cheap / sell expensive.
+        // pnlPerShare assumes long warrant + short option; negate when reversed.
+        const dir = row.pcp_diff >= 0 ? 1 : -1;
         const spots = [];
         const pnls  = [];
         const n = 200;
@@ -1569,11 +1573,11 @@
         for (let i=0; i<=n; i++) {
           const S = lo + (hi-lo)*i/n;
           spots.push(parseFloat(S.toFixed(2)));
-          pnls.push(parseFloat((pnlPerShare(S, row, tau) * contractSize).toFixed(0)));
+          pnls.push(parseFloat((dir * pnlPerShare(S, row, tau) * contractSize).toFixed(0)));
         }
 
         // Also plot at expiry for reference
-        const pnlsExp = spots.map(S => parseFloat((pnlPerShare(S, row, 0) * contractSize).toFixed(0)));
+        const pnlsExp = spots.map(S => parseFloat((dir * pnlPerShare(S, row, 0) * contractSize).toFixed(0)));
 
         const zeroLine = [{x:[lo,hi],y:[0,0],mode:"lines",
           line:{color:"rgba(255,255,255,0.15)",dash:"dash",width:1},
@@ -1591,7 +1595,7 @@
         };
 
         // Mark current spot
-        const spotPnl = parseFloat((pnlPerShare(S0, row, tau)*contractSize).toFixed(0));
+        const spotPnl = parseFloat((dir * pnlPerShare(S0, row, tau)*contractSize).toFixed(0));
         const spotTrace = {
           x:[S0], y:[spotPnl], mode:"markers+text", name:"Current spot",
           marker:{color:"white",size:7,symbol:"circle"},
