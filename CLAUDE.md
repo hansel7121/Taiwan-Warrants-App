@@ -59,6 +59,10 @@ pkill -f "python app.py" 2>/dev/null; lsof -ti:5000 | xargs kill -9 2>/dev/null;
 
 **Hard-refresh browser cache:** `Cmd + Shift + R`
 
+## Taiwan options exercise ratios
+
+All Taiwan equity individual stock options (個股選擇權) on TAIFEX have **exercise_ratio = 2000** shares per contract. Do not change this unless the user explicitly specifies otherwise. TXO (index options) uses 50 NT$/point.
+
 ## Key runtime detail
 
 When frozen by PyInstaller (`sys.frozen == True`), the Playwright Chromium binary must be located at `<exe_dir>/ms-playwright/`. The `PLAYWRIGHT_BROWSERS_PATH` env var is set accordingly at import time in `warrant_logic.py`.

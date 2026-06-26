@@ -13,10 +13,10 @@ TAIFEX_URL = "https://www.taifex.com.tw/cht/3/optDataDown"
 COMMODITY_MAP = {
     "TXO":  {"commodity_ids": ["TXO"],         "ticker": "^TWII",   "exercise_ratio": 50},
     "2330": {"commodity_ids": ["CDA", "CDO"],   "ticker": "2330.TW", "exercise_ratio": 2000},
-    "2303": {"commodity_ids": ["CCO"],          "ticker": "2303.TW", "exercise_ratio": 1000},
-    "2603": {"commodity_ids": ["CZA", "CZO"],   "ticker": "2603.TW", "exercise_ratio": 1000},
-    "2881": {"commodity_ids": ["CEO"],          "ticker": "2881.TW", "exercise_ratio": 1000},
-    "2882": {"commodity_ids": ["CKO"],          "ticker": "2882.TW", "exercise_ratio": 1000},
+    "2303": {"commodity_ids": ["CCO"],          "ticker": "2303.TW", "exercise_ratio": 2000},
+    "2603": {"commodity_ids": ["CZA", "CZO"],   "ticker": "2603.TW", "exercise_ratio": 2000},
+    "2881": {"commodity_ids": ["CEO"],          "ticker": "2881.TW", "exercise_ratio": 2000},
+    "2882": {"commodity_ids": ["CKO"],          "ticker": "2882.TW", "exercise_ratio": 2000},
 }
 
 # Module-level cache: (commodity_id -> (timestamp, DataFrame))
