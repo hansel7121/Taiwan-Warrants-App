@@ -1382,14 +1382,19 @@
         return K*Math.exp(-r*T)*normCDF(-(d1-sigma*Math.sqrt(T)))-S*normCDF(-d1);
       }
 
-      function pnlPerShare(S, row, tau) {
+      function pnlPerShare(S, row, tauOpt) {
         const iv_w = row.warrant_iv || 0.4;
         const iv_opt = row.opt_iv || 0.4;
         const Kw = row.warrant_strike, Ko = row.opt_strike;
+        // Warrant and option expire at different times — offset warrant tau accordingly.
+        // tauOpt = time remaining on the option (driven by slider).
+        // tauW   = tauOpt + (warrant extra days vs option).
+        const dteDiff = ((row.warrant_dte || row.opt_dte) - row.opt_dte) / 365;
+        const tauW = Math.max(0, tauOpt + dteDiff);
         if (row.warrant_type === "Call") {
-          return row.pcp_diff + bsCall(S,Kw,tau,R_FREE,iv_w) - bsCall(S,Ko,tau,R_FREE,iv_opt);
+          return row.pcp_diff + bsCall(S,Kw,tauW,R_FREE,iv_w) - bsCall(S,Ko,tauOpt,R_FREE,iv_opt);
         } else {
-          return row.pcp_diff + bsPut(S,Kw,tau,R_FREE,iv_w) - bsPut(S,Ko,tau,R_FREE,iv_opt);
+          return row.pcp_diff + bsPut(S,Kw,tauW,R_FREE,iv_w) - bsPut(S,Ko,tauOpt,R_FREE,iv_opt);
         }
       }
 
