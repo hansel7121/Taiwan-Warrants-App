@@ -264,6 +264,7 @@ def _build_arb_df(option_type, max_strike_diff_pct, max_dte_diff):
         candidates = candidates[
             (candidates["strike_diff_pct"] <= max_strike_diff_pct)
             & (candidates["dte_diff"] <= max_dte_diff)
+            & (candidates["strike"] >= w["strike"])  # bull spread only: opt_strike >= warrant_strike
         ]
         if candidates.empty:
             continue
