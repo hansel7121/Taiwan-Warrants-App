@@ -160,6 +160,11 @@ def _parse_and_compute(raw_df, underlying_price, exercise_ratio):
     df["bid"] = _clean_num(df["bid"]) if "bid" in df.columns else np.nan
     df["ask"] = _clean_num(df["ask"]) if "ask" in df.columns else np.nan
 
+    # Flag live quotes BEFORE any fallback
+    df["ask_live"] = df["ask"] > 0
+    df["bid_live"] = df["bid"] > 0
+    df["is_live"] = df["ask_live"] & df["bid_live"]
+
     # Fall back to settlement when last-best bid/ask is missing
     df["ask"] = df["ask"].where(df["ask"] > 0, df["settlement"])
     df["bid"] = df["bid"].where(df["bid"] > 0, df["settlement"])
@@ -225,6 +230,7 @@ def _parse_and_compute(raw_df, underlying_price, exercise_ratio):
                 "leverage_calc": round(leverage, 4)
                 if not np.isnan(leverage)
                 else None,
+                "is_live": bool(row["is_live"]),
             }
         )
 

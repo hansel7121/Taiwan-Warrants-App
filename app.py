@@ -244,8 +244,9 @@ def _build_arb_df(option_type, max_strike_diff_pct, max_dte_diff):
         raise RuntimeError(err or "No TSMC warrants found")
 
     opt_df = options_logic.fetch_options(["2330"], option_type, min_days=1)
+    opt_df = opt_df[opt_df["is_live"]]
     if opt_df.empty:
-        raise RuntimeError("No TSMC options found")
+        raise RuntimeError("No TSMC options with live bid/ask found")
 
     rows = []
     for _, w in warrant_df.iterrows():
@@ -328,8 +329,9 @@ def _build_arb_pcp_df(option_type, max_strike_diff_pct, max_dte_diff):
 
     # Fetch all options (both Call and Put) for cross-type matching
     opt_df = options_logic.fetch_options(["2330"], "All", min_days=1)
+    opt_df = opt_df[opt_df["is_live"]]
     if opt_df.empty:
-        raise RuntimeError("No TSMC options found")
+        raise RuntimeError("No TSMC options with live bid/ask found")
 
     rows = []
     for _, w in warrant_df.iterrows():
