@@ -576,6 +576,16 @@
 
           <!-- Shared filters -->
           <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
+            <div class="stock-select" id="arb-stock-select-wrap">
+              <span>Stock (multi-select)</span>
+              <select id="arbStockSelect" multiple style="height:120px;min-width:200px">
+                <option value="2330" selected>2330 台積電 (TSMC)</option>
+                <option value="2303">2303 聯電 (UMC)</option>
+                <option value="2603">2603 長榮</option>
+                <option value="2881">2881 富邦金</option>
+                <option value="2882">2882 國泰金</option>
+              </select>
+            </div>
             <label>Option Type
               <select id="arbOptionType">
                 <option value="All">All</option>
@@ -1233,7 +1243,9 @@
       }
 
       function getArbFilters() {
+        const sel = document.getElementById("arbStockSelect");
         return {
+          stock_codes: Array.from(sel.selectedOptions).map(o => o.value),
           option_type: document.getElementById("arbOptionType").value,
           max_strike_diff_pct: parseFloat(document.getElementById("arbMaxStrikePct").value) || 3,
           max_dte_diff: parseInt(document.getElementById("arbMaxDteDiff").value) || 5,
