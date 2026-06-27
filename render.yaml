@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: warrant-scanner
+    runtime: python
+    buildCommand: pip install -r requirements.txt && playwright install --with-deps chromium
+    startCommand: python app.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0

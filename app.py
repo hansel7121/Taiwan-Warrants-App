@@ -263,11 +263,13 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
 
         ratio = float(w["exercise_ratio"])
         warrants_needed = round(opt_contract_size / ratio)
+        # Buy warrant at ask, sell option at bid — use real executable prices
         warrant_per_share = round(float(w["ask"]) / ratio, 4)
-        opt_per_share = round(float(best["ask"]), 4)
-        price_diff = round(opt_per_share - warrant_per_share, 4)
+        opt_bid_per_share = round(float(best["bid"]), 4)   # received when shorting
+        opt_ask_per_share = round(float(best["ask"]), 4)   # for reference
+        price_diff = round(opt_bid_per_share - warrant_per_share, 4)
         price_diff_pct = (
-            round(price_diff / opt_per_share * 100, 2) if opt_per_share > 0 else None
+            round(price_diff / opt_bid_per_share * 100, 2) if opt_bid_per_share > 0 else None
         )
 
         rows.append({
@@ -284,15 +286,16 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             "strike_diff_pct": round(float(best["strike_diff_pct"]), 2),
             "warrants_needed": warrants_needed,
             "warrant_ask": w["ask"],
-            "opt_ask": best["ask"],
+            "opt_bid": opt_bid_per_share,   # price received when selling
+            "opt_ask": opt_ask_per_share,   # reference only
             "warrant_per_share": warrant_per_share,
-            "opt_per_share": opt_per_share,
+            "opt_per_share": opt_bid_per_share,  # executable sell price
             "price_diff": price_diff,
             "price_diff_pct": price_diff_pct,
             "warrant_iv": round(float(w["iv_ask"]), 4) if pd.notna(w["iv_ask"]) else None,
-            "opt_iv": round(float(best["iv_ask"]), 4) if pd.notna(best["iv_ask"]) else None,
+            "opt_iv": round(float(best["iv_bid"]), 4) if pd.notna(best.get("iv_bid")) else None,
             "iv_diff": round(
-                (float(best["iv_ask"]) if pd.notna(best["iv_ask"]) else 0)
+                (float(best["iv_bid"]) if pd.notna(best.get("iv_bid")) else 0)
                 - (float(w["iv_ask"]) if pd.notna(w["iv_ask"]) else 0), 4,
             ),
         })
@@ -389,16 +392,18 @@ def _build_arb_pcp_df(option_type, max_strike_diff_pct, max_dte_diff):
         K = float(best["strike"])
         T = float(best["days_to_expiry"]) / 365.0
         ratio = float(w["exercise_ratio"])
-        opt_ask = float(best["ask"])
+        # Buy warrant at ask; receive option bid when selling the opposite leg
+        opt_bid = float(best["bid"])
+        opt_ask = float(best["ask"])   # kept for display
         warrant_per_share = float(w["ask"]) / ratio
         bond_pv = K * np.exp(-R_FREE * T)
 
         if w_type == "Call":
-            # Synthetic call = S - K·e^(-rT) + Put
-            synthetic_price = S - bond_pv + opt_ask
+            # Synthetic call = S - K·e^(-rT) + Put(bid)
+            synthetic_price = S - bond_pv + opt_bid
         else:
-            # Synthetic put = K·e^(-rT) - S + Call
-            synthetic_price = bond_pv - S + opt_ask
+            # Synthetic put = K·e^(-rT) - S + Call(bid)
+            synthetic_price = bond_pv - S + opt_bid
 
         pcp_diff = synthetic_price - warrant_per_share
         pcp_diff_pct = (
@@ -422,7 +427,8 @@ def _build_arb_pcp_df(option_type, max_strike_diff_pct, max_dte_diff):
                 "strike_diff_pct": round(float(best["strike_diff_pct"]), 2),
                 "warrants_needed": round(2000 / ratio),
                 "warrant_ask": w["ask"],
-                "opt_ask": round(opt_ask, 4),
+                "opt_bid": round(opt_bid, 4),   # price received when selling
+                "opt_ask": round(opt_ask, 4),   # reference
                 "warrant_per_share": round(warrant_per_share, 4),
                 "bond_pv": round(bond_pv, 4),
                 "synthetic_price": round(synthetic_price, 4),
@@ -515,8 +521,10 @@ def open_browser():
 
 if __name__ == "__main__":
     print("Step 1: starting browser timer", flush=True)
-    threading.Timer(1.5, open_browser).start()
+    if not os.environ.get("RENDER"):
+        threading.Timer(1.5, open_browser).start()
     print("Step 2: starting cmoney key prefetch", flush=True)
     warrant_logic.prefetch_cmoney_key()
     print("Step 3: starting flask", flush=True)
-    app.run(debug=False)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
