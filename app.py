@@ -516,7 +516,8 @@ def arb_finder_csv():
 
 
 def open_browser():
-    webbrowser.open("http://127.0.0.1:5000")
+    port = int(os.environ.get("PORT", 5001))
+    webbrowser.open(f"http://127.0.0.1:{port}")
 
 
 if __name__ == "__main__":
@@ -526,5 +527,5 @@ if __name__ == "__main__":
     print("Step 2: starting cmoney key prefetch", flush=True)
     warrant_logic.prefetch_cmoney_key()
     print("Step 3: starting flask", flush=True)
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 5001))
     app.run(host="0.0.0.0", port=port, debug=False)
