@@ -1420,7 +1420,10 @@
         const S0 = row.underlying_price;
         const Ko = row.opt_strike;
         const Kw = row.warrant_strike;
-        const maxDte = row.opt_dte;
+        // For negative direction (buy option/sell warrant), settlement = when the SHORT
+        // warrant expires. The slider should count down to warrant expiry, not option expiry.
+        const isNegDir = mode === "direct" && row.pcp_diff < 0;
+        const maxDte = isNegDir ? row.warrant_dte : row.opt_dte;
         const bondPv = Ko * Math.exp(-R_FREE * maxDte / 365);
         const n = row.warrants_needed;
         // Contract size = how many underlying shares one option contract controls
@@ -1582,11 +1585,23 @@
         const row = _pcpRow;
         const contractSize = _contractSize;
         const S0 = row.underlying_price;
-        const tau = dte / 365;
         // dir flips the sign so the chart always shows P&L from the correct
         // trade direction: buy cheap / sell expensive.
-        // pnlPerShare assumes long warrant + short option; negate when reversed.
         const dir = row.pcp_diff >= 0 ? 1 : -1;
+
+        // For negative direction (buy option/sell warrant), the slider counts down
+        // to warrant expiry (the short leg). We need to offset tauOpt so that at
+        // slider=0 (warrant expires), tauOpt = (opt_dte - warrant_dte)/365 — the
+        // remaining time the long option still has after the short warrant expires.
+        const isNegDir = row.pcp_diff < 0 && row.warrant_dte != null && row.opt_dte != null;
+        const tauOffset = isNegDir ? Math.max(0, (row.opt_dte - row.warrant_dte) / 365) : 0;
+        const tau = dte / 365 + tauOffset;
+
+        // "At expiry" = when the SHORT leg expires (slider = 0).
+        // For positive direction: option (short) expires → tauOpt = 0 + 0 = 0
+        // For negative direction: warrant (short) expires → tauOpt = tauOffset
+        const tauExp = tauOffset;
+
         const spots = [];
         const pnls  = [];
         const n = 200;
@@ -1597,8 +1612,8 @@
           pnls.push(parseFloat((dir * pnlPerShare(S, row, tau) * contractSize).toFixed(0)));
         }
 
-        // Also plot at expiry for reference
-        const pnlsExp = spots.map(S => parseFloat((dir * pnlPerShare(S, row, 0) * contractSize).toFixed(0)));
+        // "At expiry" line: short leg just expired, long leg has tauOffset remaining
+        const pnlsExp = spots.map(S => parseFloat((dir * pnlPerShare(S, row, tauExp) * contractSize).toFixed(0)));
 
         const zeroLine = [{x:[lo,hi],y:[0,0],mode:"lines",
           line:{color:"rgba(255,255,255,0.15)",dash:"dash",width:1},
@@ -1609,10 +1624,11 @@
           line:{color:"var(--accent)",width:2.5},
           hovertemplate:"Spot: %{x:,.0f}<br>P&L: %{y:+,.0f} NT$<extra></extra>",
         };
+        const expiryLabel = isNegDir ? "At warrant expiry" : "At expiry";
         const expiryTrace = {
-          x:spots, y:pnlsExp, mode:"lines", name:"At expiry",
+          x:spots, y:pnlsExp, mode:"lines", name:expiryLabel,
           line:{color:"rgba(251,191,36,0.6)",width:1.5,dash:"dot"},
-          hovertemplate:"Spot: %{x:,.0f}<br>P&L at expiry: %{y:+,.0f} NT$<extra></extra>",
+          hovertemplate:`Spot: %{x:,.0f}<br>P&L at expiry: %{y:+,.0f} NT$<extra></extra>`,
         };
 
         // Mark current spot
