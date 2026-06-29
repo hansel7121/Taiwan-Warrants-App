@@ -1320,7 +1320,7 @@
           stock_codes: Array.from(sel.selectedOptions).map(o => o.value),
           option_type: document.getElementById("arbOptionType").value,
           max_strike_diff_pct: parseFloat(document.getElementById("arbMaxStrikePct").value) || 3,
-          max_dte_diff: parseInt(document.getElementById("arbMaxDteDiff").value) || 5,
+          max_dte_diff: parseInt(document.getElementById("arbMaxDteDiff").value) ?? 5,
         };
       }
 
