@@ -288,14 +288,29 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
 
             ratio = float(w["exercise_ratio"])
             warrant_ask_per_share = round(float(w["ask"]) / ratio, 4)
+            warrant_bid_val = float(w["bid"]) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else float(w["ask"])
+            warrant_bid_per_share = round(warrant_bid_val / ratio, 4)
             opt_bid_per_share = round(float(best["bid"]), 4)
             opt_ask_per_share = round(float(best["ask"]), 4)
 
-            price_diff = round(opt_bid_per_share - warrant_ask_per_share, 4)
+            # Use executable prices for each direction:
+            # Positive: you pay warrant_ask and receive opt_bid
+            # Negative: you receive warrant_bid and pay opt_ask
+            if direction == "positive":
+                price_diff = round(opt_bid_per_share - warrant_ask_per_share, 4)
+                exec_opt_price = opt_bid_per_share      # price you receive for the option
+                exec_warrant_price = warrant_ask_per_share  # price you pay for the warrant
+                opt_iv_display = round(float(best["iv_bid"]), 4) if pd.notna(best.get("iv_bid")) else None
+                warrant_iv_display = round(float(w["iv_ask"]), 4) if pd.notna(w["iv_ask"]) else None
+            else:
+                price_diff = round(opt_ask_per_share - warrant_bid_per_share, 4)
+                exec_opt_price = opt_ask_per_share      # price you pay for the option
+                exec_warrant_price = warrant_bid_per_share  # price you receive for the warrant
+                opt_iv_display = round(float(best["iv_ask"]), 4) if pd.notna(best.get("iv_ask")) else None
+                warrant_iv_display = round(float(w["iv_bid"]), 4) if pd.notna(w.get("iv_bid")) else None
 
-            # Only keep pairs where the sign matches the intended trade direction.
-            # If the sign is wrong the payoff at expiry is not risk-free and the
-            # P&L chart will show negative values — these are not arb opportunities.
+            # Only keep pairs where the sign matches — price_diff > 0 means positive arb,
+            # price_diff < 0 means negative arb (warrant expensive vs option at executable prices)
             if direction == "positive" and price_diff <= 0:
                 continue
             if direction == "negative" and price_diff >= 0:
@@ -307,16 +322,22 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             seen.add(pair_key)
 
             warrants_needed = round(opt_contract_size / ratio)
-            warrant_bid_per_share = round(float(w["bid"]) / ratio, 4) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else warrant_ask_per_share
 
-            price_diff_pct = (
-                round(price_diff / opt_bid_per_share * 100, 2) if opt_bid_per_share > 0 else None
-            )
+            denom = exec_opt_price if direction == "positive" else exec_warrant_price
+            price_diff_pct = round(price_diff / denom * 100, 2) if denom > 0 else None
 
             if direction == "positive":
                 trade = "Buy Warrant / Sell Option"
+                iv_diff = round(
+                    (float(best["iv_bid"]) if pd.notna(best.get("iv_bid")) else 0)
+                    - (float(w["iv_ask"]) if pd.notna(w["iv_ask"]) else 0), 4,
+                )
             else:
                 trade = "Buy Option / Sell Warrant"
+                iv_diff = round(
+                    (float(w["iv_bid"]) if pd.notna(w.get("iv_bid")) else 0)
+                    - (float(best["iv_ask"]) if pd.notna(best.get("iv_ask")) else 0), 4,
+                )
 
             rows.append({
                 "warrant_code": w["warrant_code"],
@@ -336,16 +357,13 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                 "warrant_bid": round(float(w["bid"]), 4) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else None,
                 "opt_bid": opt_bid_per_share,
                 "opt_ask": opt_ask_per_share,
-                "warrant_per_share": warrant_ask_per_share,
-                "opt_per_share": opt_bid_per_share,
+                "warrant_per_share": exec_warrant_price,
+                "opt_per_share": exec_opt_price,
                 "price_diff": price_diff,
                 "price_diff_pct": price_diff_pct,
-                "warrant_iv": round(float(w["iv_ask"]), 4) if pd.notna(w["iv_ask"]) else None,
-                "opt_iv": round(float(best["iv_bid"]), 4) if pd.notna(best.get("iv_bid")) else None,
-                "iv_diff": round(
-                    (float(best["iv_bid"]) if pd.notna(best.get("iv_bid")) else 0)
-                    - (float(w["iv_ask"]) if pd.notna(w["iv_ask"]) else 0), 4,
-                ),
+                "warrant_iv": warrant_iv_display,
+                "opt_iv": opt_iv_display,
+                "iv_diff": iv_diff,
             })
     return rows
 
