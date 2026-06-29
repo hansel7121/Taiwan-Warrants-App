@@ -602,6 +602,10 @@
             <label>Max DTE Diff (days)
               <input type="number" id="arbMaxDteDiff" value="5" min="0" max="30" style="width:70px"/>
             </label>
+            <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="Loose: positive price_diff uses opt_ask − warrant_bid (more results, spread not covered). Executable: opt_bid − warrant_ask (tradeable arb only).">
+              <input type="checkbox" id="arbPositiveLoose" style="width:auto;margin:0"/>
+              Positive: loose prices
+            </label>
             <div class="action-group">
               <button class="primary" id="arbFindBtn" onclick="runArb()">Find Arb</button>
               <button class="success" id="arbDownloadBtn" onclick="downloadArbCSV()" style="display:none">
@@ -1321,6 +1325,7 @@
           option_type: document.getElementById("arbOptionType").value,
           max_strike_diff_pct: parseFloat(document.getElementById("arbMaxStrikePct").value) || 3,
           max_dte_diff: parseInt(document.getElementById("arbMaxDteDiff").value) ?? 5,
+          positive_loose: document.getElementById("arbPositiveLoose").checked,
         };
       }
 

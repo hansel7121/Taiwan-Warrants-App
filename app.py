@@ -237,7 +237,8 @@ def iv_surface():
 
 
 def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
-                               max_strike_diff_pct, max_dte_diff):
+                               max_strike_diff_pct, max_dte_diff,
+                               positive_loose=False):
     rows = []
     seen = set()  # deduplicate (warrant_code, option_contract) pairs
 
@@ -288,18 +289,31 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
 
             ratio = float(w["exercise_ratio"])
             warrant_ask_per_share = round(float(w["ask"]) / ratio, 4)
+            warrant_bid_val = float(w["bid"]) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else float(w["ask"])
+            warrant_bid_per_share = round(warrant_bid_val / ratio, 4)
             opt_bid_per_share = round(float(best["bid"]), 4)
             opt_ask_per_share = round(float(best["ask"]), 4)
 
-            price_diff = round(opt_bid_per_share - warrant_ask_per_share, 4)
-
-            # Only keep pairs where the sign matches the intended trade direction.
-            # If the sign is wrong the payoff at expiry is not risk-free and the
-            # P&L chart will show negative values — these are not arb opportunities.
-            if direction == "positive" and price_diff <= 0:
-                continue
-            if direction == "negative" and price_diff >= 0:
-                continue
+            # Positive tight (executable): opt_bid - warrant_ask > 0
+            # Positive loose: opt_ask - warrant_bid > 0 (mirrors negative formula)
+            # Negative (always loose): opt_bid - warrant_ask < 0
+            if direction == "positive":
+                if positive_loose:
+                    price_diff = round(opt_ask_per_share - warrant_bid_per_share, 4)
+                    exec_opt = opt_ask_per_share
+                    exec_warrant = warrant_bid_per_share
+                else:
+                    price_diff = round(opt_bid_per_share - warrant_ask_per_share, 4)
+                    exec_opt = opt_bid_per_share
+                    exec_warrant = warrant_ask_per_share
+                if price_diff <= 0:
+                    continue
+            else:
+                price_diff = round(opt_bid_per_share - warrant_ask_per_share, 4)
+                exec_opt = opt_bid_per_share
+                exec_warrant = warrant_ask_per_share
+                if price_diff >= 0:
+                    continue
 
             pair_key = (w["warrant_code"], best["contract"])
             if pair_key in seen:
@@ -307,11 +321,8 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             seen.add(pair_key)
 
             warrants_needed = round(opt_contract_size / ratio)
-            warrant_bid_per_share = round(float(w["bid"]) / ratio, 4) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else warrant_ask_per_share
 
-            price_diff_pct = (
-                round(price_diff / opt_bid_per_share * 100, 2) if opt_bid_per_share > 0 else None
-            )
+            price_diff_pct = round(price_diff / exec_opt * 100, 2) if exec_opt > 0 else None
 
             if direction == "positive":
                 trade = "Buy Warrant / Sell Option"
@@ -336,8 +347,8 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                 "warrant_bid": round(float(w["bid"]), 4) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else None,
                 "opt_bid": opt_bid_per_share,
                 "opt_ask": opt_ask_per_share,
-                "warrant_per_share": warrant_ask_per_share,
-                "opt_per_share": opt_bid_per_share,
+                "warrant_per_share": exec_warrant,
+                "opt_per_share": exec_opt,
                 "price_diff": price_diff,
                 "price_diff_pct": price_diff_pct,
                 "warrant_iv": round(float(w["iv_ask"]), 4) if pd.notna(w["iv_ask"]) else None,
@@ -350,7 +361,8 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
     return rows
 
 
-def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff):
+def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
+                  positive_loose=False):
     all_rows = []
     errors = []
 
@@ -381,7 +393,8 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff):
             continue
 
         rows = _match_warrants_to_options(
-            warrant_df, opt_df, opt_contract_size, max_strike_diff_pct, max_dte_diff
+            warrant_df, opt_df, opt_contract_size, max_strike_diff_pct, max_dte_diff,
+            positive_loose=positive_loose,
         )
         all_rows.extend(rows)
 
@@ -534,8 +547,10 @@ def arb_finder():
     option_type = data.get("option_type", "All")
     max_strike_diff_pct = float(data.get("max_strike_diff_pct", 3.0))
     max_dte_diff = int(data.get("max_dte_diff", 5))
+    positive_loose = bool(data.get("positive_loose", False))
     try:
-        df = _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff)
+        df = _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
+                           positive_loose=positive_loose)
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
         return jsonify({"rows": rows, "count": len(rows)})
     except Exception as e:
@@ -549,8 +564,10 @@ def arb_finder_csv():
     option_type = data.get("option_type", "All")
     max_strike_diff_pct = float(data.get("max_strike_diff_pct", 3.0))
     max_dte_diff = int(data.get("max_dte_diff", 5))
+    positive_loose = bool(data.get("positive_loose", False))
     try:
-        df = _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff)
+        df = _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
+                           positive_loose=positive_loose)
     except Exception:
         df = pd.DataFrame()
     output = io.StringIO()
