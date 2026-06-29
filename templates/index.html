@@ -563,15 +563,18 @@
         <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
 
           <!-- Mode toggle -->
-          <div style="display:flex;gap:0;border:1px solid var(--border);border-radius:5px;overflow:hidden">
-            <button id="arb-mode-direct" onclick="setArbMode('direct')"
-              style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--accent);color:#fff">
-              Direct Match
-            </button>
-            <button id="arb-mode-pcp" onclick="setArbMode('pcp')"
-              style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--surface);color:var(--muted)">
-              PCP Match
-            </button>
+          <div style="display:flex;align-items:center;gap:10px">
+            <div style="display:flex;gap:0;border:1px solid var(--border);border-radius:5px;overflow:hidden">
+              <button id="arb-mode-direct" onclick="setArbMode('direct')"
+                style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--accent);color:#fff">
+                Direct Match
+              </button>
+              <button id="arb-mode-pcp" onclick="setArbMode('pcp')"
+                style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--surface);color:var(--muted)">
+                PCP Match
+              </button>
+            </div>
+            <button onclick="openDirectInfo()" title="How does Direct Match work?" style="background:none;border:1.5px solid var(--border);border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);font-family:inherit;padding:0;flex-shrink:0">ⓘ</button>
           </div>
 
           <!-- Shared filters -->
@@ -626,6 +629,75 @@
         <div id="arb-status"></div>
         <div id="arb-tableContainer"></div>
       </main>
+    </div>
+
+    <!-- Direct Match Info Modal -->
+    <div id="directInfoModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;max-width:780px;margin:36px auto 60px;padding:32px 36px;position:relative;line-height:1.65">
+        <button onclick="document.getElementById('directInfoModal').style.display='none'" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
+        <h2 style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:24px">Direct Match — How It Works</h2>
+
+        <div style="display:flex;flex-direction:column;gap:22px;font-size:13px;color:var(--text)">
+
+          <section>
+            <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:8px">What is this finding?</h3>
+            <p>Direct Match pairs a <b>warrant</b> and an <b>option</b> of the same type (both Call or both Put) on the same underlying stock, where the two instruments are priced inconsistently relative to each other.</p>
+            <p style="margin-top:6px">For calls, a higher-strike call <em>must</em> be cheaper than a lower-strike call — otherwise you could buy the cheaper one and sell the more expensive one for an immediate profit that cannot be erased by any price move at expiry. Direct Match finds pairs where this rule is violated in the market.</p>
+          </section>
+
+          <section>
+            <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:8px">Why match to a higher strike (for positive price_diff)?</h3>
+            <p>For a <b>call option</b>, monotonicity says: C(K₁) ≥ C(K₂) whenever K₁ &lt; K₂. The higher the strike, the less valuable the call.</p>
+            <p style="margin-top:6px">So we compare the warrant (strike K<sub>w</sub>) against an option at a <em>higher</em> strike K<sub>o</sub> ≥ K<sub>w</sub>. If the option is <em>still more expensive</em> despite having the higher strike, that is a direct violation of monotonicity — and the source of the positive price_diff.</p>
+            <p style="margin-top:6px">Matching to a <em>lower</em>-strike option instead would not be a violation at all — a lower-strike call is expected to cost more.</p>
+          </section>
+
+          <section>
+            <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:8px">The math — why is this arbitrage?</h3>
+            <p>Trade: buy warrant at ask (K<sub>w</sub>), sell option at bid (K<sub>o</sub> ≥ K<sub>w</sub>). Net cash at entry:</p>
+            <div style="background:var(--surface);border-radius:6px;padding:10px 14px;margin:8px 0;font-family:monospace;font-size:13px;color:var(--text)">
+              Entry credit = opt_bid/share − warrant_ask/share = price_diff &gt; 0
+            </div>
+            <p>At expiry, payoff from the two legs for every possible spot S:</p>
+            <div style="background:var(--surface);border-radius:6px;padding:10px 14px;margin:8px 0;font-family:monospace;font-size:13px;color:var(--text)">
+              S &lt; K<sub>w</sub>:  both expire worthless → net = price_diff &gt; 0 ✓<br>
+              K<sub>w</sub> ≤ S &lt; K<sub>o</sub>: warrant pays (S−K<sub>w</sub>), option expires worthless → net = price_diff + (S−K<sub>w</sub>) &gt; 0 ✓<br>
+              S ≥ K<sub>o</sub>:  warrant pays (S−K<sub>w</sub>), option costs (S−K<sub>o</sub>) → net = price_diff + (K<sub>o</sub>−K<sub>w</sub>) &gt; 0 ✓
+            </div>
+            <p>P&L is non-negative in every scenario. The entry credit is locked in regardless of where the stock ends up — that is what makes it arbitrage.</p>
+          </section>
+
+          <section>
+            <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:8px">How does the P&amp;L at expiry (dotted line) work?</h3>
+            <p>The dotted line shows the trade P&L assuming you hold to expiry and both legs settle at intrinsic value (time value = 0):</p>
+            <div style="background:var(--surface);border-radius:6px;padding:10px 14px;margin:8px 0;font-family:monospace;font-size:13px;color:var(--text)">
+              P&L at expiry = price_diff + max(0, S−K<sub>w</sub>) − max(0, S−K<sub>o</sub>)
+            </div>
+            <p>As shown in the math above, this is always ≥ 0 for a valid positive-direction pair (K<sub>o</sub> ≥ K<sub>w</sub>, price_diff &gt; 0). The dotted line will never go below zero for a correctly-filtered pair.</p>
+          </section>
+
+          <section>
+            <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:8px">How does the green line (DTE slider) work?</h3>
+            <p>The green line shows the mark-to-market P&L if you were to close both positions <em>today</em> at their current Black-Scholes theoretical values, using each instrument's implied volatility:</p>
+            <div style="background:var(--surface);border-radius:6px;padding:10px 14px;margin:8px 0;font-family:monospace;font-size:13px;color:var(--text)">
+              P&L(S, t) = price_diff + BS(S, K<sub>w</sub>, τ<sub>w</sub>, IV<sub>w</sub>) − BS(S, K<sub>o</sub>, τ<sub>o</sub>, IV<sub>o</sub>)
+            </div>
+            <p>Moving the slider changes τ<sub>o</sub> (time remaining on the option). The warrant's remaining time τ<sub>w</sub> = τ<sub>o</sub> + (warrant_DTE − option_DTE)/365 adjusts accordingly.</p>
+            <p style="margin-top:6px">The green line can dip below zero mid-life if the option's IV is much higher than the warrant's IV — the option's time value temporarily exceeds the warrant's, creating a mark-to-market loss before expiry. This does not affect the locked-in expiry payoff.</p>
+          </section>
+
+          <section>
+            <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:8px">Why is the DTE Diff filter one-sided?</h3>
+            <p>The two expiry dates create a DTE gap. Depending on which leg expires first, the gap works either for or against you:</p>
+            <ul style="margin:8px 0 0 18px;display:flex;flex-direction:column;gap:6px">
+              <li><b>Favorable side</b> — long leg expires <em>after</em> the short leg: when your short obligation ends, you still hold a position with remaining time value. This is a pure gain. No cap needed.</li>
+              <li><b>Unfavorable side</b> — short leg expires <em>after</em> the long leg: after your long leg closes, you are left short a position that still has time value — a liability. <b>Max DTE Diff</b> caps how many days of this unfavorable exposure you are willing to accept.</li>
+            </ul>
+            <p style="margin-top:8px">Setting Max DTE Diff = 0 means you only see pairs where expiry risk is fully in your favor (long leg always outlives the short leg). Higher values allow more DTE mismatch on the risky side.</p>
+          </section>
+
+        </div>
+      </div>
     </div>
 
     <!-- PCP Trade Modal -->
@@ -1410,6 +1482,10 @@
         } else {
           return row.pcp_diff + bsPut(S,Kw,tauW,R_FREE,iv_w) - bsPut(S,Ko,tauOpt,R_FREE,iv_opt);
         }
+      }
+
+      function openDirectInfo() {
+        document.getElementById("directInfoModal").style.display = "block";
       }
 
       function openPcpModal(row) { openArbModal(row, "pcp"); }
