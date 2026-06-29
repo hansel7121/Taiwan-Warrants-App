@@ -1274,7 +1274,7 @@
         }
         currentArbData = data.rows;
         document.getElementById("arb-status").textContent =
-          `${data.count} matched pairs — positive price_diff means warrant is cheaper (buy warrant, sell option)`;
+          `${data.count} matched pairs — positive price_diff: buy warrant / sell option; negative: buy option / sell warrant`;
         document.getElementById("arbDownloadBtn").style.display = "inline-block";
         renderArbTable(currentArbData);
       }
