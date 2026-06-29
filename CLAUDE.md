@@ -13,6 +13,12 @@ A desktop warrant scanner for Taiwan stock warrants. It runs as a local Flask we
 python app.py
 ```
 
+**Before running `python app.py`, always kill any existing instance first:**
+```bash
+pkill -f "python app.py" 2>/dev/null; lsof -ti:5001 | xargs kill -9 2>/dev/null; echo "cleared"
+```
+Run this automatically whenever the user asks to run `python app.py`.
+
 **Build standalone executable (PyInstaller):**
 ```bash
 pyinstaller app.spec
