@@ -255,24 +255,16 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             )
 
             # Positive: opt_strike >= warrant_strike (buy warrant, sell option)
-            #           long leg (warrant) must expire >= short leg (option)
             # Negative: opt_strike <= warrant_strike (buy option, sell warrant)
-            #           long leg (option) must expire >= short leg (warrant)
             strike_filter = (
                 candidates["strike"] >= w["strike"]
                 if direction == "positive"
                 else candidates["strike"] <= w["strike"]
             )
-            dte_order_filter = (
-                candidates["days_to_expiry"] <= w["days_to_expiry"]  # opt_dte <= warrant_dte
-                if direction == "positive"
-                else candidates["days_to_expiry"] >= w["days_to_expiry"]  # opt_dte >= warrant_dte
-            )
             candidates = candidates[
                 (candidates["strike_diff_pct"] <= max_strike_diff_pct)
                 & (candidates["dte_diff"] <= max_dte_diff)
                 & strike_filter
-                & dte_order_filter
             ]
             if candidates.empty:
                 continue
