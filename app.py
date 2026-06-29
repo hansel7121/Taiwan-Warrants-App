@@ -261,15 +261,29 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                 if direction == "positive"
                 else candidates["strike"] <= w["strike"]
             )
+
+            # max_dte_diff only applies to the "unfavorable" side:
+            # Positive direction: risky when opt_dte > warrant_dte (warrant expires first,
+            #   leaving a naked short option). Cap max(0, opt_dte - warrant_dte) <= max_dte_diff.
+            #   Safe side (opt_dte <= warrant_dte) is unbounded.
+            # Negative direction: risky when warrant_dte > opt_dte (option expires first,
+            #   leaving a naked short warrant). Cap max(0, warrant_dte - opt_dte) <= max_dte_diff.
+            #   Safe side (opt_dte >= warrant_dte) is unbounded.
+            if direction == "positive":
+                bad_dte = (candidates["days_to_expiry"] - w["days_to_expiry"]).clip(lower=0)
+            else:
+                bad_dte = (w["days_to_expiry"] - candidates["days_to_expiry"]).clip(lower=0)
+
             candidates = candidates[
                 (candidates["strike_diff_pct"] <= max_strike_diff_pct)
-                & (candidates["dte_diff"] <= max_dte_diff)
+                & (bad_dte <= max_dte_diff)
                 & strike_filter
             ]
             if candidates.empty:
                 continue
 
-            score = candidates["strike_diff_pct"] * 2 + candidates["dte_diff"] / max(max_dte_diff, 1)
+            # Score penalises only the bad-side DTE gap, not the safe-side surplus
+            score = candidates["strike_diff_pct"] * 2 + bad_dte[candidates.index] / max(max_dte_diff, 1)
             best = candidates.loc[score.idxmin()]
 
             ratio = float(w["exercise_ratio"])
