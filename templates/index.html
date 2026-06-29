@@ -1356,6 +1356,8 @@
           strike_diff_pct:  row.strike_diff_pct,
           warrants_needed:  row.warrants_needed,
           warrant_ask:      row.warrant_ask,
+          warrant_bid:      row.warrant_bid,
+          opt_bid:          row.opt_bid,
           opt_ask:          row.opt_ask,
           warrant_per_share:row.warrant_per_share,
           opt_per_share:    row.opt_per_share,
@@ -1437,16 +1439,18 @@
           const wLabel = `${n} × ${row.warrant_code} (${row.warrant_type.toLowerCase()} warrant)`;
           const oLabel = `${row.option_contract} ${row.opt_type.toLowerCase()} option (×1,000 shares)`;
           if (row.pcp_diff >= 0) {
-            // Warrant cheaper → buy warrant, sell option
+            // Warrant cheaper → buy warrant, sell option at bid
+            const optSellPrice = row.opt_bid ?? row.opt_per_share;
             legs = [
-              { action:"BUY",  instrument:wLabel,  qty:n,    price:row.warrant_ask, cf:-(n*row.warrant_ask) },
-              { action:"SELL", instrument:oLabel,  qty:contractSize, price:row.opt_ask,     cf: contractSize*row.opt_ask },
+              { action:"BUY",  instrument:wLabel,  qty:n,    price:row.warrant_ask,  cf:-(n*row.warrant_ask) },
+              { action:"SELL", instrument:oLabel,  qty:contractSize, price:optSellPrice, cf: contractSize*optSellPrice },
             ];
           } else {
-            // Option cheaper → sell warrant, buy option
+            // Option cheaper → buy option at ask, sell warrant at bid
+            const wBid = row.warrant_bid ?? row.warrant_ask;
             legs = [
-              { action:"SELL", instrument:wLabel,  qty:n,    price:row.warrant_ask, cf: n*row.warrant_ask },
-              { action:"BUY",  instrument:oLabel,  qty:contractSize, price:row.opt_ask,     cf:-contractSize*row.opt_ask },
+              { action:"SELL", instrument:wLabel,  qty:n,    price:wBid,         cf: n*wBid },
+              { action:"BUY",  instrument:oLabel,  qty:contractSize, price:row.opt_ask, cf:-contractSize*row.opt_ask },
             ];
           }
         } else {

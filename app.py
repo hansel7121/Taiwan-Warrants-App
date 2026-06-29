@@ -272,22 +272,29 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             score = candidates["strike_diff_pct"] * 2 + candidates["dte_diff"] / max(max_dte_diff, 1)
             best = candidates.loc[score.idxmin()]
 
+            ratio = float(w["exercise_ratio"])
+            warrant_ask_per_share = round(float(w["ask"]) / ratio, 4)
+            opt_bid_per_share = round(float(best["bid"]), 4)
+            opt_ask_per_share = round(float(best["ask"]), 4)
+
+            price_diff = round(opt_bid_per_share - warrant_ask_per_share, 4)
+
+            # Only keep pairs where the sign matches the intended trade direction.
+            # If the sign is wrong the payoff at expiry is not risk-free and the
+            # P&L chart will show negative values — these are not arb opportunities.
+            if direction == "positive" and price_diff <= 0:
+                continue
+            if direction == "negative" and price_diff >= 0:
+                continue
+
             pair_key = (w["warrant_code"], best["contract"])
             if pair_key in seen:
                 continue
             seen.add(pair_key)
 
-            ratio = float(w["exercise_ratio"])
             warrants_needed = round(opt_contract_size / ratio)
-
-            warrant_ask_per_share = round(float(w["ask"]) / ratio, 4)
             warrant_bid_per_share = round(float(w["bid"]) / ratio, 4) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else warrant_ask_per_share
-            opt_bid_per_share = round(float(best["bid"]), 4)
-            opt_ask_per_share = round(float(best["ask"]), 4)
 
-            # price_diff sign convention: positive = opt expensive vs warrant, negative = warrant expensive vs opt
-            # Both directions use the same formula so the column is directly comparable
-            price_diff = round(opt_bid_per_share - warrant_ask_per_share, 4)
             price_diff_pct = (
                 round(price_diff / opt_bid_per_share * 100, 2) if opt_bid_per_share > 0 else None
             )
