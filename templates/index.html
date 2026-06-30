@@ -713,7 +713,7 @@
 
         <!-- Trade legs -->
         <div style="margin-bottom:20px">
-          <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin-bottom:10px">Trade Legs (per 1 options contract = 1,000 shares)</p>
+          <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin-bottom:10px">Trade Legs (per 1 options contract = 2,000 shares)</p>
           <table id="pcp-legs-table" style="width:100%;border-collapse:collapse;font-size:13px">
             <thead>
               <tr>
@@ -1505,8 +1505,7 @@
         const bondPv = Ko * Math.exp(-R_FREE * maxDte / 365);
         const n = row.warrants_needed;
         // Contract size = how many underlying shares one option contract controls
-        const contractSize = (n && row.warrant_ask && row.warrant_per_share)
-          ? Math.round(n * row.warrant_ask / row.warrant_per_share) : 2000;
+        const contractSize = row.opt_contract_size ?? 2000;
         _contractSize = contractSize;
 
         const modeLabel = mode === "direct" ? "Direct Match" : "PCP Arb";
@@ -1518,7 +1517,7 @@
         if (mode === "direct") {
           // Simple 2-leg trade: buy cheaper warrant, sell pricier same-type option
           const wLabel = `${n} × ${row.warrant_code} (${row.warrant_type.toLowerCase()} warrant)`;
-          const oLabel = `${row.option_contract} ${row.opt_type.toLowerCase()} option (×1,000 shares)`;
+          const oLabel = `${row.option_contract} ${row.opt_type.toLowerCase()} option (×${contractSize.toLocaleString()} shares)`;
           if (row.pcp_diff >= 0) {
             // Warrant cheaper → buy warrant, sell option at bid
             const optSellPrice = row.opt_bid ?? row.opt_per_share;
@@ -1590,7 +1589,7 @@
 
         const diffColor = v => v == null ? "var(--text)" : v > 0 ? "var(--put)" : v < 0 ? "var(--call)" : "var(--muted)";
 
-        const wRatio = row.warrants_needed > 0 ? (1000 / row.warrants_needed) : null;
+        const wRatio = row.warrants_needed > 0 ? (contractSize / row.warrants_needed) : null;
 
         document.getElementById("pcp-compare-table").innerHTML = `
           <thead><tr>
@@ -1710,7 +1709,7 @@
           paper_bgcolor:"#13161f", plot_bgcolor:"#0d0f16",
           font:{color:"#8b90a0",family:"Inter,system-ui,sans-serif",size:12},
           xaxis:{title:"TSMC Spot Price (NT$)",gridcolor:"#252836",zerolinecolor:"#252836",tickformat:","},
-          yaxis:{title:"P&L (NT$, 1,000-share position)",gridcolor:"#252836",zerolinecolor:"#252836",tickformat:"+,"},
+          yaxis:{title:"P&L (NT$, 2,000-share position)",gridcolor:"#252836",zerolinecolor:"#252836",tickformat:"+,"},
           legend:{bgcolor:"#13161f",bordercolor:"#252836",borderwidth:1},
           margin:{l:80,r:20,t:20,b:60},
           hovermode:"x unified",

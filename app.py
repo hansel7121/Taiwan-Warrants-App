@@ -343,6 +343,7 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                 "opt_strike": int(best["strike"]),
                 "strike_diff_pct": round(float(best["strike_diff_pct"]), 2),
                 "warrants_needed": warrants_needed,
+                "opt_contract_size": opt_contract_size,
                 "warrant_ask": w["ask"],
                 "warrant_bid": round(float(w["bid"]), 4) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else None,
                 "opt_bid": opt_bid_per_share,
@@ -487,6 +488,7 @@ def _build_arb_pcp_df(option_type, max_strike_diff_pct, max_dte_diff):
                 "opt_strike": int(K),
                 "strike_diff_pct": round(float(best["strike_diff_pct"]), 2),
                 "warrants_needed": round(2000 / ratio),
+                "opt_contract_size": 2000,
                 "warrant_ask": w["ask"],
                 "opt_bid": round(opt_bid, 4),   # price received when selling
                 "opt_ask": round(opt_ask, 4),   # reference
