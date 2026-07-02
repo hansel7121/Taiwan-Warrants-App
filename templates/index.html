@@ -744,6 +744,15 @@
           <span id="pcp-dte-label" style="font-size:13px;font-weight:500;color:var(--text);min-width:60px;text-align:right">62 days</span>
         </div>
 
+        <!-- Hedge granularity toggle -->
+        <div style="margin-bottom:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span style="font-size:12px;color:var(--muted);white-space:nowrap">Hedge size:</span>
+          <button type="button" id="pcp-mode-exact" class="sm" onclick="setPcpChartMode('exact')"
+            style="font-weight:600">Exact (fractional 張)</button>
+          <button type="button" id="pcp-mode-whole" class="sm" onclick="setPcpChartMode('whole')">Whole 張 (executable)</button>
+          <span id="pcp-mode-note" style="font-size:11px;color:var(--muted)"></span>
+        </div>
+
         <!-- P&L chart -->
         <div id="pcp-pnl-chart" style="width:100%;height:380px"></div>
       </div>
@@ -1454,6 +1463,7 @@
       const R_FREE = 0.01875;
       let _pcpRow = null;
       let _contractSize = 2000;
+      let _pcpChartMode = "exact";   // "exact" (fractional 張) | "whole" (executable board lots)
 
       function normCDF(x) {
         const a1=0.254829592,a2=-0.284496736,a3=1.421413741,a4=-1.453152027,a5=1.061405429,p=0.3275911;
@@ -1473,20 +1483,28 @@
         return K*Math.exp(-r*T)*normCDF(-(d1-sigma*Math.sqrt(T)))-S*normCDF(-d1);
       }
 
-      function pnlPerShare(S, row, tauOpt) {
-        const iv_w = row.warrant_iv || 0.4;
-        const iv_opt = row.opt_iv || 0.4;
-        const Kw = row.warrant_strike, Ko = row.opt_strike;
-        // Warrant and option expire at different times — offset warrant tau accordingly.
-        // tauOpt = time remaining on the option (driven by slider).
-        // tauW   = tauOpt + (warrant extra days vs option).
+      // Warrant tau is offset from the option: warrant may have more days to expiry.
+      function warrantTau(row, tauOpt) {
         const dteDiff = ((row.warrant_dte || row.opt_dte) - row.opt_dte) / 365;
-        const tauW = Math.max(0, tauOpt + dteDiff);
-        if (row.warrant_type === "Call") {
-          return row.pcp_diff + bsCall(S,Kw,tauW,R_FREE,iv_w) - bsCall(S,Ko,tauOpt,R_FREE,iv_opt);
-        } else {
-          return row.pcp_diff + bsPut(S,Kw,tauW,R_FREE,iv_w) - bsPut(S,Ko,tauOpt,R_FREE,iv_opt);
-        }
+        return Math.max(0, tauOpt + dteDiff);
+      }
+      // Per-underlying-share P&L of the long-warrant leg (entry = warrant price/share).
+      function warrantPnLPerShare(S, row, tauOpt) {
+        const iv = row.warrant_iv || 0.4, K = row.warrant_strike, entry = row.warrant_per_share;
+        const tauW = warrantTau(row, tauOpt);
+        const v = row.warrant_type === "Call" ? bsCall(S,K,tauW,R_FREE,iv) : bsPut(S,K,tauW,R_FREE,iv);
+        return v - entry;
+      }
+      // Per-underlying-share P&L of the short (synthetic) option leg (entry = synthetic price/share).
+      function optionPnLPerShare(S, row, tauOpt) {
+        const iv = row.opt_iv || 0.4, K = row.opt_strike, entry = row.synthetic_price;
+        const v = row.warrant_type === "Call" ? bsCall(S,K,tauOpt,R_FREE,iv) : bsPut(S,K,tauOpt,R_FREE,iv);
+        return entry - v;
+      }
+      // Combined per-share P&L of the matched pair (long warrant + short option).
+      // Sum of the two legs === pcp_diff + warrantVal − optVal.
+      function pnlPerShare(S, row, tauOpt) {
+        return warrantPnLPerShare(S, row, tauOpt) + optionPnLPerShare(S, row, tauOpt);
       }
 
       function openDirectInfo() {
@@ -1516,7 +1534,7 @@
         let legs;
         if (mode === "direct") {
           // Simple 2-leg trade: buy cheaper warrant, sell pricier same-type option
-          const wLabel = `${n} × ${row.warrant_code} (${row.warrant_type.toLowerCase()} warrant)`;
+          const wLabel = `${(n/1000).toLocaleString(undefined,{maximumFractionDigits:3})} 張 (${n.toLocaleString()} units) × ${row.warrant_code} (${row.warrant_type.toLowerCase()} warrant)`;
           const oLabel = `${row.option_contract} ${row.opt_type.toLowerCase()} option (×${contractSize.toLocaleString()} shares)`;
           if (row.pcp_diff >= 0) {
             // Warrant cheaper → buy warrant, sell option at bid
@@ -1535,12 +1553,12 @@
           }
         } else {
           legs = isCall ? [
-            { action:"BUY",   instrument:`${n} × ${row.warrant_code} (call warrant)`,  qty:n,      price:row.warrant_ask,       cf:-(n*row.warrant_ask) },
+            { action:"BUY",   instrument:`${(n/1000).toLocaleString(undefined,{maximumFractionDigits:3})} 張 (${n.toLocaleString()} units) × ${row.warrant_code} (call warrant)`,  qty:n,      price:row.warrant_ask,       cf:-(n*row.warrant_ask) },
             { action:"SHORT", instrument:`${contractSize.toLocaleString()} shares TSMC`,   qty:-contractSize, price:S0,           cf: contractSize*S0 },
             { action:"LEND",  instrument:`Bond (receive ${Ko.toFixed(0)} × ${contractSize.toLocaleString()} at expiry)`, qty:contractSize, price:bondPv.toFixed(2), cf:-(contractSize*bondPv) },
             { action:"SELL",  instrument:`${row.option_contract} put option (×${contractSize.toLocaleString()} shares)`, qty:contractSize, price:row.opt_ask, cf: contractSize*row.opt_ask },
           ] : [
-            { action:"BUY",   instrument:`${n} × ${row.warrant_code} (put warrant)`,   qty:n,      price:row.warrant_ask,       cf:-(n*row.warrant_ask) },
+            { action:"BUY",   instrument:`${(n/1000).toLocaleString(undefined,{maximumFractionDigits:3})} 張 (${n.toLocaleString()} units) × ${row.warrant_code} (put warrant)`,   qty:n,      price:row.warrant_ask,       cf:-(n*row.warrant_ask) },
             { action:"BUY",   instrument:`${contractSize.toLocaleString()} shares TSMC`,  qty:contractSize, price:S0,           cf:-contractSize*S0 },
             { action:"BORROW",instrument:`Bond (repay ${Ko.toFixed(0)} × ${contractSize.toLocaleString()} at expiry)`, qty:contractSize, price:bondPv.toFixed(2), cf: contractSize*bondPv },
             { action:"SELL",  instrument:`${row.option_contract} call option (×${contractSize.toLocaleString()} shares)`, qty:contractSize, price:row.opt_ask, cf: contractSize*row.opt_ask },
@@ -1641,7 +1659,7 @@
         document.getElementById("pcp-dte-label").textContent = `${maxDte} days`;
 
         // ── Chart ───────────────────────────────────────────────────────
-        renderPcpChart(maxDte);
+        setPcpChartMode(_pcpChartMode);   // syncs button highlight + renders at current slider value
         document.getElementById("pcpModal").style.display = "block";
       }
 
@@ -1658,15 +1676,53 @@
         renderPcpChart(parseInt(val));
       }
 
+      function setPcpChartMode(mode) {
+        _pcpChartMode = mode;
+        // Highlight the active button
+        const ex = document.getElementById("pcp-mode-exact");
+        const wh = document.getElementById("pcp-mode-whole");
+        ex.style.fontWeight = mode === "exact" ? "600" : "400";
+        wh.style.fontWeight = mode === "whole" ? "600" : "400";
+        ex.style.borderColor = mode === "exact" ? "var(--accent)" : "";
+        wh.style.borderColor = mode === "whole" ? "var(--accent)" : "";
+        renderPcpChart(parseInt(document.getElementById("pcp-dte-slider").value));
+      }
+
       function renderPcpChart(dte) {
         const row = _pcpRow;
-        const contractSize = _contractSize;
+        const contractSize = _contractSize;   // option leg controls exactly this many shares
         const S0 = row.underlying_price;
         const tau = dte / 365;
         // dir flips the sign so the chart always shows P&L from the correct
         // trade direction: buy cheap / sell expensive.
         // pnlPerShare assumes long warrant + short option; negate when reversed.
         const dir = row.pcp_diff >= 0 ? 1 : -1;
+
+        // Share counts per leg. Exact = matched 2000-share hedge (fractional 張).
+        // Whole = round the warrant to executable board lots (張), leaving residual delta.
+        const exactUnits = row.warrants_needed;          // 2000/ratio units (fractional 張)
+        const ratio = exactUnits > 0 ? contractSize / exactUnits : 1;
+        const optionShares = contractSize;
+        let warrantShares, hedgeNote;
+        if (_pcpChartMode === "whole") {
+          const wholeLots = Math.max(1, Math.round(exactUnits / 1000));
+          warrantShares = wholeLots * 1000 * ratio;
+          const exactLots = exactUnits / 1000;
+          const deltaShares = Math.round(warrantShares - optionShares);
+          hedgeNote = `Whole 張: ${wholeLots} 張 vs ${exactLots.toLocaleString(undefined,{maximumFractionDigits:3})} exact `
+            + `— residual ${deltaShares >= 0 ? "+" : ""}${deltaShares.toLocaleString()} shares of warrant delta`;
+        } else {
+          warrantShares = contractSize;
+          hedgeNote = `Exact hedge: ${(exactUnits/1000).toLocaleString(undefined,{maximumFractionDigits:3})} 張 `
+            + `(${exactUnits.toLocaleString()} units) — matched, no residual delta`;
+        }
+        document.getElementById("pcp-mode-note").textContent = hedgeNote;
+
+        const pnlAt = (S, t) => dir * (
+          warrantShares * warrantPnLPerShare(S, row, t) +
+          optionShares  * optionPnLPerShare(S, row, t)
+        );
+
         const spots = [];
         const pnls  = [];
         const n = 200;
@@ -1674,11 +1730,11 @@
         for (let i=0; i<=n; i++) {
           const S = lo + (hi-lo)*i/n;
           spots.push(parseFloat(S.toFixed(2)));
-          pnls.push(parseFloat((dir * pnlPerShare(S, row, tau) * contractSize).toFixed(0)));
+          pnls.push(parseFloat(pnlAt(S, tau).toFixed(0)));
         }
 
         // Also plot at expiry for reference
-        const pnlsExp = spots.map(S => parseFloat((dir * pnlPerShare(S, row, 0) * contractSize).toFixed(0)));
+        const pnlsExp = spots.map(S => parseFloat(pnlAt(S, 0).toFixed(0)));
 
         const zeroLine = [{x:[lo,hi],y:[0,0],mode:"lines",
           line:{color:"rgba(255,255,255,0.15)",dash:"dash",width:1},
@@ -1696,7 +1752,7 @@
         };
 
         // Mark current spot
-        const spotPnl = parseFloat((dir * pnlPerShare(S0, row, tau)*contractSize).toFixed(0));
+        const spotPnl = parseFloat(pnlAt(S0, tau).toFixed(0));
         const spotTrace = {
           x:[S0], y:[spotPnl], mode:"markers+text", name:"Current spot",
           marker:{color:"white",size:7,symbol:"circle"},
@@ -1709,7 +1765,7 @@
           paper_bgcolor:"#13161f", plot_bgcolor:"#0d0f16",
           font:{color:"#8b90a0",family:"Inter,system-ui,sans-serif",size:12},
           xaxis:{title:"TSMC Spot Price (NT$)",gridcolor:"#252836",zerolinecolor:"#252836",tickformat:","},
-          yaxis:{title:"P&L (NT$, 2,000-share position)",gridcolor:"#252836",zerolinecolor:"#252836",tickformat:"+,"},
+          yaxis:{title:_pcpChartMode==="whole"?"P&L (NT$, whole-張 hedge)":"P&L (NT$, exact 2,000-share hedge)",gridcolor:"#252836",zerolinecolor:"#252836",tickformat:"+,"},
           legend:{bgcolor:"#13161f",bordercolor:"#252836",borderwidth:1},
           margin:{l:80,r:20,t:20,b:60},
           hovermode:"x unified",
