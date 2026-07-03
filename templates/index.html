@@ -339,7 +339,6 @@
       <button onclick="switchTab('scanner', this)">Warrant Scanner</button>
       <button onclick="switchTab('ivsurface', this)">IV Surface</button>
       <button onclick="switchTab('arb', this)">Arb Finder</button>
-      <button onclick="switchTab('usmatch', this)">US Option Match</button>
     </div>
 
     <!-- OPTIONS TAB -->
@@ -561,117 +560,127 @@
     <!-- ARB FINDER TAB -->
     <div id="tab-arb" class="tab-content">
       <main>
-        <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
-
-          <!-- Direct Match header -->
-          <div style="display:flex;align-items:center;gap:10px">
-            <span style="font-size:14px;font-weight:600;color:var(--text)">Direct Match</span>
-            <button onclick="openDirectInfo()" title="How does Direct Match work?" style="background:none;border:1.5px solid var(--border);border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);font-family:inherit;padding:0;flex-shrink:0">ⓘ</button>
-          </div>
-
-          <!-- Shared filters -->
-          <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
-            <div class="stock-select" id="arb-stock-select-wrap">
-              <span>Stock (multi-select)</span>
-              <select id="arbStockSelect" multiple style="height:120px;min-width:200px">
-                <option value="2330" selected>2330 台積電 (TSMC)</option>
-                <option value="2303">2303 聯電 (UMC)</option>
-                <option value="2603">2603 長榮</option>
-                <option value="2881">2881 富邦金</option>
-                <option value="2882">2882 國泰金</option>
-              </select>
-            </div>
-            <label>Option Type
-              <select id="arbOptionType">
-                <option value="All">All</option>
-                <option value="Call">Call</option>
-                <option value="Put">Put</option>
-              </select>
-            </label>
-            <label>Max Strike Diff %
-              <input type="number" id="arbMaxStrikePct" value="3" step="0.5" min="0" max="20" style="width:80px"/>
-            </label>
-            <label>Max DTE Diff (days)
-              <input type="number" id="arbMaxDteDiff" value="5" min="0" max="30" style="width:70px"/>
-            </label>
-            <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="Loose: positive price_diff uses opt_ask − warrant_bid (more results, spread not covered). Executable: opt_bid − warrant_ask (tradeable arb only).">
-              <input type="checkbox" id="arbPositiveLoose" style="width:auto;margin:0"/>
-              Positive: loose prices
-            </label>
-            <div class="action-group">
-              <button class="primary" id="arbFindBtn" onclick="runArb()">Find Arb</button>
-              <button class="success" id="arbDownloadBtn" onclick="downloadArbCSV()" style="display:none">
-                Download CSV
-              </button>
-            </div>
+        <!-- Sub-tab toggle: Direct Match | US Option Match -->
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+          <div style="display:flex;gap:0;border:1px solid var(--border);border-radius:5px;overflow:hidden">
+            <button id="arb-mode-direct" onclick="setArbMode('direct')"
+              style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--accent);color:#fff">
+              Direct Match
+            </button>
+            <button id="arb-mode-us" onclick="setArbMode('us')"
+              style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--surface);color:var(--muted)">
+              US Option Match
+            </button>
           </div>
         </div>
 
-        <!-- Direct mode sort buttons -->
-        <div id="arb-sort-direct" class="sort-btns">
-          <button onclick="sortArbBy('price_diff_pct', false)">Price Diff % ↓</button>
-          <button onclick="sortArbBy('iv_diff', false)">IV Diff ↓</button>
-          <button onclick="sortArbBy('dte_diff', true)">DTE Diff ↑</button>
-          <button onclick="sortArbBy('strike_diff_pct', true)">Strike Diff ↑</button>
-        </div>
-
-        <div id="arb-status"></div>
-        <div id="arb-tableContainer"></div>
-      </main>
-    </div>
-
-    <!-- US OPTION MATCH TAB -->
-    <div id="tab-usmatch" class="tab-content">
-      <main>
-        <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
-
-          <div style="display:flex;align-items:center;gap:10px">
-            <span style="font-size:14px;font-weight:600;color:var(--text)">US Option Match — UMC ADR vs 2303 warrants</span>
-            <button onclick="openUsInfo()" title="How does US Option Match work?" style="background:none;border:1.5px solid var(--border);border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);font-family:inherit;padding:0;flex-shrink:0">ⓘ</button>
-          </div>
-
-          <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
-            <div class="stock-select">
-              <span>Stock</span>
-              <select id="usStockSelect" multiple style="height:60px;min-width:200px">
-                <option value="2303" selected>2303 聯電 (UMC)</option>
-              </select>
+        <!-- ── Direct Match sub-tab ── -->
+        <div id="arb-sub-direct">
+          <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-size:14px;font-weight:600;color:var(--text)">Direct Match — warrant vs Taiwan option</span>
+              <button onclick="openDirectInfo()" title="How does Direct Match work?" style="background:none;border:1.5px solid var(--border);border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);font-family:inherit;padding:0;flex-shrink:0">ⓘ</button>
             </div>
-            <label>Option Type
-              <select id="usOptionType">
-                <option value="All">All</option>
-                <option value="Call">Call</option>
-                <option value="Put">Put</option>
-              </select>
-            </label>
-            <label>Max Strike Diff %
-              <input type="number" id="usMaxStrikePct" value="3" step="0.5" min="0" max="20" style="width:80px"/>
-            </label>
-            <label>Max DTE Diff (days)
-              <input type="number" id="usMaxDteDiff" value="5" min="0" max="30" style="width:70px"/>
-            </label>
-            <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="Loose: positive price_diff uses opt_ask − warrant_bid (more results, spread not covered). Executable: opt_bid − warrant_ask (tradeable arb only).">
-              <input type="checkbox" id="usPositiveLoose" style="width:auto;margin:0"/>
-              Positive: loose prices
-            </label>
-            <div class="action-group">
-              <button class="primary" id="usFindBtn" onclick="fetchUsData()">Find Match</button>
-              <button class="success" id="usDownloadBtn" onclick="downloadUsCSV()" style="display:none">
-                Download CSV
-              </button>
+
+            <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
+              <div class="stock-select" id="arb-stock-select-wrap">
+                <span>Stock (multi-select)</span>
+                <select id="arbStockSelect" multiple style="height:120px;min-width:200px">
+                  <option value="2330" selected>2330 台積電 (TSMC)</option>
+                  <option value="2303">2303 聯電 (UMC)</option>
+                  <option value="2603">2603 長榮</option>
+                  <option value="2881">2881 富邦金</option>
+                  <option value="2882">2882 國泰金</option>
+                </select>
+              </div>
+              <label>Option Type
+                <select id="arbOptionType">
+                  <option value="All">All</option>
+                  <option value="Call">Call</option>
+                  <option value="Put">Put</option>
+                </select>
+              </label>
+              <label>Max Strike Diff %
+                <input type="number" id="arbMaxStrikePct" value="3" step="0.5" min="0" max="20" style="width:80px"/>
+              </label>
+              <label>Max DTE Diff (days)
+                <input type="number" id="arbMaxDteDiff" value="5" min="0" max="30" style="width:70px"/>
+              </label>
+              <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="Loose: positive price_diff uses opt_ask − warrant_bid (more results, spread not covered). Executable: opt_bid − warrant_ask (tradeable arb only).">
+                <input type="checkbox" id="arbPositiveLoose" style="width:auto;margin:0"/>
+                Positive: loose prices
+              </label>
+              <div class="action-group">
+                <button class="primary" id="arbFindBtn" onclick="runArb()">Find Arb</button>
+                <button class="success" id="arbDownloadBtn" onclick="downloadArbCSV()" style="display:none">
+                  Download CSV
+                </button>
+              </div>
             </div>
           </div>
+
+          <div id="arb-sort-direct" class="sort-btns">
+            <button onclick="sortArbBy('price_diff_pct', false)">Price Diff % ↓</button>
+            <button onclick="sortArbBy('iv_diff', false)">IV Diff ↓</button>
+            <button onclick="sortArbBy('dte_diff', true)">DTE Diff ↑</button>
+            <button onclick="sortArbBy('strike_diff_pct', true)">Strike Diff ↑</button>
+          </div>
+
+          <div id="arb-status"></div>
+          <div id="arb-tableContainer"></div>
         </div>
 
-        <div class="sort-btns">
-          <button onclick="sortUsBy('price_diff_pct', false)">Price Diff % ↓</button>
-          <button onclick="sortUsBy('iv_diff', false)">IV Diff ↓</button>
-          <button onclick="sortUsBy('dte_diff', true)">DTE Diff ↑</button>
-          <button onclick="sortUsBy('strike_diff_pct', true)">Strike Diff ↑</button>
-        </div>
+        <!-- ── US Option Match sub-tab ── -->
+        <div id="arb-sub-us" style="display:none">
+          <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-size:14px;font-weight:600;color:var(--text)">US Option Match — UMC ADR vs 2303 warrants</span>
+              <button onclick="openUsInfo()" title="How does US Option Match work?" style="background:none;border:1.5px solid var(--border);border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);font-family:inherit;padding:0;flex-shrink:0">ⓘ</button>
+            </div>
 
-        <div id="us-status"></div>
-        <div id="us-tableContainer"></div>
+            <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
+              <div class="stock-select">
+                <span>Stock</span>
+                <select id="usStockSelect" multiple style="height:60px;min-width:200px">
+                  <option value="2303" selected>2303 聯電 (UMC)</option>
+                </select>
+              </div>
+              <label>Option Type
+                <select id="usOptionType">
+                  <option value="All">All</option>
+                  <option value="Call">Call</option>
+                  <option value="Put">Put</option>
+                </select>
+              </label>
+              <label>Max Strike Diff %
+                <input type="number" id="usMaxStrikePct" value="3" step="0.5" min="0" max="20" style="width:80px"/>
+              </label>
+              <label>Max DTE Diff (days)
+                <input type="number" id="usMaxDteDiff" value="5" min="0" max="30" style="width:70px"/>
+              </label>
+              <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="Loose: positive price_diff uses opt_ask − warrant_bid (more results, spread not covered). Executable: opt_bid − warrant_ask (tradeable arb only).">
+                <input type="checkbox" id="usPositiveLoose" style="width:auto;margin:0"/>
+                Positive: loose prices
+              </label>
+              <div class="action-group">
+                <button class="primary" id="usFindBtn" onclick="fetchUsData()">Find Match</button>
+                <button class="success" id="usDownloadBtn" onclick="downloadUsCSV()" style="display:none">
+                  Download CSV
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="sort-btns">
+            <button onclick="sortUsBy('price_diff_pct', false)">Price Diff % ↓</button>
+            <button onclick="sortUsBy('iv_diff', false)">IV Diff ↓</button>
+            <button onclick="sortUsBy('dte_diff', true)">DTE Diff ↑</button>
+            <button onclick="sortUsBy('strike_diff_pct', true)">Strike Diff ↑</button>
+          </div>
+
+          <div id="us-status"></div>
+          <div id="us-tableContainer"></div>
+        </div>
       </main>
     </div>
 
@@ -1426,6 +1435,16 @@
       let currentArbData = [];
       let arbSortCol = null;
       let arbSortAsc = true;
+
+      function setArbMode(mode) {
+        const isDirect = mode === "direct";
+        document.getElementById("arb-mode-direct").style.background = isDirect ? "var(--accent)" : "var(--surface)";
+        document.getElementById("arb-mode-direct").style.color = isDirect ? "#fff" : "var(--muted)";
+        document.getElementById("arb-mode-us").style.background = isDirect ? "var(--surface)" : "var(--accent)";
+        document.getElementById("arb-mode-us").style.color = isDirect ? "var(--muted)" : "#fff";
+        document.getElementById("arb-sub-direct").style.display = isDirect ? "block" : "none";
+        document.getElementById("arb-sub-us").style.display = isDirect ? "none" : "block";
+      }
 
       function runArb() {
         fetchArbData();
