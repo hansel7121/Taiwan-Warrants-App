@@ -1847,10 +1847,18 @@
           optionShares  * optionPnLPerShare(S, row, t)
         );
 
+        // X-range must always contain the spot AND both strikes, with padding
+        // on each side — otherwise deep-ITM/OTM pairs push the payoff kinks
+        // (which sit at the strikes) off-screen and the curve looks flat.
+        const Ko = row.opt_strike, Kw = row.warrant_strike;
+        const anchorLo = Math.min(S0, Ko, Kw);
+        const anchorHi = Math.max(S0, Ko, Kw);
+        const pad = Math.max((anchorHi - anchorLo) * 0.25, S0 * 0.15);
+        const lo = Math.max(0, anchorLo - pad), hi = anchorHi + pad;
+
         const spots = [];
         const pnls  = [];
         const n = 200;
-        const lo = S0 * 0.65, hi = S0 * 1.35;
         for (let i=0; i<=n; i++) {
           const S = lo + (hi-lo)*i/n;
           spots.push(parseFloat(S.toFixed(2)));
@@ -1888,8 +1896,8 @@
         Plotly.react("pcp-pnl-chart", [...zeroLine, expiryTrace, currentTrace, spotTrace], {
           paper_bgcolor:"#13161f", plot_bgcolor:"#0d0f16",
           font:{color:"#8b90a0",family:"Inter,system-ui,sans-serif",size:12},
-          xaxis:{title:"TSMC Spot Price (NT$)",gridcolor:"#252836",zerolinecolor:"#252836",tickformat:","},
-          yaxis:{title:_pcpChartMode==="whole"?"P&L (NT$, whole-張 hedge)":"P&L (NT$, exact 2,000-share hedge)",gridcolor:"#252836",zerolinecolor:"#252836",tickformat:"+,"},
+          xaxis:{title:`Spot Price (NT$) — ${row.warrant_name}`,gridcolor:"#252836",zerolinecolor:"#252836",tickformat:","},
+          yaxis:{title:_pcpChartMode==="whole"?`P&L (NT$, whole-張 hedge)`:`P&L (NT$, exact ${contractSize.toLocaleString()}-share hedge)`,gridcolor:"#252836",zerolinecolor:"#252836",tickformat:"+,"},
           legend:{bgcolor:"#13161f",bordercolor:"#252836",borderwidth:1},
           margin:{l:80,r:20,t:20,b:60},
           hovermode:"x unified",
