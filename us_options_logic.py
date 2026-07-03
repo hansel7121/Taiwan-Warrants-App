@@ -7,7 +7,7 @@ contract controls 100 * 5 = 500 Taiwan shares.
 To let a US option be compared directly against a Taiwan warrant we express its
 prices and strike in **TWD per Taiwan share**:
 
-    twd_per_tw_share = usd_per_ADR / ADR_RATIO * FX      (FX = TWD per USD)
+    twd_per_tw_share = usd_per_ADR / adr_ratio * FX      (FX = TWD per USD)
 
 Implied vol is scale-free (invariant to currency and to the ADR ratio), so it is
 computed once in native USD/ADR space and carried over unchanged.
@@ -23,17 +23,26 @@ import yfinance as yf
 
 from warrant_logic import implied_vol, bs_delta, calc_real_leverage
 
-# 1 ADR = 5 ordinary shares; 1 US contract = 100 ADR = 500 ordinary shares.
-ADR_RATIO = 5
+# One US option contract covers 100 ADRs. The number of ordinary (Taiwan)
+# shares per ADR ("adr_ratio") is per-listing, so contract size in Taiwan
+# shares = 100 * adr_ratio.
 US_CONTRACT_ADRS = 100
-US_CONTRACT_TW_SHARES = US_CONTRACT_ADRS * ADR_RATIO  # 500 Taiwan shares
 
 R_US = 0.04  # US benchmark rate for BS/IV on the ADR leg
 
-# Map a Taiwan stock code to its US ADR ticker + FX pair.
+# Map a Taiwan stock code to its US ADR ticker, FX pair, and ADR ratio
+# (ordinary shares per ADR). Only listings whose ADR tracks the local share
+# tightly enough to treat as the same asset are included — see the parity
+# screen in analysis notebooks (persistent/large premium => excluded, e.g. TSM).
 US_ADR_MAP = {
-    "2303": {"adr_ticker": "UMC", "fx_ticker": "TWD=X"},
+    "2303": {"adr_ticker": "UMC", "fx_ticker": "TWD=X", "adr_ratio": 5},   # 500 TW shares/contract
+    "2412": {"adr_ticker": "CHT", "fx_ticker": "TWD=X", "adr_ratio": 10},  # 1000 TW shares/contract
 }
+
+
+def contract_tw_shares(stock_code):
+    """Taiwan shares controlled by one US option contract for this listing."""
+    return US_CONTRACT_ADRS * US_ADR_MAP[stock_code]["adr_ratio"]
 
 _cache: dict = {}
 _CACHE_TTL = 300  # 5 minutes
@@ -70,6 +79,7 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365):
     if hit and time.time() - hit[0] < _CACHE_TTL:
         return hit[1].copy()
 
+    adr_ratio = cfg["adr_ratio"]             # ordinary shares per ADR
     adr = _last_price(cfg["adr_ticker"])     # USD per ADR
     fx = _last_price(cfg["fx_ticker"])       # TWD per USD
     if adr <= 0 or fx <= 0:
@@ -77,7 +87,7 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365):
 
     # Underlying value expressed per Taiwan share, in TWD — the same basis the
     # warrant leg uses (so strike_diff_pct etc. are apples-to-apples).
-    S_twd = adr / ADR_RATIO * fx
+    S_twd = adr / adr_ratio * fx
 
     tk = yf.Ticker(cfg["adr_ticker"])
     expiries = tk.options
@@ -133,7 +143,7 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365):
 
                 delta = bs_delta(adr, K_usd, T, R_US, iv_ask, 1.0, is_put)
 
-                conv = fx / ADR_RATIO  # USD/ADR -> TWD/Taiwan-share
+                conv = fx / adr_ratio  # USD/ADR -> TWD/Taiwan-share
                 strike_twd = K_usd * conv
                 ask_twd = a_usd * conv
                 bid_twd = (b_usd * conv) if (np.isfinite(b_usd) and b_usd > 0) else np.nan

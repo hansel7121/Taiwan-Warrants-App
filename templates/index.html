@@ -637,15 +637,16 @@
         <div id="arb-sub-us" style="display:none">
           <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
             <div style="display:flex;align-items:center;gap:10px">
-              <span style="font-size:14px;font-weight:600;color:var(--text)">US Option Match — UMC ADR vs 2303 warrants</span>
+              <span style="font-size:14px;font-weight:600;color:var(--text)">US Option Match — Taiwan ADR options vs local warrants</span>
               <button onclick="openUsInfo()" title="How does US Option Match work?" style="background:none;border:1.5px solid var(--border);border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);font-family:inherit;padding:0;flex-shrink:0">ⓘ</button>
             </div>
 
             <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
               <div class="stock-select">
                 <span>Stock</span>
-                <select id="usStockSelect" multiple style="height:60px;min-width:200px">
-                  <option value="2303" selected>2303 聯電 (UMC)</option>
+                <select id="usStockSelect" multiple style="height:80px;min-width:200px">
+                  <option value="2303" selected>2303 聯電 (UMC, 1:5)</option>
+                  <option value="2412">2412 中華電 (CHT, 1:10)</option>
                 </select>
               </div>
               <label>Option Type
@@ -698,15 +699,16 @@
         <div style="display:flex;flex-direction:column;gap:22px;font-size:13px;color:var(--text)">
           <section>
             <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:8px">Same strategy as Direct Match, US option leg</h3>
-            <p>Identical monotonicity arb as Direct Match (same-type warrant vs option), except the option leg is a <b>UMC US ADR option</b> instead of a Taiwan option. UMC ADR and Taiwan 2303 are the <b>same underlying</b>.</p>
+            <p>Identical monotonicity arb as Direct Match (same-type warrant vs option), except the option leg is a <b>US ADR option</b> instead of a Taiwan option. The ADR and its Taiwan ordinary share are the <b>same underlying</b>.</p>
+            <p style="margin-top:6px">Universe (screened for tight ADR parity — persistent/large premium listings like TSM are excluded): <b>2303 聯電/UMC</b> (1 ADR = 5 shares), <b>2412 中華電/CHT</b> (1 ADR = 10 shares).</p>
           </section>
           <section>
             <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:8px">Normalization</h3>
             <p>The US option is quoted in USD per ADR. It is converted to <b>TWD per Taiwan share</b> so it lives in the same price space as the warrant:</p>
             <div style="background:var(--surface);border-radius:6px;padding:10px 14px;margin:8px 0;font-family:monospace;font-size:13px;color:var(--text)">
-              twd_per_tw_share = usd_per_ADR / 5 × FX&nbsp;&nbsp;(FX = TWD per USD)
+              twd_per_tw_share = usd_per_ADR / adr_ratio × FX&nbsp;&nbsp;(FX = TWD per USD)
             </div>
-            <p style="margin-top:6px">1 ADR = 5 Taiwan shares, so one US contract (100 ADR) controls <b>500 Taiwan shares</b>. Warrant units needed = 500 / exercise_ratio. Implied vol is scale-free, computed once on the ADR and carried over.</p>
+            <p style="margin-top:6px">1 ADR = <code>adr_ratio</code> Taiwan shares, so one US contract (100 ADR) controls <b>100 × adr_ratio Taiwan shares</b> (500 for UMC, 1000 for CHT). Warrant units needed = contract_shares / exercise_ratio. Implied vol is scale-free, computed once on the ADR and carried over.</p>
           </section>
           <section>
             <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:8px">FX assumption</h3>

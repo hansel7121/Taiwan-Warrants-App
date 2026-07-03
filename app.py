@@ -422,17 +422,18 @@ def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
 
     Reuses _match_warrants_to_options. The US option leg is pre-converted to
     TWD-per-Taiwan-share by us_options_logic, so it lives in the same price
-    space as the warrant leg. One US contract controls 500 Taiwan shares, so
-    opt_contract_size = US_CONTRACT_TW_SHARES drives warrants_needed = 500/ratio.
+    space as the warrant leg. One US contract controls 100 * adr_ratio Taiwan
+    shares (per listing), which drives warrants_needed = contract_size/ratio.
     """
     all_rows = []
     errors = []
-    contract_size = us_options_logic.US_CONTRACT_TW_SHARES  # 500 TW shares
 
     for code in stock_codes:
         if code not in us_options_logic.US_ADR_MAP:
             errors.append(f"{code}: no US ADR mapping")
             continue
+
+        contract_size = us_options_logic.contract_tw_shares(code)  # TW shares/contract
 
         warrant_df, err = warrant_logic.fetch_warrants(
             [code], option_type, 0, 365, 0, 100, 0
