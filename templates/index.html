@@ -339,6 +339,7 @@
       <button onclick="switchTab('scanner', this)">Warrant Scanner</button>
       <button onclick="switchTab('ivsurface', this)">IV Surface</button>
       <button onclick="switchTab('arb', this)">Arb Finder</button>
+      <button onclick="switchTab('usmatch', this)">US Option Match</button>
     </div>
 
     <!-- OPTIONS TAB -->
@@ -562,18 +563,9 @@
       <main>
         <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
 
-          <!-- Mode toggle -->
+          <!-- Direct Match header -->
           <div style="display:flex;align-items:center;gap:10px">
-            <div style="display:flex;gap:0;border:1px solid var(--border);border-radius:5px;overflow:hidden">
-              <button id="arb-mode-direct" onclick="setArbMode('direct')"
-                style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--accent);color:#fff">
-                Direct Match
-              </button>
-              <button id="arb-mode-pcp" onclick="setArbMode('pcp')"
-                style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--surface);color:var(--muted)">
-                PCP Match
-              </button>
-            </div>
+            <span style="font-size:14px;font-weight:600;color:var(--text)">Direct Match</span>
             <button onclick="openDirectInfo()" title="How does Direct Match work?" style="background:none;border:1.5px solid var(--border);border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);font-family:inherit;padding:0;flex-shrink:0">ⓘ</button>
           </div>
 
@@ -623,16 +615,90 @@
           <button onclick="sortArbBy('strike_diff_pct', true)">Strike Diff ↑</button>
         </div>
 
-        <!-- PCP mode sort buttons -->
-        <div id="arb-sort-pcp" class="sort-btns" style="display:none">
-          <button onclick="sortPcpBy('pcp_diff_pct', false)">PCP Diff % ↓</button>
-          <button onclick="sortPcpBy('dte_diff', true)">DTE Diff ↑</button>
-          <button onclick="sortPcpBy('strike_diff_pct', true)">Strike Diff ↑</button>
-        </div>
-
         <div id="arb-status"></div>
         <div id="arb-tableContainer"></div>
       </main>
+    </div>
+
+    <!-- US OPTION MATCH TAB -->
+    <div id="tab-usmatch" class="tab-content">
+      <main>
+        <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
+
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="font-size:14px;font-weight:600;color:var(--text)">US Option Match — UMC ADR vs 2303 warrants</span>
+            <button onclick="openUsInfo()" title="How does US Option Match work?" style="background:none;border:1.5px solid var(--border);border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);font-family:inherit;padding:0;flex-shrink:0">ⓘ</button>
+          </div>
+
+          <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
+            <div class="stock-select">
+              <span>Stock</span>
+              <select id="usStockSelect" multiple style="height:60px;min-width:200px">
+                <option value="2303" selected>2303 聯電 (UMC)</option>
+              </select>
+            </div>
+            <label>Option Type
+              <select id="usOptionType">
+                <option value="All">All</option>
+                <option value="Call">Call</option>
+                <option value="Put">Put</option>
+              </select>
+            </label>
+            <label>Max Strike Diff %
+              <input type="number" id="usMaxStrikePct" value="3" step="0.5" min="0" max="20" style="width:80px"/>
+            </label>
+            <label>Max DTE Diff (days)
+              <input type="number" id="usMaxDteDiff" value="5" min="0" max="30" style="width:70px"/>
+            </label>
+            <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="Loose: positive price_diff uses opt_ask − warrant_bid (more results, spread not covered). Executable: opt_bid − warrant_ask (tradeable arb only).">
+              <input type="checkbox" id="usPositiveLoose" style="width:auto;margin:0"/>
+              Positive: loose prices
+            </label>
+            <div class="action-group">
+              <button class="primary" id="usFindBtn" onclick="fetchUsData()">Find Match</button>
+              <button class="success" id="usDownloadBtn" onclick="downloadUsCSV()" style="display:none">
+                Download CSV
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="sort-btns">
+          <button onclick="sortUsBy('price_diff_pct', false)">Price Diff % ↓</button>
+          <button onclick="sortUsBy('iv_diff', false)">IV Diff ↓</button>
+          <button onclick="sortUsBy('dte_diff', true)">DTE Diff ↑</button>
+          <button onclick="sortUsBy('strike_diff_pct', true)">Strike Diff ↑</button>
+        </div>
+
+        <div id="us-status"></div>
+        <div id="us-tableContainer"></div>
+      </main>
+    </div>
+
+    <!-- US Option Match Info Modal -->
+    <div id="usInfoModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;max-width:780px;margin:36px auto 60px;padding:32px 36px;position:relative;line-height:1.65">
+        <button onclick="document.getElementById('usInfoModal').style.display='none'" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
+        <h2 style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:24px">US Option Match — How It Works</h2>
+        <div style="display:flex;flex-direction:column;gap:22px;font-size:13px;color:var(--text)">
+          <section>
+            <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:8px">Same strategy as Direct Match, US option leg</h3>
+            <p>Identical monotonicity arb as Direct Match (same-type warrant vs option), except the option leg is a <b>UMC US ADR option</b> instead of a Taiwan option. UMC ADR and Taiwan 2303 are the <b>same underlying</b>.</p>
+          </section>
+          <section>
+            <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:8px">Normalization</h3>
+            <p>The US option is quoted in USD per ADR. It is converted to <b>TWD per Taiwan share</b> so it lives in the same price space as the warrant:</p>
+            <div style="background:var(--surface);border-radius:6px;padding:10px 14px;margin:8px 0;font-family:monospace;font-size:13px;color:var(--text)">
+              twd_per_tw_share = usd_per_ADR / 5 × FX&nbsp;&nbsp;(FX = TWD per USD)
+            </div>
+            <p style="margin-top:6px">1 ADR = 5 Taiwan shares, so one US contract (100 ADR) controls <b>500 Taiwan shares</b>. Warrant units needed = 500 / exercise_ratio. Implied vol is scale-free, computed once on the ADR and carried over.</p>
+          </section>
+          <section>
+            <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:8px">FX assumption</h3>
+            <p>FX is assumed <b>constant</b> over the holding period. A single spot snapshot (TWD=X) is used for every conversion, so all NT$ cash flows and P&L ignore FX drift.</p>
+          </section>
+        </div>
+      </div>
     </div>
 
     <!-- Direct Match Info Modal -->
@@ -713,7 +779,7 @@
 
         <!-- Trade legs -->
         <div style="margin-bottom:20px">
-          <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin-bottom:10px">Trade Legs (per 1 options contract = 2,000 shares)</p>
+          <p id="pcp-legs-caption" style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin-bottom:10px">Trade Legs (per 1 options contract = 2,000 shares)</p>
           <table id="pcp-legs-table" style="width:100%;border-collapse:collapse;font-size:13px">
             <thead>
               <tr>
@@ -1092,62 +1158,88 @@
         }, { responsive: true });
       }
 
-      // ── Arb PCP ────────────────────────────────────────────────────────
-      async function fetchPcpData() {
-        document.getElementById("arb-status").textContent = "Fetching warrants and options…";
-        document.getElementById("arb-tableContainer").innerHTML = "";
-        document.getElementById("arbDownloadBtn").style.display = "none";
+      async function downloadArbCSV() {
+        const res = await fetch("/arb_finder_csv", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(getArbFilters()),
+        });
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = "arb_finder.csv"; a.click();
+      }
+
+      // ── US Option Match ────────────────────────────────────────────────
+      let currentUsData = [];
+      let usSortCol = null;
+      let usSortAsc = true;
+
+      function openUsInfo() {
+        document.getElementById("usInfoModal").style.display = "block";
+      }
+
+      function getUsFilters() {
+        const sel = document.getElementById("usStockSelect");
+        return {
+          stock_codes: Array.from(sel.selectedOptions).map(o => o.value),
+          option_type: document.getElementById("usOptionType").value,
+          max_strike_diff_pct: parseFloat(document.getElementById("usMaxStrikePct").value) || 3,
+          max_dte_diff: parseInt(document.getElementById("usMaxDteDiff").value) ?? 5,
+          positive_loose: document.getElementById("usPositiveLoose").checked,
+        };
+      }
+
+      async function fetchUsData() {
+        document.getElementById("us-status").textContent = "Fetching warrants and UMC options…";
+        document.getElementById("us-tableContainer").innerHTML = "";
+        document.getElementById("usDownloadBtn").style.display = "none";
         let data;
         try {
-          const res = await fetch("/arb_pcp", {
+          const res = await fetch("/us_option_match", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(getArbFilters()),
+            body: JSON.stringify(getUsFilters()),
           });
           data = await res.json();
         } catch(e) {
-          document.getElementById("arb-status").textContent = "Error: " + e.message;
+          document.getElementById("us-status").textContent = "Error: " + e.message;
           return;
         }
         if (data.error) {
-          document.getElementById("arb-status").textContent = "Error: " + data.error;
+          document.getElementById("us-status").textContent = "Error: " + data.error;
           return;
         }
-        currentPcpData = data.rows;
-        document.getElementById("arb-status").textContent =
-          `${data.count} PCP pairs — positive pcp_diff means warrant cheaper than synthetic (buy warrant, sell synthetic leg)`;
-        document.getElementById("arbDownloadBtn").style.display = "inline-block";
-        renderPcpTable(currentPcpData);
+        currentUsData = data.rows;
+        document.getElementById("us-status").textContent =
+          `${data.count} matched pairs — prices in TWD/Taiwan-share; 1 US contract = 500 TW shares; FX held constant`;
+        document.getElementById("usDownloadBtn").style.display = "inline-block";
+        renderUsTable(currentUsData);
       }
 
-      function renderPcpTable(rows) {
-        const container = document.getElementById("arb-tableContainer");
+      function renderUsTable(rows) {
+        const container = document.getElementById("us-tableContainer");
         if (!rows.length) {
-          container.innerHTML = "<p style='padding:16px;color:var(--muted)'>No PCP matches found. Try relaxing thresholds.</p>";
+          container.innerHTML = "<p style='padding:16px;color:var(--muted)'>No matches found. Try relaxing the thresholds.</p>";
           return;
         }
         const cols = Object.keys(rows[0]);
         let html = "<table><thead><tr>";
         cols.forEach((c, i) => {
-          const arrow = pcpSortCol === i ? (pcpSortAsc ? " ▲" : " ▼") : "";
-          html += `<th onclick="sortPcpByIndex(${i})">${c}${arrow}</th>`;
+          const arrow = usSortCol === i ? (usSortAsc ? " ▲" : " ▼") : "";
+          html += `<th onclick="sortUsByIndex(${i})">${c}${arrow}</th>`;
         });
         html += "</tr></thead><tbody>";
         rows.forEach((row, ri) => {
-          const wCls = row.warrant_type === "Call" ? "call" : "put";
-          const oCls = row.opt_type === "Call" ? "call" : "put";
-          html += `<tr style="cursor:pointer" onclick="openPcpModal(currentPcpData[${ri}])" title="Click to view trade breakdown">`;
-
+          const typeCls = row.type === "Call" ? "call" : "put";
+          html += `<tr style="cursor:pointer" onclick="openUsModal(currentUsData[${ri}])" title="Click to view trade breakdown">`;
           cols.forEach(c => {
             let val = row[c] === null ? "—" : row[c];
-            if (c === "warrant_type") val = `<span class="${wCls}">${val}</span>`;
-            else if (c === "opt_type") val = `<span class="${oCls}">${val}</span>`;
-            else if (c === "pcp_diff_pct" && row[c] !== null) {
+            if (c === "type") {
+              val = `<span class="${typeCls}">${val}</span>`;
+            } else if ((c === "price_diff_pct" || c === "price_diff") && row[c] !== null) {
               const cls = row[c] > 0 ? "put" : "call";
-              val = `<span class="${cls}">${val}%</span>`;
-            } else if (c === "pcp_diff" && row[c] !== null) {
-              const cls = row[c] > 0 ? "put" : "call";
-              val = `<span class="${cls}">${val}</span>`;
+              val = `<span class="${cls}">${val}${c === "price_diff_pct" ? "%" : ""}</span>`;
             }
             html += `<td>${val}</td>`;
           });
@@ -1157,42 +1249,73 @@
         container.innerHTML = html;
       }
 
-      function sortPcpByIndex(colIndex) {
-        if (!currentPcpData.length) return;
-        const key = Object.keys(currentPcpData[0])[colIndex];
-        if (pcpSortCol === colIndex) pcpSortAsc = !pcpSortAsc;
-        else { pcpSortCol = colIndex; pcpSortAsc = true; }
-        currentPcpData.sort((a, b) => {
+      function sortUsByIndex(colIndex) {
+        if (!currentUsData.length) return;
+        const key = Object.keys(currentUsData[0])[colIndex];
+        if (usSortCol === colIndex) usSortAsc = !usSortAsc;
+        else { usSortCol = colIndex; usSortAsc = true; }
+        currentUsData.sort((a, b) => {
           const av = a[key], bv = b[key];
           if (av === null) return 1; if (bv === null) return -1;
-          if (typeof av === "number") return pcpSortAsc ? av - bv : bv - av;
-          return pcpSortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+          if (typeof av === "number") return usSortAsc ? av - bv : bv - av;
+          return usSortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
         });
-        renderPcpTable(currentPcpData);
+        renderUsTable(currentUsData);
       }
 
-      function sortPcpBy(key, asc) {
-        if (!currentPcpData.length) return;
-        currentPcpData.sort((a, b) => {
+      function sortUsBy(key, asc) {
+        if (!currentUsData.length) return;
+        currentUsData.sort((a, b) => {
           const av = a[key] ?? (asc ? Infinity : -Infinity);
           const bv = b[key] ?? (asc ? Infinity : -Infinity);
           return asc ? av - bv : bv - av;
         });
-        renderPcpTable(currentPcpData);
+        renderUsTable(currentUsData);
       }
 
-      async function downloadArbCSV() {
-        const endpoint = arbMode === "pcp" ? "/arb_pcp_csv" : "/arb_finder_csv";
-        const filename = arbMode === "pcp" ? "arb_pcp.csv" : "arb_finder.csv";
-        const res = await fetch(endpoint, {
+      function openUsModal(row) {
+        // Same field mapping as Direct Match; option leg already in TWD/TW-share.
+        const mapped = {
+          warrant_code:     row.warrant_code,
+          warrant_name:     row.warrant_name,
+          warrant_type:     row.type,
+          opt_type:         row.type,
+          option_contract:  row.option_contract,
+          underlying_price: row.underlying_price,
+          warrant_dte:      row.warrant_dte,
+          opt_dte:          row.opt_dte,
+          dte_diff:         row.dte_diff,
+          warrant_strike:   row.warrant_strike,
+          opt_strike:       row.opt_strike,
+          strike_diff_pct:  row.strike_diff_pct,
+          warrants_needed:  row.warrants_needed,
+          opt_contract_size:row.opt_contract_size,
+          warrant_ask:      row.warrant_ask,
+          warrant_bid:      row.warrant_bid,
+          opt_bid:          row.opt_bid,
+          opt_ask:          row.opt_ask,
+          warrant_per_share:row.warrant_per_share,
+          opt_per_share:    row.opt_per_share,
+          pcp_diff:         row.price_diff,
+          pcp_diff_pct:     row.price_diff_pct,
+          synthetic_price:  row.opt_per_share,
+          bond_pv:          null,
+          warrant_iv:       row.warrant_iv,
+          opt_iv:           row.opt_iv,
+        };
+        openArbModal(mapped, "us");
+      }
+
+      async function downloadUsCSV() {
+        const res = await fetch("/us_option_match_csv", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(getArbFilters()),
+          body: JSON.stringify(getUsFilters()),
         });
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
-        a.href = url; a.download = filename; a.click();
+        a.href = url; a.download = "us_option_match.csv"; a.click();
       }
 
       // ── Options Scanner ────────────────────────────────────────────────
@@ -1301,30 +1424,11 @@
 
       // ── Arb Finder ─────────────────────────────────────────────────────
       let currentArbData = [];
-      let currentPcpData = [];
       let arbSortCol = null;
       let arbSortAsc = true;
-      let pcpSortCol = null;
-      let pcpSortAsc = true;
-      let arbMode = "direct";
-
-      function setArbMode(mode) {
-        arbMode = mode;
-        const isDirect = mode === "direct";
-        document.getElementById("arb-mode-direct").style.background = isDirect ? "var(--accent)" : "var(--surface)";
-        document.getElementById("arb-mode-direct").style.color = isDirect ? "#fff" : "var(--muted)";
-        document.getElementById("arb-mode-pcp").style.background = isDirect ? "var(--surface)" : "var(--accent)";
-        document.getElementById("arb-mode-pcp").style.color = isDirect ? "var(--muted)" : "#fff";
-        document.getElementById("arb-sort-direct").style.display = isDirect ? "flex" : "none";
-        document.getElementById("arb-sort-pcp").style.display = isDirect ? "none" : "flex";
-        document.getElementById("arb-tableContainer").innerHTML = "";
-        document.getElementById("arb-status").textContent = "";
-        document.getElementById("arbDownloadBtn").style.display = "none";
-      }
 
       function runArb() {
-        if (arbMode === "direct") fetchArbData();
-        else fetchPcpData();
+        fetchArbData();
       }
 
       function getArbFilters() {
@@ -1511,7 +1615,6 @@
         document.getElementById("directInfoModal").style.display = "block";
       }
 
-      function openPcpModal(row) { openArbModal(row, "pcp"); }
 
       function openArbModal(row, mode) {
         _pcpRow = row;
@@ -1526,13 +1629,15 @@
         const contractSize = row.opt_contract_size ?? 2000;
         _contractSize = contractSize;
 
-        const modeLabel = mode === "direct" ? "Direct Match" : "PCP Arb";
+        const modeLabel = mode === "us" ? "US Option Match" : mode === "direct" ? "Direct Match" : "PCP Arb";
         document.getElementById("pcp-modal-title").textContent =
           `${row.warrant_name} (${row.warrant_type}) ↔ ${row.option_contract} (${row.opt_type})  —  ${modeLabel}`;
+        document.getElementById("pcp-legs-caption").textContent =
+          `Trade Legs (per 1 options contract = ${contractSize.toLocaleString()} ${mode === "us" ? "TW shares" : "shares"})`;
 
         // ── Trade legs ──────────────────────────────────────────────────
         let legs;
-        if (mode === "direct") {
+        if (mode === "direct" || mode === "us") {
           // Simple 2-leg trade: buy cheaper warrant, sell pricier same-type option
           const wLabel = `${(n/1000).toLocaleString(undefined,{maximumFractionDigits:3})} 張 (${n.toLocaleString()} units) × ${row.warrant_code} (${row.warrant_type.toLowerCase()} warrant)`;
           const oLabel = `${row.option_contract} ${row.opt_type.toLowerCase()} option (×${contractSize.toLocaleString()} shares)`;

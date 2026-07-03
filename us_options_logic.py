@@ -1,0 +1,168 @@
+"""US ADR option chain (UMC) normalized into TWD-per-Taiwan-share space.
+
+The Taiwan ordinary (2303) and the US ADR (UMC) are the same underlying. One US
+option contract controls 100 ADR, and 1 ADR = 5 ordinary shares, so a single US
+contract controls 100 * 5 = 500 Taiwan shares.
+
+To let a US option be compared directly against a Taiwan warrant we express its
+prices and strike in **TWD per Taiwan share**:
+
+    twd_per_tw_share = usd_per_ADR / ADR_RATIO * FX      (FX = TWD per USD)
+
+Implied vol is scale-free (invariant to currency and to the ADR ratio), so it is
+computed once in native USD/ADR space and carried over unchanged.
+
+FX is assumed constant over the holding period (per product decision), so a
+single spot FX snapshot is used for every conversion.
+"""
+
+import time
+import numpy as np
+import pandas as pd
+import yfinance as yf
+
+from warrant_logic import implied_vol, bs_delta, calc_real_leverage
+
+# 1 ADR = 5 ordinary shares; 1 US contract = 100 ADR = 500 ordinary shares.
+ADR_RATIO = 5
+US_CONTRACT_ADRS = 100
+US_CONTRACT_TW_SHARES = US_CONTRACT_ADRS * ADR_RATIO  # 500 Taiwan shares
+
+R_US = 0.04  # US benchmark rate for BS/IV on the ADR leg
+
+# Map a Taiwan stock code to its US ADR ticker + FX pair.
+US_ADR_MAP = {
+    "2303": {"adr_ticker": "UMC", "fx_ticker": "TWD=X"},
+}
+
+_cache: dict = {}
+_CACHE_TTL = 300  # 5 minutes
+
+
+def _last_price(ticker: str) -> float:
+    tk = yf.Ticker(ticker)
+    # fast_info is cheap and usually populated; fall back to history.
+    try:
+        p = float(tk.fast_info["last_price"])
+        if p > 0:
+            return p
+    except Exception:
+        pass
+    hist = tk.history(period="5d")
+    if hist.empty:
+        raise RuntimeError(f"no price for {ticker}")
+    return float(hist["Close"].dropna().iloc[-1])
+
+
+def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365):
+    """Return a DataFrame of UMC options priced in TWD per Taiwan share.
+
+    Columns mirror options_logic.fetch_options so the same matching code can
+    consume it: type, strike, days_to_expiry, bid, ask, iv_bid, iv_ask,
+    contract, is_live, plus USD reference fields (strike_usd, fx, adr_price).
+    """
+    if stock_code not in US_ADR_MAP:
+        raise RuntimeError(f"{stock_code}: no US ADR mapping")
+
+    cfg = US_ADR_MAP[stock_code]
+    cache_key = (stock_code, option_type, min_days, max_days)
+    hit = _cache.get(cache_key)
+    if hit and time.time() - hit[0] < _CACHE_TTL:
+        return hit[1].copy()
+
+    adr = _last_price(cfg["adr_ticker"])     # USD per ADR
+    fx = _last_price(cfg["fx_ticker"])       # TWD per USD
+    if adr <= 0 or fx <= 0:
+        raise RuntimeError("bad ADR price or FX")
+
+    # Underlying value expressed per Taiwan share, in TWD — the same basis the
+    # warrant leg uses (so strike_diff_pct etc. are apples-to-apples).
+    S_twd = adr / ADR_RATIO * fx
+
+    tk = yf.Ticker(cfg["adr_ticker"])
+    expiries = tk.options
+    if not expiries:
+        raise RuntimeError(f"{cfg['adr_ticker']}: no option expiries")
+
+    today = pd.Timestamp.now().normalize()
+    rows = []
+    for exp in expiries:
+        exp_ts = pd.Timestamp(exp)
+        dte = int((exp_ts - today).days)
+        if dte < int(min_days) or dte > int(max_days):
+            continue
+        try:
+            chain = tk.option_chain(exp)
+        except Exception:
+            continue
+
+        for is_put, leg in ((False, chain.calls), (True, chain.puts)):
+            opt_type = "Put" if is_put else "Call"
+            if option_type != "All" and opt_type != option_type:
+                continue
+            for _, o in leg.iterrows():
+                K_usd = float(o.get("strike", np.nan))
+                bid_usd = float(o.get("bid", np.nan) or np.nan)
+                ask_usd = float(o.get("ask", np.nan) or np.nan)
+                last_usd = float(o.get("lastPrice", np.nan) or np.nan)
+                if not np.isfinite(K_usd) or K_usd <= 0:
+                    continue
+
+                ask_live = np.isfinite(ask_usd) and ask_usd > 0
+                bid_live = np.isfinite(bid_usd) and bid_usd > 0
+                is_live = ask_live and bid_live
+
+                # Fall back to last trade when a side is missing.
+                a_usd = ask_usd if ask_live else last_usd
+                b_usd = bid_usd if bid_live else last_usd
+                if not (np.isfinite(a_usd) and a_usd > 0):
+                    continue
+
+                T = dte / 365.0
+                # IV in native USD/ADR space (scale-free).
+                iv_ask = implied_vol(a_usd, adr, K_usd, T, R_US, 1.0, is_put)
+                iv_bid = (
+                    implied_vol(b_usd, adr, K_usd, T, R_US, 1.0, is_put)
+                    if np.isfinite(b_usd) and b_usd > 0
+                    else np.nan
+                )
+                if np.isnan(iv_ask) and not np.isnan(iv_bid):
+                    iv_ask = iv_bid
+                if np.isnan(iv_ask):
+                    continue
+
+                delta = bs_delta(adr, K_usd, T, R_US, iv_ask, 1.0, is_put)
+
+                conv = fx / ADR_RATIO  # USD/ADR -> TWD/Taiwan-share
+                strike_twd = K_usd * conv
+                ask_twd = a_usd * conv
+                bid_twd = (b_usd * conv) if (np.isfinite(b_usd) and b_usd > 0) else np.nan
+
+                contract = f"{'P' if is_put else 'C'}{K_usd:g} {exp_ts.strftime('%b%y')} (US)"
+
+                rows.append({
+                    "contract": contract,
+                    "type": opt_type,
+                    "underlying_price": round(S_twd, 4),
+                    "strike": round(strike_twd, 4),
+                    "days_to_expiry": dte,
+                    "bid": round(bid_twd, 4) if np.isfinite(bid_twd) else None,
+                    "ask": round(ask_twd, 4),
+                    "iv_ask": round(float(iv_ask), 4),
+                    "iv_bid": round(float(iv_bid), 4) if np.isfinite(iv_bid) else None,
+                    "delta_calc": round(float(delta), 4),
+                    "volume": int(o["volume"]) if pd.notna(o.get("volume")) else 0,
+                    "oi": int(o["openInterest"]) if pd.notna(o.get("openInterest")) else 0,
+                    "is_live": bool(is_live),
+                    # USD reference (for display / auditing)
+                    "strike_usd": round(K_usd, 4),
+                    "adr_price": round(adr, 4),
+                    "fx": round(fx, 4),
+                })
+
+    if not rows:
+        raise RuntimeError("no US options in range")
+
+    df = pd.DataFrame(rows).sort_values(["days_to_expiry", "strike"]).reset_index(drop=True)
+    _cache[cache_key] = (time.time(), df.copy())
+    return df

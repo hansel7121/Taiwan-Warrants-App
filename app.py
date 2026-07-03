@@ -11,6 +11,7 @@ import threading
 import webbrowser
 import warrant_logic
 import options_logic
+import us_options_logic
 import os
 import json
 import numpy as np
@@ -340,7 +341,7 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                 "opt_dte": int(best["days_to_expiry"]),
                 "dte_diff": int(best["dte_diff"]),
                 "warrant_strike": w["strike"],
-                "opt_strike": int(best["strike"]),
+                "opt_strike": round(float(best["strike"]), 2),
                 "strike_diff_pct": round(float(best["strike_diff_pct"]), 2),
                 "warrants_needed": warrants_needed,
                 "board_lots": round(warrants_needed / 1000, 4),
@@ -413,125 +414,86 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
 R_FREE = 0.01875
 
 
-def _build_arb_pcp_df(option_type, max_strike_diff_pct, max_dte_diff):
-    warrant_df, err = warrant_logic.fetch_warrants(
-        ["2330"], option_type, 0, 365, 0, 100, 0
-    )
-    if warrant_df.empty:
-        raise RuntimeError(err or "No TSMC warrants found")
+def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
+                       positive_loose=False):
+    """Direct-match Taiwan warrants against the same-underlying US ADR options.
 
-    # Fetch all options (both Call and Put) for cross-type matching
-    opt_df = options_logic.fetch_options(["2330"], "All", min_days=1)
-    opt_df = opt_df[opt_df["is_live"]]
-    if opt_df.empty:
-        raise RuntimeError("No TSMC options with live bid/ask found")
+    Reuses _match_warrants_to_options. The US option leg is pre-converted to
+    TWD-per-Taiwan-share by us_options_logic, so it lives in the same price
+    space as the warrant leg. One US contract controls 500 Taiwan shares, so
+    opt_contract_size = US_CONTRACT_TW_SHARES drives warrants_needed = 500/ratio.
+    """
+    all_rows = []
+    errors = []
+    contract_size = us_options_logic.US_CONTRACT_TW_SHARES  # 500 TW shares
 
-    rows = []
-    for _, w in warrant_df.iterrows():
-        w_type = w["type"]
-        opposite = "Put" if w_type == "Call" else "Call"
-
-        candidates = opt_df[opt_df["type"] == opposite].copy()
-        if candidates.empty:
+    for code in stock_codes:
+        if code not in us_options_logic.US_ADR_MAP:
+            errors.append(f"{code}: no US ADR mapping")
             continue
 
-        candidates["strike_diff_pct"] = (
-            (candidates["strike"] - w["strike"]).abs() / w["strike"] * 100
+        warrant_df, err = warrant_logic.fetch_warrants(
+            [code], option_type, 0, 365, 0, 100, 0
         )
-        candidates["dte_diff"] = (
-            (candidates["days_to_expiry"] - w["days_to_expiry"]).abs()
-        )
-        candidates = candidates[
-            (candidates["strike_diff_pct"] <= max_strike_diff_pct)
-            & (candidates["dte_diff"] <= max_dte_diff)
-        ]
-        if candidates.empty:
+        if warrant_df.empty:
+            errors.append(f"{code}: {err or 'no warrants'}")
             continue
 
-        score = candidates["strike_diff_pct"] * 2 + candidates["dte_diff"] / max(max_dte_diff, 1)
-        best = candidates.loc[score.idxmin()]
+        try:
+            opt_df = us_options_logic.fetch_us_options(code, option_type, min_days=1)
+            opt_df = opt_df[opt_df["is_live"]]
+        except Exception as e:
+            errors.append(f"{code}: {e}")
+            continue
 
-        S = float(w["underlying_price"])
-        K = float(best["strike"])
-        T = float(best["days_to_expiry"]) / 365.0
-        ratio = float(w["exercise_ratio"])
-        # Buy warrant at ask; receive option bid when selling the opposite leg
-        opt_bid = float(best["bid"])
-        opt_ask = float(best["ask"])   # kept for display
-        warrant_per_share = float(w["ask"]) / ratio
-        bond_pv = K * np.exp(-R_FREE * T)
+        if opt_df.empty:
+            errors.append(f"{code}: no live US options")
+            continue
 
-        if w_type == "Call":
-            # Synthetic call = S - K·e^(-rT) + Put(bid)
-            synthetic_price = S - bond_pv + opt_bid
-        else:
-            # Synthetic put = K·e^(-rT) - S + Call(bid)
-            synthetic_price = bond_pv - S + opt_bid
-
-        pcp_diff = synthetic_price - warrant_per_share
-        pcp_diff_pct = (
-            round(pcp_diff / abs(synthetic_price) * 100, 2)
-            if synthetic_price != 0 else None
+        rows = _match_warrants_to_options(
+            warrant_df, opt_df, contract_size, max_strike_diff_pct, max_dte_diff,
+            positive_loose=positive_loose,
         )
+        all_rows.extend(rows)
 
-        rows.append(
-            {
-                "warrant_code": w["warrant_code"],
-                "warrant_name": w["warrant_name"],
-                "option_contract": best["contract"],
-                "warrant_type": w_type,
-                "opt_type": opposite,
-                "underlying_price": round(S, 2),
-                "warrant_dte": int(w["days_to_expiry"]),
-                "opt_dte": int(best["days_to_expiry"]),
-                "dte_diff": int(best["dte_diff"]),
-                "warrant_strike": w["strike"],
-                "opt_strike": int(K),
-                "strike_diff_pct": round(float(best["strike_diff_pct"]), 2),
-                "warrants_needed": round(2000 / ratio),
-                "board_lots": round(round(2000 / ratio) / 1000, 4),
-                "opt_contract_size": 2000,
-                "warrant_ask": w["ask"],
-                "opt_bid": round(opt_bid, 4),   # price received when selling
-                "opt_ask": round(opt_ask, 4),   # reference
-                "warrant_per_share": round(warrant_per_share, 4),
-                "bond_pv": round(bond_pv, 4),
-                "synthetic_price": round(synthetic_price, 4),
-                "pcp_diff": round(pcp_diff, 4),
-                "pcp_diff_pct": pcp_diff_pct,
-                "warrant_iv": round(float(w["iv_ask"]), 4) if pd.notna(w["iv_ask"]) else None,
-                "opt_iv": round(float(best["iv_ask"]), 4) if pd.notna(best["iv_ask"]) else None,
-            }
-        )
+    if not all_rows:
+        msg = "; ".join(errors) if errors else "No matches found"
+        raise RuntimeError(msg)
 
-    result = pd.DataFrame(rows)
-    if not result.empty and "pcp_diff_pct" in result.columns:
-        result = result.sort_values("pcp_diff_pct", ascending=False)
+    result = pd.DataFrame(all_rows)
+    if "price_diff_pct" in result.columns:
+        result = result.sort_values("price_diff_pct", ascending=False)
     return result
 
 
-@app.route("/arb_pcp", methods=["POST"])
-def arb_pcp():
+@app.route("/us_option_match", methods=["POST"])
+def us_option_match():
     data = request.json
+    stock_codes = data.get("stock_codes", ["2303"])
     option_type = data.get("option_type", "All")
     max_strike_diff_pct = float(data.get("max_strike_diff_pct", 3.0))
     max_dte_diff = int(data.get("max_dte_diff", 5))
+    positive_loose = bool(data.get("positive_loose", False))
     try:
-        df = _build_arb_pcp_df(option_type, max_strike_diff_pct, max_dte_diff)
+        df = _build_us_match_df(stock_codes, option_type, max_strike_diff_pct,
+                                max_dte_diff, positive_loose=positive_loose)
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
         return jsonify({"rows": rows, "count": len(rows)})
     except Exception as e:
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
-@app.route("/arb_pcp_csv", methods=["POST"])
-def arb_pcp_csv():
+@app.route("/us_option_match_csv", methods=["POST"])
+def us_option_match_csv():
     data = request.json
+    stock_codes = data.get("stock_codes", ["2303"])
     option_type = data.get("option_type", "All")
     max_strike_diff_pct = float(data.get("max_strike_diff_pct", 3.0))
     max_dte_diff = int(data.get("max_dte_diff", 5))
+    positive_loose = bool(data.get("positive_loose", False))
     try:
-        df = _build_arb_pcp_df(option_type, max_strike_diff_pct, max_dte_diff)
+        df = _build_us_match_df(stock_codes, option_type, max_strike_diff_pct,
+                                max_dte_diff, positive_loose=positive_loose)
     except Exception:
         df = pd.DataFrame()
     output = io.StringIO()
@@ -540,7 +502,7 @@ def arb_pcp_csv():
     return Response(
         output.getvalue(),
         mimetype="text/csv",
-        headers={"Content-Disposition": "attachment; filename=arb_pcp.csv"},
+        headers={"Content-Disposition": "attachment; filename=us_option_match.csv"},
     )
 
 
