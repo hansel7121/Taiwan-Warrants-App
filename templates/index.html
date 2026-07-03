@@ -855,6 +855,9 @@
           </p>
           <div id="us-prem-chart" style="width:100%;height:240px"></div>
 
+          <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:18px 0 6px">Distribution of daily ADR premiums</p>
+          <div id="us-prem-hist" style="width:100%;height:230px"></div>
+
           <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:20px 0 8px">Expected Value (P&L at option expiry)</p>
           <table id="us-ev-table" style="width:100%;border-collapse:collapse;font-size:13px"></table>
           <div id="us-ev-formula" style="background:var(--surface);border-radius:6px;padding:12px 14px;margin-top:12px;font-size:12px;color:var(--muted);line-height:1.6"></div>
@@ -1393,6 +1396,7 @@
         document.getElementById("us-ev-table").innerHTML = "";
         document.getElementById("us-ev-formula").innerHTML = "";
         Plotly.purge("us-prem-chart");
+        Plotly.purge("us-prem-hist");
 
         let s;
         try {
@@ -1434,6 +1438,33 @@
           xaxis: { gridcolor: "#252836", zerolinecolor: "#252836" },
           yaxis: { title: "premium %", gridcolor: "#252836", zerolinecolor: "#252836", ticksuffix: "%" },
           margin: { l: 55, r: 10, t: 10, b: 30 }, showlegend: false,
+        }, { responsive: true });
+
+        // Distribution (histogram) of daily premiums, with ±threshold lines
+        // and their historical tail probabilities.
+        const pHi = s.regimes[0].prob * 100;   // P(premium > +thr)
+        const pLo = s.regimes[2].prob * 100;   // P(premium < -thr)
+        const vline = (x, color) => ({
+          type: "line", x0: x, x1: x, yref: "paper", y0: 0, y1: 1,
+          line: { color, width: 1.5, dash: "dash" },
+        });
+        Plotly.react("us-prem-hist", [
+          { x: s.premium_pct, type: "histogram", nbinsx: 60,
+            marker: { color: "rgba(96,165,250,0.55)", line: { color: "rgba(96,165,250,0.9)", width: 0.5 } },
+            hovertemplate: "premium %{x:.2f}%<br>count %{y}<extra></extra>" },
+        ], {
+          paper_bgcolor: "#13161f", plot_bgcolor: "#0d0f16",
+          font: { color: "#8b90a0", family: "Inter,system-ui,sans-serif", size: 11 },
+          xaxis: { title: "daily ADR premium %", gridcolor: "#252836", zerolinecolor: "#252836", ticksuffix: "%" },
+          yaxis: { title: "days", gridcolor: "#252836", zerolinecolor: "#252836" },
+          margin: { l: 55, r: 10, t: 24, b: 38 }, showlegend: false, bargap: 0.02,
+          shapes: [ vline(thr, "rgba(248,113,113,0.8)"), vline(-thr, "rgba(248,113,113,0.8)"), vline(0, "rgba(255,255,255,0.25)") ],
+          annotations: [
+            { x: thr, xanchor: "left", yref: "paper", y: 1, yanchor: "top", text: `P(> +${thr}%) = ${pHi.toFixed(1)}%`,
+              showarrow: false, font: { color: "#f87171", size: 11 }, bgcolor: "rgba(19,22,31,0.8)", xshift: 4 },
+            { x: -thr, xanchor: "right", yref: "paper", y: 1, yanchor: "top", text: `P(< -${thr}%) = ${pLo.toFixed(1)}%`,
+              showarrow: false, font: { color: "#f87171", size: 11 }, bgcolor: "rgba(19,22,31,0.8)", xshift: -4 },
+          ],
         }, { responsive: true });
 
         // Expected Value table over premium regimes
