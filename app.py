@@ -459,6 +459,8 @@ def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
             warrant_df, opt_df, contract_size, max_strike_diff_pct, max_dte_diff,
             positive_loose=positive_loose,
         )
+        for r in rows:
+            r["us_stock_code"] = code  # so the modal can pull ADR-premium history
         all_rows.extend(rows)
 
     if not all_rows:
@@ -469,6 +471,18 @@ def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
     if "price_diff_pct" in result.columns:
         result = result.sort_values("price_diff_pct", ascending=False)
     return result
+
+
+@app.route("/adr_premium", methods=["POST"])
+def adr_premium():
+    data = request.json
+    stock_code = data.get("stock_code")
+    try:
+        if stock_code not in us_options_logic.US_ADR_MAP:
+            raise RuntimeError(f"{stock_code}: no US ADR mapping")
+        return jsonify(us_options_logic.adr_premium_stats(stock_code))
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 
 @app.route("/us_option_match", methods=["POST"])

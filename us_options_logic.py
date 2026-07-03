@@ -47,6 +47,77 @@ def contract_tw_shares(stock_code):
 _cache: dict = {}
 _CACHE_TTL = 300  # 5 minutes
 
+_prem_cache: dict = {}
+_PREM_TTL = 1800  # 30 minutes
+
+# ADR premium is the % gap between the ADR (converted to TWD/share) and the
+# local Taiwan share. Regime thresholds: |p| <= 5% is "around 0" (the safe
+# entry zone); above/below is a rich/cheap basis dislocation.
+PREM_THRESHOLD = 0.05
+
+
+def adr_premium_stats(stock_code, period="3y"):
+    """Historical ADR-vs-local premium series + regime probabilities.
+
+    premium_t = (adr_usd_t / adr_ratio * fx_t) / tw_close_t - 1
+
+    Returns dates, premium %, the latest premium, and 3 regimes (high / mid /
+    low) with their historical frequency and conditional-mean premium — the
+    inputs to the Expected-Value calc in the trade modal.
+    """
+    cfg = US_ADR_MAP[stock_code]
+    key = (stock_code, period)
+    hit = _prem_cache.get(key)
+    if hit and time.time() - hit[0] < _PREM_TTL:
+        return hit[1]
+
+    def daily(t):
+        s = yf.Ticker(t).history(period=period)["Close"]
+        s.index = pd.to_datetime(s.index.date)
+        return s[~s.index.duplicated()]
+
+    a = daily(cfg["adr_ticker"])
+    t = daily(f"{stock_code}.TW")
+    fx = daily(cfg["fx_ticker"])
+    df = pd.DataFrame({"a": a, "t": t})
+    df["fx"] = fx.reindex(df.index).ffill()
+    df = df.dropna()
+    if df.empty:
+        raise RuntimeError("no overlapping ADR/TW history")
+
+    adr_tw = df["a"] / cfg["adr_ratio"] * df["fx"]
+    prem = (adr_tw / df["t"] - 1.0)  # fraction
+
+    hi = prem > PREM_THRESHOLD
+    lo = prem < -PREM_THRESHOLD
+    mid = ~hi & ~lo
+
+    def regime(mask, label):
+        p = float(mask.mean())
+        cond = float(prem[mask].mean()) if mask.any() else 0.0
+        return {"label": label, "prob": p, "cond_premium": cond}
+
+    stats = {
+        "stock_code": stock_code,
+        "adr_ticker": cfg["adr_ticker"],
+        "adr_ratio": cfg["adr_ratio"],
+        "period": period,
+        "n": int(len(df)),
+        "latest_premium": float(prem.iloc[-1]),
+        "mean_premium": float(prem.mean()),
+        "std_premium": float(prem.std()),
+        "threshold": PREM_THRESHOLD,
+        "dates": [d.strftime("%Y-%m-%d") for d in df.index],
+        "premium_pct": [round(float(x) * 100, 3) for x in prem],
+        "regimes": [
+            regime(hi, f"Spike > +{int(PREM_THRESHOLD*100)}%"),
+            regime(mid, f"Around 0 (|p| ≤ {int(PREM_THRESHOLD*100)}%)"),
+            regime(lo, f"Drop < -{int(PREM_THRESHOLD*100)}%"),
+        ],
+    }
+    _prem_cache[key] = (time.time(), stats)
+    return stats
+
 
 def _last_price(ticker: str) -> float:
     tk = yf.Ticker(ticker)
