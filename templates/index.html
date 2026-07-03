@@ -1875,8 +1875,19 @@
           pnls.push(parseFloat(pnlAt(S, tau).toFixed(0)));
         }
 
-        // Also plot at expiry for reference
-        const pnlsExp = spots.map(S => parseFloat(pnlAt(S, 0).toFixed(0)));
+        // "At expiry" = TRUE terminal payoff of both legs held to their own
+        // expiries and settled at intrinsic (exercise iff ITM). No Black-Scholes
+        // / time value — even when the warrant outlives the option, it is valued
+        // at its final intrinsic, not a BS mark with residual days.
+        const isCallLeg = row.warrant_type === "Call";
+        const wEntryExp = row.warrant_per_share;      // paid/received per warrant share
+        const oEntryExp = row.synthetic_price;        // option entry per share (= opt_per_share)
+        const intrinsic = (S, K) => isCallLeg ? Math.max(0, S - K) : Math.max(0, K - S);
+        const pnlAtExpiry = (S) => dir * (
+          warrantShares * (intrinsic(S, Kw) - wEntryExp) +
+          optionShares  * (oEntryExp - intrinsic(S, Ko))
+        );
+        const pnlsExp = spots.map(S => parseFloat(pnlAtExpiry(S).toFixed(0)));
 
         const zeroLine = [{x:[lo,hi],y:[0,0],mode:"lines",
           line:{color:"rgba(255,255,255,0.15)",dash:"dash",width:1},
