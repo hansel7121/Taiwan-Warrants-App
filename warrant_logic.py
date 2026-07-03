@@ -161,9 +161,27 @@ def refresh_cmoney_key():
     return _cmoney_key
 
 
+# Thread-local pooled sessions: reusing keep-alive connections avoids a fresh
+# TLS handshake per warrant, which dominates fetch time (~10x speedup on large
+# warrant universes like 2330). One Session per worker thread (requests.Session
+# is not guaranteed thread-safe to share across threads).
+_thread_local = threading.local()
+
+
+def _cmoney_session():
+    s = getattr(_thread_local, "session", None)
+    if s is None:
+        s = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=1, pool_maxsize=4)
+        s.mount("https://", adapter)
+        s.mount("http://", adapter)
+        _thread_local.session = s
+    return s
+
+
 def fetch_one_cmoney(code, cmkey):
     try:
-        r = requests.get(
+        r = _cmoney_session().get(
             CMONEY_URL,
             params={
                 "action": "GetWarrantData",
@@ -322,6 +340,18 @@ def fetch_warrants(
     if isinstance(stock_codes, str):
         stock_codes = [stock_codes]
 
+    # Warrant names are "<underlying><issuer><serial>", e.g. 長榮鋼國票59購01.
+    # A plain prefix/substring test on the underlying name leaks warrants of a
+    # longer-named stock into a shorter one (長榮 vs 長榮鋼), producing bogus
+    # cross-underlying matches. Anchor by requiring a known issuer to follow.
+    _ISSUER_CHARS = set("元凱統國永富群兆中日台華第康宏福大玉港")
+
+    def _name_matches(wname, name):
+        if not wname.startswith(name):
+            return False
+        rest = wname[len(name):]
+        return bool(rest) and rest[0] in _ISSUER_CHARS
+
     all_codes = []
     for stock_code in stock_codes:
         stock_info = twstock.codes.get(stock_code, None)
@@ -332,7 +362,7 @@ def fetch_warrants(
             k
             for k, v in twstock.codes.items()
             if "權證" in v.type
-            and (name in v.name or stock_code in v.name)
+            and (_name_matches(v.name, name) or v.name.startswith(stock_code))
             and (name_filter is None or name_filter in v.name)
             and datetime.strptime(v.start, "%Y/%m/%d") <= today
         ]
