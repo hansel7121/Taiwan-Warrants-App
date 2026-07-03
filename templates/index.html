@@ -606,6 +606,9 @@
               <label>Max DTE Diff (days)
                 <input type="number" id="arbMaxDteDiff" value="5" min="0" max="30" style="width:70px"/>
               </label>
+              <label>Min Option Volume
+                <input type="number" id="arbMinVolume" value="0" min="0" style="width:90px" title="Drop options with volume below this (illiquid contracts)"/>
+              </label>
               <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="Loose: positive price_diff uses opt_ask − warrant_bid (more results, spread not covered). Executable: opt_bid − warrant_ask (tradeable arb only).">
                 <input type="checkbox" id="arbPositiveLoose" style="width:auto;margin:0"/>
                 Positive: loose prices
@@ -657,6 +660,9 @@
               </label>
               <label>Max DTE Diff (days)
                 <input type="number" id="usMaxDteDiff" value="5" min="0" max="30" style="width:70px"/>
+              </label>
+              <label>Min Option Volume
+                <input type="number" id="usMinVolume" value="0" min="0" style="width:90px" title="Drop UMC options with volume below this (illiquid contracts)"/>
               </label>
               <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="Loose: positive price_diff uses opt_ask − warrant_bid (more results, spread not covered). Executable: opt_bid − warrant_ask (tradeable arb only).">
                 <input type="checkbox" id="usPositiveLoose" style="width:auto;margin:0"/>
@@ -1195,6 +1201,7 @@
           option_type: document.getElementById("usOptionType").value,
           max_strike_diff_pct: parseFloat(document.getElementById("usMaxStrikePct").value) || 3,
           max_dte_diff: parseInt(document.getElementById("usMaxDteDiff").value) ?? 5,
+          min_volume: parseInt(document.getElementById("usMinVolume").value) || 0,
           positive_loose: document.getElementById("usPositiveLoose").checked,
         };
       }
@@ -1457,6 +1464,7 @@
           option_type: document.getElementById("arbOptionType").value,
           max_strike_diff_pct: parseFloat(document.getElementById("arbMaxStrikePct").value) || 3,
           max_dte_diff: parseInt(document.getElementById("arbMaxDteDiff").value) ?? 5,
+          min_volume: parseInt(document.getElementById("arbMinVolume").value) || 0,
           positive_loose: document.getElementById("arbPositiveLoose").checked,
         };
       }

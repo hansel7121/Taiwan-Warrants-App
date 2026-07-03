@@ -365,7 +365,7 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
 
 
 def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
-                  positive_loose=False):
+                  positive_loose=False, min_volume=0):
     all_rows = []
     errors = []
 
@@ -387,6 +387,8 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
         try:
             opt_df = options_logic.fetch_options([code], option_type, min_days=1)
             opt_df = opt_df[opt_df["is_live"]]
+            if min_volume > 0:
+                opt_df = opt_df[opt_df["volume"] >= min_volume]
         except Exception as e:
             errors.append(f"{code}: {e}")
             continue
@@ -415,7 +417,7 @@ R_FREE = 0.01875
 
 
 def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
-                       positive_loose=False):
+                       positive_loose=False, min_volume=0):
     """Direct-match Taiwan warrants against the same-underlying US ADR options.
 
     Reuses _match_warrants_to_options. The US option leg is pre-converted to
@@ -442,6 +444,8 @@ def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
         try:
             opt_df = us_options_logic.fetch_us_options(code, option_type, min_days=1)
             opt_df = opt_df[opt_df["is_live"]]
+            if min_volume > 0:
+                opt_df = opt_df[opt_df["volume"] >= min_volume]
         except Exception as e:
             errors.append(f"{code}: {e}")
             continue
@@ -474,9 +478,11 @@ def us_option_match():
     max_strike_diff_pct = float(data.get("max_strike_diff_pct", 3.0))
     max_dte_diff = int(data.get("max_dte_diff", 5))
     positive_loose = bool(data.get("positive_loose", False))
+    min_volume = int(data.get("min_volume", 0) or 0)
     try:
         df = _build_us_match_df(stock_codes, option_type, max_strike_diff_pct,
-                                max_dte_diff, positive_loose=positive_loose)
+                                max_dte_diff, positive_loose=positive_loose,
+                                min_volume=min_volume)
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
         return jsonify({"rows": rows, "count": len(rows)})
     except Exception as e:
@@ -491,9 +497,11 @@ def us_option_match_csv():
     max_strike_diff_pct = float(data.get("max_strike_diff_pct", 3.0))
     max_dte_diff = int(data.get("max_dte_diff", 5))
     positive_loose = bool(data.get("positive_loose", False))
+    min_volume = int(data.get("min_volume", 0) or 0)
     try:
         df = _build_us_match_df(stock_codes, option_type, max_strike_diff_pct,
-                                max_dte_diff, positive_loose=positive_loose)
+                                max_dte_diff, positive_loose=positive_loose,
+                                min_volume=min_volume)
     except Exception:
         df = pd.DataFrame()
     output = io.StringIO()
@@ -514,9 +522,10 @@ def arb_finder():
     max_strike_diff_pct = float(data.get("max_strike_diff_pct", 3.0))
     max_dte_diff = int(data.get("max_dte_diff", 5))
     positive_loose = bool(data.get("positive_loose", False))
+    min_volume = int(data.get("min_volume", 0) or 0)
     try:
         df = _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
-                           positive_loose=positive_loose)
+                           positive_loose=positive_loose, min_volume=min_volume)
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
         return jsonify({"rows": rows, "count": len(rows)})
     except Exception as e:
@@ -531,9 +540,10 @@ def arb_finder_csv():
     max_strike_diff_pct = float(data.get("max_strike_diff_pct", 3.0))
     max_dte_diff = int(data.get("max_dte_diff", 5))
     positive_loose = bool(data.get("positive_loose", False))
+    min_volume = int(data.get("min_volume", 0) or 0)
     try:
         df = _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
-                           positive_loose=positive_loose)
+                           positive_loose=positive_loose, min_volume=min_volume)
     except Exception:
         df = pd.DataFrame()
     output = io.StringIO()
