@@ -102,7 +102,7 @@ def _clean_num(series, fill=np.nan):
     )
 
 
-def _parse_and_compute(raw_df, underlying_price, exercise_ratio):
+def _parse_and_compute(raw_df, underlying_price, exercise_ratio, compute_iv=True):
     df = raw_df.copy()
     df.columns = df.columns.str.strip()
 
@@ -191,19 +191,25 @@ def _parse_and_compute(raw_df, underlying_price, exercise_ratio):
         if T <= 0 or S <= 0 or K <= 0 or np.isnan(ask):
             continue
 
-        iv_ask = implied_vol(ask, S, K, T, R, 1.0, is_put)
-        iv_bid = (
-            implied_vol(bid, S, K, T, R, 1.0, is_put)
-            if not np.isnan(bid)
-            else np.nan
-        )
-        if np.isnan(iv_ask) and not np.isnan(iv_bid):
-            iv_ask = iv_bid
-        if np.isnan(iv_ask):
-            continue
+        if compute_iv:
+            iv_ask = implied_vol(ask, S, K, T, R, 1.0, is_put)
+            iv_bid = (
+                implied_vol(bid, S, K, T, R, 1.0, is_put)
+                if not np.isnan(bid)
+                else np.nan
+            )
+            if np.isnan(iv_ask) and not np.isnan(iv_bid):
+                iv_ask = iv_bid
+            if np.isnan(iv_ask):
+                continue
 
-        delta = bs_delta(S, K, T, R, iv_ask, 1.0, is_put)
-        leverage = calc_real_leverage(S, abs(delta), ask)
+            delta = bs_delta(S, K, T, R, iv_ask, 1.0, is_put)
+            leverage = calc_real_leverage(S, abs(delta), ask)
+        else:
+            # Arb finder does not use IV/delta/leverage — skip the solve so an
+            # option is never dropped just because IV wouldn't converge.
+            iv_ask = iv_bid = delta = leverage = np.nan
+
         intrinsic = max(0, K - S) if is_put else max(0, S - K)
         time_value_am = round(ask - intrinsic, 2)
 
@@ -247,6 +253,7 @@ def fetch_options(
     max_days=365,
     min_leverage=0,
     min_volume=0,
+    compute_iv=True,
 ):
     dfs = []
     errors = []
@@ -258,7 +265,7 @@ def fetch_options(
         try:
             S = _get_spot(cfg["ticker"])
             raw = _fetch_taifex(cfg["commodity_ids"])
-            df = _parse_and_compute(raw, S, cfg["exercise_ratio"])
+            df = _parse_and_compute(raw, S, cfg["exercise_ratio"], compute_iv=compute_iv)
             if not df.empty:
                 dfs.append(df)
         except Exception as e:

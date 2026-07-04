@@ -284,83 +284,92 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             if candidates.empty:
                 continue
 
-            # Score penalises only the bad-side DTE gap, not the safe-side surplus
-            score = candidates["strike_diff_pct"] * 2 + bad_dte[candidates.index] / max(max_dte_diff, 1)
-            best = candidates.loc[score.idxmin()]
-
             ratio = float(w["exercise_ratio"])
+            if ratio <= 0:
+                continue  # can't size or normalise a warrant with no exercise ratio
             warrant_ask_per_share = round(float(w["ask"]) / ratio, 4)
             warrant_bid_val = float(w["bid"]) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else float(w["ask"])
             warrant_bid_per_share = round(warrant_bid_val / ratio, 4)
-            opt_bid_per_share = round(float(best["bid"]), 4)
-            opt_ask_per_share = round(float(best["ask"]), 4)
+            warrants_needed = round(opt_contract_size / ratio)
+            warrant_iv = round(float(w["iv_ask"]), 4) if pd.notna(w.get("iv_ask")) else None
+            warrant_bid_disp = round(float(w["bid"]), 4) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else None
 
-            # Positive tight (executable): opt_bid - warrant_ask > 0
-            # Positive loose: opt_ask - warrant_bid > 0 (mirrors negative formula)
-            # Negative (always loose): opt_bid - warrant_ask < 0
-            if direction == "positive":
-                if positive_loose:
-                    price_diff = round(opt_ask_per_share - warrant_bid_per_share, 4)
-                    exec_opt = opt_ask_per_share
-                    exec_warrant = warrant_bid_per_share
+            # Emit EVERY profitable option for this warrant, not just the
+            # strike/DTE-closest one — a farther-but-profitable pair must not be
+            # hidden behind a closer-but-unprofitable "best".
+            for _, opt in candidates.iterrows():
+                if pd.isna(opt.get("ask")) or float(opt["ask"]) <= 0:
+                    continue
+                opt_bid_per_share = round(float(opt["bid"]), 4) if pd.notna(opt.get("bid")) and float(opt.get("bid", 0)) > 0 else None
+                opt_ask_per_share = round(float(opt["ask"]), 4)
+
+                # Positive tight (executable): opt_bid - warrant_ask > 0
+                # Positive loose: opt_ask - warrant_bid > 0 (mirrors negative formula)
+                # Negative (always loose): opt_bid - warrant_ask < 0
+                if direction == "positive":
+                    if positive_loose:
+                        price_diff = round(opt_ask_per_share - warrant_bid_per_share, 4)
+                        exec_opt = opt_ask_per_share
+                        exec_warrant = warrant_bid_per_share
+                    else:
+                        if opt_bid_per_share is None:
+                            continue  # tight positive sells the option at its bid
+                        price_diff = round(opt_bid_per_share - warrant_ask_per_share, 4)
+                        exec_opt = opt_bid_per_share
+                        exec_warrant = warrant_ask_per_share
+                    if price_diff <= 0:
+                        continue
                 else:
+                    if opt_bid_per_share is None:
+                        continue
                     price_diff = round(opt_bid_per_share - warrant_ask_per_share, 4)
                     exec_opt = opt_bid_per_share
                     exec_warrant = warrant_ask_per_share
-                if price_diff <= 0:
+                    if price_diff >= 0:
+                        continue
+
+                pair_key = (w["warrant_code"], opt["contract"])
+                if pair_key in seen:
                     continue
-            else:
-                price_diff = round(opt_bid_per_share - warrant_ask_per_share, 4)
-                exec_opt = opt_bid_per_share
-                exec_warrant = warrant_ask_per_share
-                if price_diff >= 0:
-                    continue
+                seen.add(pair_key)
 
-            pair_key = (w["warrant_code"], best["contract"])
-            if pair_key in seen:
-                continue
-            seen.add(pair_key)
+                price_diff_pct = round(price_diff / exec_opt * 100, 2) if exec_opt > 0 else None
 
-            warrants_needed = round(opt_contract_size / ratio)
+                if direction == "positive":
+                    trade = "Buy Warrant / Sell Option"
+                else:
+                    trade = "Buy Option / Sell Warrant"
 
-            price_diff_pct = round(price_diff / exec_opt * 100, 2) if exec_opt > 0 else None
+                opt_iv = round(float(opt["iv_bid"]), 4) if pd.notna(opt.get("iv_bid")) else None
 
-            if direction == "positive":
-                trade = "Buy Warrant / Sell Option"
-            else:
-                trade = "Buy Option / Sell Warrant"
-
-            rows.append({
-                "warrant_code": w["warrant_code"],
-                "warrant_name": w["warrant_name"],
-                "option_contract": best["contract"],
-                "type": w["type"],
-                "trade": trade,
-                "underlying_price": w["underlying_price"],
-                "warrant_dte": int(w["days_to_expiry"]),
-                "opt_dte": int(best["days_to_expiry"]),
-                "dte_diff": int(best["dte_diff"]),
-                "warrant_strike": w["strike"],
-                "opt_strike": round(float(best["strike"]), 2),
-                "strike_diff_pct": round(float(best["strike_diff_pct"]), 2),
-                "warrants_needed": warrants_needed,
-                "board_lots": round(warrants_needed / 1000, 4),
-                "opt_contract_size": opt_contract_size,
-                "warrant_ask": w["ask"],
-                "warrant_bid": round(float(w["bid"]), 4) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else None,
-                "opt_bid": opt_bid_per_share,
-                "opt_ask": opt_ask_per_share,
-                "warrant_per_share": exec_warrant,
-                "opt_per_share": exec_opt,
-                "price_diff": price_diff,
-                "price_diff_pct": price_diff_pct,
-                "warrant_iv": round(float(w["iv_ask"]), 4) if pd.notna(w["iv_ask"]) else None,
-                "opt_iv": round(float(best["iv_bid"]), 4) if pd.notna(best.get("iv_bid")) else None,
-                "iv_diff": round(
-                    (float(best["iv_bid"]) if pd.notna(best.get("iv_bid")) else 0)
-                    - (float(w["iv_ask"]) if pd.notna(w["iv_ask"]) else 0), 4,
-                ),
-            })
+                rows.append({
+                    "warrant_code": w["warrant_code"],
+                    "warrant_name": w["warrant_name"],
+                    "option_contract": opt["contract"],
+                    "type": w["type"],
+                    "trade": trade,
+                    "underlying_price": w["underlying_price"],
+                    "warrant_dte": int(w["days_to_expiry"]),
+                    "opt_dte": int(opt["days_to_expiry"]),
+                    "dte_diff": int(opt["dte_diff"]),
+                    "warrant_strike": w["strike"],
+                    "opt_strike": round(float(opt["strike"]), 2),
+                    "strike_diff_pct": round(float(opt["strike_diff_pct"]), 2),
+                    "warrants_needed": warrants_needed,
+                    "board_lots": round(warrants_needed / 1000, 4),
+                    "opt_contract_size": opt_contract_size,
+                    "warrant_ask": w["ask"],
+                    "warrant_bid": warrant_bid_disp,
+                    "opt_bid": opt_bid_per_share,
+                    "opt_ask": opt_ask_per_share,
+                    "warrant_per_share": exec_warrant,
+                    "opt_per_share": exec_opt,
+                    "price_diff": price_diff,
+                    "price_diff_pct": price_diff_pct,
+                    "warrant_iv": warrant_iv,
+                    "opt_iv": opt_iv,
+                    "iv_diff": round((opt_iv or 0) - (warrant_iv or 0), 4),
+                })
     return rows
 
 
@@ -377,15 +386,18 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
         cfg = options_logic.COMMODITY_MAP[code]
         opt_contract_size = cfg["exercise_ratio"]
 
+        # No time-value cap and no IV solve on the arb path: a positive price
+        # arb only needs warrant ask + option bid, so nothing should drop a leg
+        # over time value or a non-converging IV.
         warrant_df, err = warrant_logic.fetch_warrants(
-            [code], option_type, 0, 365, 0, 100, 0
+            [code], option_type, 0, 365, 0, 1e9, 0, compute_iv=False
         )
         if warrant_df.empty:
             errors.append(f"{code}: {err or 'no warrants'}")
             continue
 
         try:
-            opt_df = options_logic.fetch_options([code], option_type, min_days=1)
+            opt_df = options_logic.fetch_options([code], option_type, min_days=1, compute_iv=False)
             opt_df = opt_df[opt_df["is_live"]]
             if min_volume > 0:
                 opt_df = opt_df[opt_df["volume"] >= min_volume]
@@ -435,15 +447,16 @@ def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
 
         contract_size = us_options_logic.contract_tw_shares(code)  # TW shares/contract
 
+        # No time-value cap and no IV solve on the arb path (see _build_arb_df).
         warrant_df, err = warrant_logic.fetch_warrants(
-            [code], option_type, 0, 365, 0, 100, 0
+            [code], option_type, 0, 365, 0, 1e9, 0, compute_iv=False
         )
         if warrant_df.empty:
             errors.append(f"{code}: {err or 'no warrants'}")
             continue
 
         try:
-            opt_df = us_options_logic.fetch_us_options(code, option_type, min_days=1)
+            opt_df = us_options_logic.fetch_us_options(code, option_type, min_days=1, compute_iv=False)
             opt_df = opt_df[opt_df["is_live"]]
             if min_volume > 0:
                 opt_df = opt_df[opt_df["volume"] >= min_volume]

@@ -31,6 +31,7 @@ CMONEY_HEADERS = {
 COL_ORDER = [
     "warrant_code",
     "warrant_name",
+    "underlying_code",
     "type",
     "underlying_price",
     "ask",
@@ -235,7 +236,7 @@ def get_cmoney_prices(codes):
     return results
 
 
-def build_warrant_df(cmoney_results):
+def build_warrant_df(cmoney_results, compute_iv=True):
     r_free_default = 0.02
     rows = []
 
@@ -244,6 +245,10 @@ def build_warrant_df(cmoney_results):
             w = data["Warrant"]
             s = data["Stock"]
 
+            # CMoney's Stock.CommKey is the authoritative underlying stock code
+            # (e.g. "2645"), so the true underlying is verified here rather than
+            # inferred from the abbreviated warrant display name.
+            underlying_code = str(s.get("CommKey")) if s.get("CommKey") is not None else None
             underlying_price = float(s.get("SalePr") or 0)
             ask = float(w.get("SellPr1") or 0)
             bid = float(w.get("BuyPr1") or 0)
@@ -261,24 +266,30 @@ def build_warrant_df(cmoney_results):
 
             T = days_to_expiry / 365.0
 
-            iv_ask = implied_vol(
-                ask, underlying_price, strike, T, r_free, exercise_ratio, is_put
-            )
-            iv_bid = (
-                implied_vol(bid, underlying_price, strike, T, r_free, exercise_ratio, is_put)
-                if bid > 0
-                else np.nan
-            )
+            if compute_iv:
+                iv_ask = implied_vol(
+                    ask, underlying_price, strike, T, r_free, exercise_ratio, is_put
+                )
+                iv_bid = (
+                    implied_vol(bid, underlying_price, strike, T, r_free, exercise_ratio, is_put)
+                    if bid > 0
+                    else np.nan
+                )
 
-            if np.isnan(iv_ask):
-                continue
-            if np.isnan(iv_bid):
-                iv_bid = iv_ask
+                if np.isnan(iv_ask):
+                    continue
+                if np.isnan(iv_bid):
+                    iv_bid = iv_ask
 
-            calc_delta = bs_delta(
-                underlying_price, strike, T, r_free, iv_ask, exercise_ratio, is_put
-            )
-            calc_leverage = calc_real_leverage(underlying_price, abs(calc_delta), ask)
+                calc_delta = bs_delta(
+                    underlying_price, strike, T, r_free, iv_ask, exercise_ratio, is_put
+                )
+                calc_leverage = calc_real_leverage(underlying_price, abs(calc_delta), ask)
+            else:
+                # Arb finder does not use IV/delta/leverage — skip the solve so a
+                # leg is never dropped just because IV wouldn't converge, and no
+                # time is wasted on it.
+                iv_ask = iv_bid = calc_delta = calc_leverage = np.nan
 
             if is_put:
                 intrinsic = max(0, strike - underlying_price) * exercise_ratio
@@ -292,6 +303,7 @@ def build_warrant_df(cmoney_results):
                 {
                     "warrant_code": code,
                     "warrant_name": warrant_name,
+                    "underlying_code": underlying_code,
                     "type": "Put" if is_put else "Call",
                     "underlying_price": underlying_price,
                     "ask": ask,
@@ -327,6 +339,7 @@ def fetch_warrants(
     min_leverage=0.0,
     max_tv_pct=100.0,
     min_volume=0,
+    compute_iv=True,
 ):
     today = datetime.today()
 
@@ -341,16 +354,23 @@ def fetch_warrants(
         stock_codes = [stock_codes]
 
     # Warrant names are "<underlying><issuer><serial>", e.g. 長榮鋼國票59購01.
-    # A plain prefix/substring test on the underlying name leaks warrants of a
-    # longer-named stock into a shorter one (長榮 vs 長榮鋼), producing bogus
-    # cross-underlying matches. Anchor by requiring a known issuer to follow.
-    _ISSUER_CHARS = set("元凱統國永富群兆中日台華第康宏福大玉港")
+    # A plain prefix test leaks a longer-named stock's warrants into a shorter
+    # one (長榮 vs 長榮鋼). Disambiguate structurally: a warrant belongs to this
+    # underlying only if no *longer* real-security name (e.g. 長榮鋼, 長榮航) also
+    # prefixes the warrant name. This replaces a hand-maintained issuer-char
+    # whitelist that silently dropped every warrant of any issuer not listed.
+    real_names = [v.name for v in twstock.codes.values() if "權證" not in v.type]
 
-    def _name_matches(wname, name):
-        if not wname.startswith(name):
-            return False
-        rest = wname[len(name):]
-        return bool(rest) and rest[0] in _ISSUER_CHARS
+    def _make_matcher(name):
+        # Longer real-security names that would also claim this warrant name.
+        longer = [n for n in real_names if len(n) > len(name) and n.startswith(name)]
+
+        def _name_matches(wname):
+            if not wname.startswith(name):
+                return False
+            return not any(wname.startswith(n) for n in longer)
+
+        return _name_matches
 
     all_codes = []
     for stock_code in stock_codes:
@@ -358,11 +378,12 @@ def fetch_warrants(
         if stock_info is None:
             continue
         name = stock_info.name
+        name_matches = _make_matcher(name)
         codes = [
             k
             for k, v in twstock.codes.items()
             if "權證" in v.type
-            and (_name_matches(v.name, name) or v.name.startswith(stock_code))
+            and (name_matches(v.name) or v.name.startswith(stock_code))
             and (name_filter is None or name_filter in v.name)
             and datetime.strptime(v.start, "%Y/%m/%d") <= today
         ]
@@ -378,14 +399,24 @@ def fetch_warrants(
     if not cmoney_results:
         return pd.DataFrame(), "No active warrants found"
 
-    df = build_warrant_df(cmoney_results)
+    df = build_warrant_df(cmoney_results, compute_iv=compute_iv)
 
     if df.empty:
         return pd.DataFrame(), "No warrants passed filters"
 
     df = df[COL_ORDER]
+    # Verify the true underlying: the name prefilter is intentionally permissive
+    # (so no issuer is ever dropped), and abbreviated warrant names can point at
+    # a different stock (e.g. 長榮太 -> 2645, not 長榮/2603). CommKey settles it.
+    wanted = {str(c) for c in stock_codes}
+    df = df[df["underlying_code"].astype(str).isin(wanted)]
+    if df.empty:
+        return pd.DataFrame(), "No warrants for requested underlying"
     df = df[(df["days_to_expiry"] >= min_days) & (df["days_to_expiry"] <= max_days)]
-    df = df[df["leverage_calc"] >= min_leverage]
+    # leverage_calc is NaN when compute_iv=False; only filter when a real
+    # threshold is set (NaN >= 0 is False and would wipe the whole frame).
+    if float(min_leverage) > 0:
+        df = df[df["leverage_calc"] >= float(min_leverage)]
     df = df[df["time_value_pct"] <= max_tv_pct]
     df = df[df["volume"] >= min_volume]
     if option_type != "All":

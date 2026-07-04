@@ -134,7 +134,8 @@ def _last_price(ticker: str) -> float:
     return float(hist["Close"].dropna().iloc[-1])
 
 
-def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365):
+def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
+                     compute_iv=True):
     """Return a DataFrame of UMC options priced in TWD per Taiwan share.
 
     Columns mirror options_logic.fetch_options so the same matching code can
@@ -200,19 +201,24 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365):
                     continue
 
                 T = dte / 365.0
-                # IV in native USD/ADR space (scale-free).
-                iv_ask = implied_vol(a_usd, adr, K_usd, T, R_US, 1.0, is_put)
-                iv_bid = (
-                    implied_vol(b_usd, adr, K_usd, T, R_US, 1.0, is_put)
-                    if np.isfinite(b_usd) and b_usd > 0
-                    else np.nan
-                )
-                if np.isnan(iv_ask) and not np.isnan(iv_bid):
-                    iv_ask = iv_bid
-                if np.isnan(iv_ask):
-                    continue
+                if compute_iv:
+                    # IV in native USD/ADR space (scale-free).
+                    iv_ask = implied_vol(a_usd, adr, K_usd, T, R_US, 1.0, is_put)
+                    iv_bid = (
+                        implied_vol(b_usd, adr, K_usd, T, R_US, 1.0, is_put)
+                        if np.isfinite(b_usd) and b_usd > 0
+                        else np.nan
+                    )
+                    if np.isnan(iv_ask) and not np.isnan(iv_bid):
+                        iv_ask = iv_bid
+                    if np.isnan(iv_ask):
+                        continue
 
-                delta = bs_delta(adr, K_usd, T, R_US, iv_ask, 1.0, is_put)
+                    delta = bs_delta(adr, K_usd, T, R_US, iv_ask, 1.0, is_put)
+                else:
+                    # Arb finder does not use IV/delta — skip the solve so an
+                    # option is never dropped just because IV wouldn't converge.
+                    iv_ask = iv_bid = delta = np.nan
 
                 conv = fx / adr_ratio  # USD/ADR -> TWD/Taiwan-share
                 strike_twd = K_usd * conv
