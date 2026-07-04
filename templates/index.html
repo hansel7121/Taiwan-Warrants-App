@@ -818,14 +818,10 @@
           <table id="pcp-compare-table" style="width:100%;border-collapse:collapse;font-size:13px"></table>
         </div>
 
-        <!-- DTE slider -->
-        <div style="margin-bottom:16px;display:flex;align-items:center;gap:16px">
-          <span style="font-size:12px;color:var(--muted);white-space:nowrap">DTE:</span>
-          <input type="range" id="pcp-dte-slider" min="0" step="1"
-            style="flex:1;accent-color:var(--accent)"
-            oninput="onPcpSlider(this.value)">
-          <span id="pcp-dte-label" style="font-size:13px;font-weight:500;color:var(--text);min-width:60px;text-align:right">62 days</span>
-        </div>
+        <!-- DTE slider removed: chart now shows only the at-expiry payoff.
+             Hidden input kept so existing slider handlers stay harmless. -->
+        <input type="hidden" id="pcp-dte-slider" value="0">
+        <span id="pcp-dte-label" style="display:none"></span>
 
         <!-- Hedge granularity toggle -->
         <div style="margin-bottom:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -2084,19 +2080,17 @@
           line:{color:"rgba(255,255,255,0.15)",dash:"dash",width:1},
           showlegend:false,hoverinfo:"skip"}];
 
-        const currentTrace = {
-          x:spots, y:pnls, mode:"lines", name:`DTE ${dte}`,
-          line:{color:"var(--accent)",width:2.5},
-          hovertemplate:"Spot: %{x:,.0f}<br>P&L: %{y:+,.0f} NT$<extra></extra>",
-        };
+        // Only the terminal (at-expiry) payoff is shown — a solid green line.
+        // The Black-Scholes DTE curve is intentionally gone: it required an IV
+        // the arb scan no longer computes and only muddied the real payoff.
         const expiryTrace = {
-          x:spots, y:pnlsExp, mode:"lines", name:"At expiry",
-          line:{color:"rgba(251,191,36,0.6)",width:1.5,dash:"dot"},
+          x:spots, y:pnlsExp, mode:"lines", name:"P&L at expiry",
+          line:{color:"#4ade80",width:2.5},
           hovertemplate:"Spot: %{x:,.0f}<br>P&L at expiry: %{y:+,.0f} NT$<extra></extra>",
         };
 
-        // Mark current spot
-        const spotPnl = parseFloat(pnlAt(S0, tau).toFixed(0));
+        // Mark current spot on the at-expiry curve
+        const spotPnl = parseFloat(pnlAtExpiry(S0).toFixed(0));
         const spotTrace = {
           x:[S0], y:[spotPnl], mode:"markers+text", name:"Current spot",
           marker:{color:"white",size:7,symbol:"circle"},
@@ -2105,7 +2099,7 @@
           hovertemplate:"Current spot: %{x:,.0f}<br>P&L: %{y:+,.0f} NT$<extra></extra>",
         };
 
-        Plotly.react("pcp-pnl-chart", [...zeroLine, expiryTrace, currentTrace, spotTrace], {
+        Plotly.react("pcp-pnl-chart", [...zeroLine, expiryTrace, spotTrace], {
           paper_bgcolor:"#13161f", plot_bgcolor:"#0d0f16",
           font:{color:"#8b90a0",family:"Inter,system-ui,sans-serif",size:12},
           xaxis:{title:`Spot Price (NT$) — ${row.warrant_name}`,gridcolor:"#252836",zerolinecolor:"#252836",tickformat:","},
