@@ -571,6 +571,10 @@
               style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--surface);color:var(--muted)">
               US Option Match
             </button>
+            <button id="arb-mode-twus" onclick="setArbMode('twus')"
+              style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--surface);color:var(--muted)">
+              TW Opt / US Opt
+            </button>
           </div>
         </div>
 
@@ -687,6 +691,57 @@
 
           <div id="us-status"></div>
           <div id="us-tableContainer"></div>
+        </div>
+
+        <!-- ── TW Option / US Option sub-tab ── -->
+        <div id="arb-sub-twus" style="display:none">
+          <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-size:14px;font-weight:600;color:var(--text)">TW Option / US Option — same underlying, cross-market basis trade</span>
+              <button onclick="openTwUsInfo()" title="How does this work?" style="background:none;border:1.5px solid var(--border);border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);font-family:inherit;padding:0;flex-shrink:0">ⓘ</button>
+            </div>
+
+            <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
+              <div class="stock-select">
+                <span>Stock</span>
+                <select id="twusStockSelect" multiple style="height:60px;min-width:200px">
+                  <option value="2303" selected>2303 聯電 (UMC, 1:5)</option>
+                </select>
+              </div>
+              <label>Option Type
+                <select id="twusOptionType">
+                  <option value="All">All</option>
+                  <option value="Call">Call</option>
+                  <option value="Put">Put</option>
+                </select>
+              </label>
+              <label>Max Strike Diff %
+                <input type="number" id="twusMaxStrikePct" value="2" step="0.5" min="0" max="20" style="width:80px"/>
+              </label>
+              <label>Max DTE Diff (days)
+                <input type="number" id="twusMaxDteDiff" value="10" min="0" max="60" style="width:70px"/>
+              </label>
+              <label>Min Option Volume
+                <input type="number" id="twusMinVolume" value="0" min="0" style="width:90px" title="Drop options with volume below this on either leg"/>
+              </label>
+              <div class="action-group">
+                <button class="primary" id="twusFindBtn" onclick="fetchTwUsData()">Find Match</button>
+                <button class="success" id="twusDownloadBtn" onclick="downloadTwUsCSV()" style="display:none">
+                  Download CSV
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="sort-btns">
+            <button onclick="sortTwUsBy('price_diff_pct', false)">Credit % ↓</button>
+            <button onclick="sortTwUsBy('entry_credit', false)">Entry Credit ↓</button>
+            <button onclick="sortTwUsBy('strike_diff_pct', true)">Strike Diff ↑</button>
+            <button onclick="sortTwUsBy('dte_diff', true)">DTE Diff ↑</button>
+          </div>
+
+          <div id="twus-status"></div>
+          <div id="twus-tableContainer"></div>
         </div>
       </main>
     </div>
@@ -857,6 +912,15 @@
           <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:20px 0 8px">Expected Value (P&L at option expiry)</p>
           <table id="us-ev-table" style="width:100%;border-collapse:collapse;font-size:13px"></table>
           <div id="us-ev-formula" style="background:var(--surface);border-radius:6px;padding:12px 14px;margin-top:12px;font-size:12px;color:var(--muted);line-height:1.6"></div>
+
+          <!-- Conditional scenario EDA (TW-option / US-option tab only) -->
+          <div id="us-scenario-section" style="display:none">
+            <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:24px 0 8px">
+              If you enter now — where does the premium land by expiry?</p>
+            <p id="us-scenario-caption" style="font-size:12px;color:var(--muted);margin:0 0 10px"></p>
+            <table id="us-scenario-table" style="width:100%;border-collapse:collapse;font-size:13px"></table>
+            <div id="us-scenario-note" style="background:var(--surface);border-radius:6px;padding:12px 14px;margin-top:12px;font-size:12px;color:var(--muted);line-height:1.6"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -1211,6 +1275,9 @@
       let currentUsData = [];
       let usSortCol = null;
       let usSortAsc = true;
+      let currentTwUsData = [];
+      let twusSortCol = null;
+      let twusSortAsc = true;
 
       function openUsInfo() {
         document.getElementById("usInfoModal").style.display = "block";
@@ -1356,6 +1423,147 @@
         const a = document.createElement("a");
         a.href = url; a.download = "us_option_match.csv"; a.click();
       }
+
+      // ── TW Option / US Option sub-tab ──────────────────────────────────
+      function getTwUsFilters() {
+        const sel = document.getElementById("twusStockSelect");
+        return {
+          stock_codes: Array.from(sel.selectedOptions).map(o => o.value),
+          option_type: document.getElementById("twusOptionType").value,
+          max_strike_diff_pct: parseFloat(document.getElementById("twusMaxStrikePct").value) || 2,
+          max_dte_diff: parseInt(document.getElementById("twusMaxDteDiff").value) ?? 10,
+          min_volume: parseInt(document.getElementById("twusMinVolume").value) || 0,
+        };
+      }
+
+      async function fetchTwUsData() {
+        document.getElementById("twus-status").textContent = "Fetching Taiwan + US options…";
+        document.getElementById("twus-tableContainer").innerHTML = "";
+        document.getElementById("twusDownloadBtn").style.display = "none";
+        let data;
+        try {
+          const res = await fetch("/tw_us_option_match", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(getTwUsFilters()),
+          });
+          data = await res.json();
+        } catch(e) {
+          document.getElementById("twus-status").textContent = "Error: " + e.message;
+          return;
+        }
+        if (data.error) {
+          document.getElementById("twus-status").textContent = "Error: " + data.error;
+          return;
+        }
+        currentTwUsData = data.rows;
+        document.getElementById("twus-status").textContent =
+          `${data.count} matched pairs — entry credit = sell the richer leg / buy the cheaper. Click a row for the ADR-premium scenario P&L.`;
+        document.getElementById("twusDownloadBtn").style.display = "inline-block";
+        renderTwUsTable(currentTwUsData);
+      }
+
+      function renderTwUsTable(rows) {
+        const container = document.getElementById("twus-tableContainer");
+        if (!rows.length) {
+          container.innerHTML = "<p style='padding:16px;color:var(--muted)'>No matches found. Try relaxing the thresholds.</p>";
+          return;
+        }
+        const cols = Object.keys(rows[0]);
+        let html = "<table><thead><tr>";
+        cols.forEach((c, i) => {
+          const arrow = twusSortCol === i ? (twusSortAsc ? " ▲" : " ▼") : "";
+          html += `<th onclick="sortTwUsByIndex(${i})">${c}${arrow}</th>`;
+        });
+        html += "</tr></thead><tbody>";
+        rows.forEach((row, ri) => {
+          const typeCls = row.type === "Call" ? "call" : "put";
+          html += `<tr style="cursor:pointer" onclick="openTwUsModal(currentTwUsData[${ri}])" title="Click to view trade breakdown + scenario">`;
+          cols.forEach(c => {
+            let val = row[c] === null ? "—" : row[c];
+            if (c === "type") val = `<span class="${typeCls}">${val}</span>`;
+            else if (c === "price_diff_pct" && row[c] !== null) val = `<span class="put">${val}%</span>`;
+            html += `<td>${val}</td>`;
+          });
+          html += "</tr>";
+        });
+        html += "</tbody></table>";
+        container.innerHTML = html;
+      }
+
+      function sortTwUsByIndex(colIndex) {
+        if (!currentTwUsData.length) return;
+        const key = Object.keys(currentTwUsData[0])[colIndex];
+        if (twusSortCol === colIndex) twusSortAsc = !twusSortAsc;
+        else { twusSortCol = colIndex; twusSortAsc = true; }
+        currentTwUsData.sort((a, b) => {
+          const av = a[key], bv = b[key];
+          if (av === null) return 1; if (bv === null) return -1;
+          if (typeof av === "number") return twusSortAsc ? av - bv : bv - av;
+          return twusSortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+        });
+        renderTwUsTable(currentTwUsData);
+      }
+
+      function sortTwUsBy(key, asc) {
+        if (!currentTwUsData.length) return;
+        currentTwUsData.sort((a, b) => {
+          const av = a[key] ?? (asc ? Infinity : -Infinity);
+          const bv = b[key] ?? (asc ? Infinity : -Infinity);
+          return asc ? av - bv : bv - av;
+        });
+        renderTwUsTable(currentTwUsData);
+      }
+
+      function openTwUsModal(row) {
+        // TW option → warrant_* slots, US option → opt_* slots (already emitted so).
+        const mapped = {
+          warrant_code:     row.warrant_code,
+          warrant_name:     row.warrant_name,
+          warrant_type:     row.type,
+          opt_type:         row.type,
+          option_contract:  row.option_contract,
+          underlying_price: row.underlying_price,
+          warrant_dte:      row.warrant_dte,
+          opt_dte:          row.opt_dte,
+          dte_diff:         row.dte_diff,
+          warrant_strike:   row.warrant_strike,
+          opt_strike:       row.opt_strike,
+          strike_diff_pct:  row.strike_diff_pct,
+          warrants_needed:  row.warrants_needed,
+          opt_contract_size:row.opt_contract_size,
+          tw_contracts:     row.tw_contracts,
+          us_contracts:     row.us_contracts,
+          warrant_ask:      row.warrant_ask,
+          warrant_bid:      row.warrant_bid,
+          opt_bid:          row.opt_bid,
+          opt_ask:          row.opt_ask,
+          warrant_per_share:row.warrant_per_share,
+          opt_per_share:    row.opt_per_share,
+          pcp_diff:         row.price_diff,
+          pcp_diff_pct:     row.price_diff_pct,
+          synthetic_price:  row.opt_per_share,
+          bond_pv:          null,
+          warrant_iv:       null,
+          opt_iv:           null,
+          us_stock_code:    row.us_stock_code,
+        };
+        openArbModal(mapped, "twus");
+      }
+
+      async function downloadTwUsCSV() {
+        const res = await fetch("/tw_us_option_match_csv", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(getTwUsFilters()),
+        });
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = "tw_us_option_match.csv"; a.click();
+      }
+
+      function openTwUsInfo() { openUsInfo(); }
 
       // ── ADR premium risk + Expected Value (US mode) ────────────────────
       //
@@ -1505,6 +1713,71 @@
           <code>EV = Σ P(regime) · PnL(regime mean premium)</code>. Positive EV with premium already ≈ 0 is the clean setup.`;
       }
 
+      // Conditional "enter now" scenario: given today's premium, where does it
+      // land by the first expiry, and what is the P&L in each case?
+      async function loadAdrScenario(row) {
+        const tbl = document.getElementById("us-scenario-table");
+        const cap = document.getElementById("us-scenario-caption");
+        const note = document.getElementById("us-scenario-note");
+        tbl.innerHTML = ""; note.innerHTML = ""; cap.textContent = "loading…";
+
+        // Trade closes at the first (nearest) expiry.
+        const horizon = Math.max(1, Math.min(row.warrant_dte, row.opt_dte));
+        let s;
+        try {
+          const res = await fetch("/adr_premium_scenario", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ stock_code: row.us_stock_code, horizon_days: horizon }),
+          });
+          s = await res.json();
+        } catch (e) { cap.textContent = "scenario error"; return; }
+        if (s.error) { cap.textContent = s.error; return; }
+
+        const p0 = s.current_premium;
+        cap.innerHTML =
+          `Premium is <b>${(p0*100>=0?"+":"")}${(p0*100).toFixed(2)}%</b> right now (${s.current_regime_label}). `
+          + (s.conditional
+              ? `Conditioning on the ${s.n_samples} historical days that started within ±${s.band_pct}% of today's premium, ${s.horizon_days}d (${s.horizon_trading} trading days) later:`
+              : `Not enough history near today's premium — showing the unconditional ${s.horizon_days}d outlook (${s.n_samples} samples):`);
+
+        const th = "padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--border)";
+        const td = "padding:7px 10px;border-bottom:1px solid var(--border);color:var(--text)";
+        const tdr = td + ";text-align:right;font-variant-numeric:tabular-nums";
+        let ev = 0;
+        let body = `<thead><tr>
+          <th style="${th};text-align:left">Premium by expiry</th>
+          <th style="${th};text-align:right">P (from here)</th>
+          <th style="${th};text-align:right">Exit premium</th>
+          <th style="${th};text-align:right">Trade P&L</th>
+          <th style="${th};text-align:right">P × P&L</th>
+        </tr></thead><tbody>`;
+        s.regimes.forEach(r => {
+          const pnl = _evPnlAtPremium(row, r.cond_premium, p0);
+          const contrib = r.prob * pnl;
+          ev += contrib;
+          const col = pnl >= 0 ? "var(--put)" : "var(--call)";
+          body += `<tr>
+            <td style="${td}">${r.label}</td>
+            <td style="${tdr}">${(r.prob*100).toFixed(1)}%</td>
+            <td style="${tdr}">${(r.cond_premium*100>=0?"+":"")}${(r.cond_premium*100).toFixed(2)}%</td>
+            <td style="${tdr};color:${col}">${pnl>=0?"+":""}${Math.round(pnl).toLocaleString()}</td>
+            <td style="${tdr};color:${col}">${contrib>=0?"+":""}${Math.round(contrib).toLocaleString()}</td>
+          </tr>`;
+        });
+        const evCol = ev >= 0 ? "var(--put)" : "var(--call)";
+        body += `</tbody><tfoot><tr>
+          <td colspan="4" style="${td};font-weight:700;text-transform:uppercase;font-size:11px;letter-spacing:.4px;color:var(--muted)">Conditional Expected Value (NT$)</td>
+          <td style="${tdr};font-weight:700;font-size:14px;color:${evCol}">${ev>=0?"+":""}${Math.round(ev).toLocaleString()}</td>
+        </tr></tfoot>`;
+        tbl.innerHTML = body;
+
+        note.innerHTML =
+          `This uses the <b>empirical transition</b> of the ADR premium (which already embeds FX), not just its unconditional frequency. `
+          + `If today's premium is stretched, the table shows the historical odds it reverts toward par by expiry and the P&L in each landing zone. `
+          + `Best entry: current premium near 0 with positive EV — you're not just short a stretched basis. `
+          + `Horizon = min(TW ${row.warrant_dte}d, US ${row.opt_dte}d) = the first leg to expire.`;
+      }
+
       // ── Options Scanner ────────────────────────────────────────────────
       function getOptionsFilters() {
         const select = document.getElementById("optionStockSelect");
@@ -1615,13 +1888,14 @@
       let arbSortAsc = true;
 
       function setArbMode(mode) {
-        const isDirect = mode === "direct";
-        document.getElementById("arb-mode-direct").style.background = isDirect ? "var(--accent)" : "var(--surface)";
-        document.getElementById("arb-mode-direct").style.color = isDirect ? "#fff" : "var(--muted)";
-        document.getElementById("arb-mode-us").style.background = isDirect ? "var(--surface)" : "var(--accent)";
-        document.getElementById("arb-mode-us").style.color = isDirect ? "var(--muted)" : "#fff";
-        document.getElementById("arb-sub-direct").style.display = isDirect ? "block" : "none";
-        document.getElementById("arb-sub-us").style.display = isDirect ? "none" : "block";
+        const modes = ["direct", "us", "twus"];
+        modes.forEach(m => {
+          const active = m === mode;
+          const btn = document.getElementById("arb-mode-" + m);
+          btn.style.background = active ? "var(--accent)" : "var(--surface)";
+          btn.style.color = active ? "#fff" : "var(--muted)";
+          document.getElementById("arb-sub-" + m).style.display = active ? "block" : "none";
+        });
       }
 
       function runArb() {
@@ -1827,15 +2101,32 @@
         const contractSize = row.opt_contract_size ?? 2000;
         _contractSize = contractSize;
 
-        const modeLabel = mode === "us" ? "US Option Match" : mode === "direct" ? "Direct Match" : "PCP Arb";
+        const modeLabel = mode === "twus" ? "TW Opt / US Opt" : mode === "us" ? "US Option Match" : mode === "direct" ? "Direct Match" : "PCP Arb";
         document.getElementById("pcp-modal-title").textContent =
           `${row.warrant_name} (${row.warrant_type}) ↔ ${row.option_contract} (${row.opt_type})  —  ${modeLabel}`;
         document.getElementById("pcp-legs-caption").textContent =
-          `Trade Legs (per 1 options contract = ${contractSize.toLocaleString()} ${mode === "us" ? "TW shares" : "shares"})`;
+          mode === "twus"
+            ? `Trade Legs (matched ${contractSize.toLocaleString()} TW shares = ${row.tw_contracts} TW contract × 2,000 = ${row.us_contracts} US contracts × 500)`
+            : `Trade Legs (per 1 options contract = ${contractSize.toLocaleString()} ${mode === "us" ? "TW shares" : "shares"})`;
 
         // ── Trade legs ──────────────────────────────────────────────────
         let legs;
-        if (mode === "direct" || mode === "us") {
+        if (mode === "twus") {
+          // Two option legs, same matched share count. warrant_* = TW leg,
+          // opt_* = US leg; warrant_per_share / opt_per_share already hold the
+          // executable price for the trade's direction (sell rich / buy cheap).
+          const twShares = row.tw_contracts > 0 ? contractSize / row.tw_contracts : 2000;
+          const usShares = row.us_contracts > 0 ? contractSize / row.us_contracts : 500;
+          const twLabel = `${row.tw_contracts} TW contract${row.tw_contracts>1?"s":""} (×${twShares.toLocaleString()} sh) — ${row.warrant_code} ${row.warrant_type.toLowerCase()}`;
+          const usLabel = `${row.us_contracts} US contract${row.us_contracts>1?"s":""} (×${usShares.toLocaleString()} TW sh) — ${row.option_contract}`;
+          const longTw = row.pcp_diff >= 0;   // Long TW / Short US
+          legs = [
+            { action: longTw ? "BUY" : "SELL", instrument: twLabel, qty: n,
+              price: row.warrant_per_share, cf: (longTw ? -1 : 1) * n * row.warrant_per_share },
+            { action: longTw ? "SELL" : "BUY", instrument: usLabel, qty: contractSize,
+              price: row.opt_per_share, cf: (longTw ? 1 : -1) * contractSize * row.opt_per_share },
+          ];
+        } else if (mode === "direct" || mode === "us") {
           // Simple 2-leg trade: buy cheaper warrant, sell pricier same-type option
           const wLabel = `${(n/1000).toLocaleString(undefined,{maximumFractionDigits:3})} 張 (${n.toLocaleString()} units) × ${row.warrant_code} (${row.warrant_type.toLowerCase()} warrant)`;
           const oLabel = `${row.option_contract} ${row.opt_type.toLowerCase()} option (×${contractSize.toLocaleString()} shares)`;
@@ -1972,13 +2263,22 @@
         // ── Chart ───────────────────────────────────────────────────────
         setPcpChartMode(_pcpChartMode);   // syncs button highlight + renders at current slider value
 
-        // US mode: show ADR-premium risk chart + Expected-Value model
+        // US + TW/US modes: show ADR-premium risk chart + Expected-Value model.
+        // TW/US mode also shows the conditional "enter now" scenario EDA.
         const premSection = document.getElementById("us-premium-section");
-        if (mode === "us" && row.us_stock_code) {
+        const scenSection = document.getElementById("us-scenario-section");
+        if ((mode === "us" || mode === "twus") && row.us_stock_code) {
           premSection.style.display = "block";
           loadAdrPremium(row);
+          if (mode === "twus") {
+            scenSection.style.display = "block";
+            loadAdrScenario(row);
+          } else {
+            scenSection.style.display = "none";
+          }
         } else {
           premSection.style.display = "none";
+          scenSection.style.display = "none";
         }
 
         document.getElementById("pcpModal").style.display = "block";

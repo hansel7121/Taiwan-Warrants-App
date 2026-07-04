@@ -490,6 +490,175 @@ def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
     return result
 
 
+def _lcm(a, b):
+    from math import gcd
+    return a * b // gcd(a, b)
+
+
+def _match_option_legs(tw_df, us_df, tw_contract_shares, us_contract_shares,
+                       max_strike_diff_pct, max_dte_diff, positive_loose=False):
+    """Match a Taiwan listed option to the *nearest* US ADR option (same type,
+    closest strike, then closest expiry) so the two legs share ~the same payoff
+    and delta roughly cancels.
+
+    The two legs are NOT 1:1 — the ADR trades at a premium and FX floats — so
+    this is not a risk-free arb. The trade is: sell the richer leg, buy the
+    cheaper, and hold the residual ADR-premium + FX basis. The entry credit
+    (executable: sell@bid, buy@ask) is the headline; the true edge is the
+    probability-weighted P&L over where the premium lands by expiry, computed in
+    the modal from the historical premium distribution (same engine as the
+    US Option Match tab). The TW leg fills the modal's ``warrant_*`` slots, the
+    US leg the ``opt_*`` slots.
+    """
+    base = _lcm(int(tw_contract_shares), int(us_contract_shares))
+    tw_contracts = base // int(tw_contract_shares)
+    us_contracts = base // int(us_contract_shares)
+    matched_shares = base
+
+    rows = []
+    for _, tw in tw_df.iterrows():
+        cands = us_df[us_df["type"] == tw["type"]].copy()
+        if cands.empty:
+            continue
+
+        cands["strike_diff_pct"] = (
+            (cands["strike"] - tw["strike"]).abs() / tw["strike"] * 100
+        )
+        cands["dte_diff"] = (cands["days_to_expiry"] - tw["days_to_expiry"]).abs()
+        cands = cands[
+            (cands["strike_diff_pct"] <= max_strike_diff_pct)
+            & (cands["dte_diff"] <= max_dte_diff)
+        ]
+        if cands.empty:
+            continue
+
+        # Best pair = closest strike, then closest expiry (delta-match priority).
+        cands = cands.sort_values(["strike_diff_pct", "dte_diff"])
+        us = cands.iloc[0]
+
+        tw_bid = float(tw["bid"]) if pd.notna(tw.get("bid")) and float(tw.get("bid", 0)) > 0 else None
+        tw_ask = float(tw["ask"]) if pd.notna(tw.get("ask")) and float(tw.get("ask", 0)) > 0 else None
+        us_bid = float(us["bid"]) if pd.notna(us.get("bid")) and float(us.get("bid", 0)) > 0 else None
+        us_ask = float(us["ask"]) if pd.notna(us.get("ask")) and float(us.get("ask", 0)) > 0 else None
+        if None in (tw_bid, tw_ask, us_bid, us_ask):
+            continue
+
+        # Sell the richer leg (by mid), buy the cheaper. Executable prices.
+        tw_mid = (tw_bid + tw_ask) / 2
+        us_mid = (us_bid + us_ask) / 2
+        if us_mid >= tw_mid:
+            # US richer → Short US / Long TW: sell US@bid, buy TW@ask
+            trade = "Long TW / Short US"
+            exec_opt, exec_warrant = us_bid, tw_ask   # opt slot = US, warrant slot = TW
+        else:
+            # TW richer → Short TW / Long US: sell TW@bid, buy US@ask
+            trade = "Long US / Short TW"
+            exec_opt, exec_warrant = us_ask, tw_bid
+
+        # Entry credit per share (sell price − buy price), sign per direction.
+        # pcp_diff sign drives the modal payoff direction: >0 long-TW/short-US.
+        if trade == "Long TW / Short US":
+            credit = round(exec_opt - exec_warrant, 4)     # us_bid − tw_ask
+        else:
+            credit = round(exec_warrant - exec_opt, 4)     # tw_bid − us_ask
+        if credit <= 0:
+            continue  # no executable entry credit
+        pcp_diff = credit if trade == "Long TW / Short US" else -credit
+
+        denom = exec_opt if exec_opt else 1
+        rows.append({
+            "warrant_code": tw["contract"],
+            "warrant_name": f"TW {tw['contract']}",
+            "option_contract": us["contract"],
+            "type": tw["type"],
+            "warrant_type": tw["type"],
+            "opt_type": us["type"],
+            "trade": trade,
+            "underlying_price": round(float(tw["underlying_price"]), 4),
+            "warrant_dte": int(tw["days_to_expiry"]),
+            "opt_dte": int(us["days_to_expiry"]),
+            "dte_diff": int(us["dte_diff"]),
+            "warrant_strike": round(float(tw["strike"]), 2),
+            "opt_strike": round(float(us["strike"]), 2),
+            "strike_diff_pct": round(float(us["strike_diff_pct"]), 2),
+            "tw_contracts": int(tw_contracts),
+            "us_contracts": int(us_contracts),
+            "matched_shares": int(matched_shares),
+            "warrants_needed": int(matched_shares),
+            "opt_contract_size": int(matched_shares),
+            "warrant_ask": round(tw_ask, 4),
+            "warrant_bid": round(tw_bid, 4),
+            "opt_bid": round(us_bid, 4),
+            "opt_ask": round(us_ask, 4),
+            "warrant_per_share": round(exec_warrant, 4),
+            "opt_per_share": round(exec_opt, 4),
+            "price_diff": pcp_diff,
+            "price_diff_pct": round(credit / denom * 100, 2),
+            "entry_credit": round(credit * matched_shares, 0),
+            "warrant_iv": None,
+            "opt_iv": None,
+            "iv_diff": 0,
+        })
+    return rows
+
+
+def _build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
+                           positive_loose=False, min_volume=0):
+    """Match Taiwan listed options against US ADR options on the same underlying."""
+    all_rows = []
+    errors = []
+
+    for code in stock_codes:
+        if code not in options_logic.COMMODITY_MAP:
+            errors.append(f"{code}: no Taiwan options")
+            continue
+        if code not in us_options_logic.US_ADR_MAP:
+            errors.append(f"{code}: no US ADR options")
+            continue
+
+        tw_contract_shares = options_logic.COMMODITY_MAP[code]["exercise_ratio"]  # 2000
+        us_contract_shares = us_options_logic.contract_tw_shares(code)            # 500 (2303)
+
+        try:
+            tw_df = options_logic.fetch_options([code], option_type, min_days=1, compute_iv=False)
+            tw_df = tw_df[tw_df["is_live"]]
+            if min_volume > 0:
+                tw_df = tw_df[tw_df["volume"] >= min_volume]
+        except Exception as e:
+            errors.append(f"{code}: TW options {e}")
+            continue
+
+        try:
+            us_df = us_options_logic.fetch_us_options(code, option_type, min_days=1, compute_iv=False)
+            us_df = us_df[us_df["is_live"]]
+            if min_volume > 0:
+                us_df = us_df[us_df["volume"] >= min_volume]
+        except Exception as e:
+            errors.append(f"{code}: US options {e}")
+            continue
+
+        if tw_df.empty or us_df.empty:
+            errors.append(f"{code}: no live options on one leg")
+            continue
+
+        rows = _match_option_legs(
+            tw_df, us_df, tw_contract_shares, us_contract_shares,
+            max_strike_diff_pct, max_dte_diff, positive_loose=positive_loose,
+        )
+        for r in rows:
+            r["us_stock_code"] = code
+        all_rows.extend(rows)
+
+    if not all_rows:
+        msg = "; ".join(errors) if errors else "No matches found"
+        raise RuntimeError(msg)
+
+    result = pd.DataFrame(all_rows)
+    if "price_diff_pct" in result.columns:
+        result = result.sort_values("price_diff_pct", ascending=False)
+    return result
+
+
 @app.route("/adr_premium", methods=["POST"])
 def adr_premium():
     data = request.json
@@ -498,6 +667,19 @@ def adr_premium():
         if stock_code not in us_options_logic.US_ADR_MAP:
             raise RuntimeError(f"{stock_code}: no US ADR mapping")
         return jsonify(us_options_logic.adr_premium_stats(stock_code))
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@app.route("/adr_premium_scenario", methods=["POST"])
+def adr_premium_scenario():
+    data = request.json
+    stock_code = data.get("stock_code")
+    horizon_days = int(data.get("horizon_days", 30) or 30)
+    try:
+        if stock_code not in us_options_logic.US_ADR_MAP:
+            raise RuntimeError(f"{stock_code}: no US ADR mapping")
+        return jsonify(us_options_logic.adr_premium_scenario(stock_code, horizon_days))
     except Exception as e:
         return jsonify({"error": str(e)})
 
@@ -543,6 +725,50 @@ def us_option_match_csv():
         output.getvalue(),
         mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=us_option_match.csv"},
+    )
+
+
+@app.route("/tw_us_option_match", methods=["POST"])
+def tw_us_option_match():
+    data = request.json
+    stock_codes = data.get("stock_codes", ["2303"])
+    option_type = data.get("option_type", "All")
+    max_strike_diff_pct = float(data.get("max_strike_diff_pct", 3.0))
+    max_dte_diff = int(data.get("max_dte_diff", 5))
+    positive_loose = bool(data.get("positive_loose", False))
+    min_volume = int(data.get("min_volume", 0) or 0)
+    try:
+        df = _build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct,
+                                    max_dte_diff, positive_loose=positive_loose,
+                                    min_volume=min_volume)
+        rows = json.loads(df.to_json(orient="records")) if not df.empty else []
+        return jsonify({"rows": rows, "count": len(rows)})
+    except Exception as e:
+        return jsonify({"rows": [], "count": 0, "error": str(e)})
+
+
+@app.route("/tw_us_option_match_csv", methods=["POST"])
+def tw_us_option_match_csv():
+    data = request.json
+    stock_codes = data.get("stock_codes", ["2303"])
+    option_type = data.get("option_type", "All")
+    max_strike_diff_pct = float(data.get("max_strike_diff_pct", 3.0))
+    max_dte_diff = int(data.get("max_dte_diff", 5))
+    positive_loose = bool(data.get("positive_loose", False))
+    min_volume = int(data.get("min_volume", 0) or 0)
+    try:
+        df = _build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct,
+                                    max_dte_diff, positive_loose=positive_loose,
+                                    min_volume=min_volume)
+    except Exception:
+        df = pd.DataFrame()
+    output = io.StringIO()
+    df.to_csv(output, index=False)
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=tw_us_option_match.csv"},
     )
 
 

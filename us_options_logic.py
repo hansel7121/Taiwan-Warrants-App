@@ -56,20 +56,13 @@ _PREM_TTL = 1800  # 30 minutes
 PREM_THRESHOLD = 0.05
 
 
-def adr_premium_stats(stock_code, period="3y"):
-    """Historical ADR-vs-local premium series + regime probabilities.
+def _premium_series(stock_code, period="3y"):
+    """Return (df, prem) where prem_t = (adr_usd/adr_ratio*fx)/tw_close − 1.
 
-    premium_t = (adr_usd_t / adr_ratio * fx_t) / tw_close_t - 1
-
-    Returns dates, premium %, the latest premium, and 3 regimes (high / mid /
-    low) with their historical frequency and conditional-mean premium — the
-    inputs to the Expected-Value calc in the trade modal.
+    The premium already embeds FX (it's baked into the numerator), so its
+    distribution captures the *combined* ADR-basis + FX risk of the trade.
     """
     cfg = US_ADR_MAP[stock_code]
-    key = (stock_code, period)
-    hit = _prem_cache.get(key)
-    if hit and time.time() - hit[0] < _PREM_TTL:
-        return hit[1]
 
     def daily(t):
         s = yf.Ticker(t).history(period=period)["Close"]
@@ -87,6 +80,99 @@ def adr_premium_stats(stock_code, period="3y"):
 
     adr_tw = df["a"] / cfg["adr_ratio"] * df["fx"]
     prem = (adr_tw / df["t"] - 1.0)  # fraction
+    return df, prem
+
+
+def adr_premium_scenario(stock_code, horizon_days, period="3y"):
+    """Horizon-conditional premium outlook for entering the trade *today*.
+
+    Given the current premium regime (spike / around-0 / drop) and the trade's
+    holding horizon (calendar days to the first expiry), estimate empirically:
+    starting from days historically in the *same* regime as now, where did the
+    premium land ``horizon`` days later? Returns the transition probabilities to
+    each end-regime plus each bucket's conditional-mean end premium — the inputs
+    to a realistic "if premium is high now, what happens by expiry" EV.
+    """
+    _, prem = _premium_series(stock_code, period)
+    p = prem.reset_index(drop=True)
+    n = len(p)
+    p0 = float(p.iloc[-1])
+
+    # Trading-day horizon ≈ calendar days × (252/365).
+    k = max(1, int(round(float(horizon_days) * 252.0 / 365.0)))
+    k = min(k, max(1, n - 2))
+
+    def regime_of(x):
+        if x > PREM_THRESHOLD:
+            return "hi"
+        if x < -PREM_THRESHOLD:
+            return "lo"
+        return "mid"
+
+    cur = regime_of(p0)
+    cur_label = {"hi": f"Spike > +{int(PREM_THRESHOLD*100)}%",
+                 "mid": f"Around 0 (|p| ≤ {int(PREM_THRESHOLD*100)}%)",
+                 "lo": f"Drop < -{int(PREM_THRESHOLD*100)}%"}[cur]
+
+    starts = p.iloc[: n - k].reset_index(drop=True)
+    ends = p.iloc[k:].reset_index(drop=True)
+
+    # Condition on history that STARTED near today's premium, then look k trading
+    # days ahead. Widen the band until enough samples; fall back to unconditional.
+    conditional = True
+    band = None
+    for b in (0.02, 0.04, 0.06):
+        mask = (starts - p0).abs() <= b
+        if int(mask.sum()) >= 30:
+            ends_cond = ends[mask.values]
+            band = b
+            break
+    else:
+        ends_cond = ends
+        conditional = False
+
+    def bucket(mask, label):
+        prob = float(mask.mean()) if len(mask) else 0.0
+        cond = float(ends_cond[mask].mean()) if mask.any() else 0.0
+        return {"label": label, "prob": prob, "cond_premium": cond}
+
+    hi = ends_cond > PREM_THRESHOLD
+    lo = ends_cond < -PREM_THRESHOLD
+    mid = ~hi & ~lo
+
+    return {
+        "stock_code": stock_code,
+        "horizon_days": int(horizon_days),
+        "horizon_trading": int(k),
+        "current_premium": p0,
+        "current_regime": cur,
+        "current_regime_label": cur_label,
+        "conditional": conditional,   # False = fell back to unconditional
+        "band_pct": round(band * 100, 1) if band is not None else None,
+        "n_samples": int(len(ends_cond)),
+        "regimes": [
+            bucket(hi, f"Spike > +{int(PREM_THRESHOLD*100)}%"),
+            bucket(mid, f"Around 0 (|p| ≤ {int(PREM_THRESHOLD*100)}%)"),
+            bucket(lo, f"Drop < -{int(PREM_THRESHOLD*100)}%"),
+        ],
+    }
+
+
+def adr_premium_stats(stock_code, period="3y"):
+    """Historical ADR-vs-local premium series + regime probabilities.
+
+    premium_t = (adr_usd_t / adr_ratio * fx_t) / tw_close_t - 1
+
+    Returns dates, premium %, the latest premium, and 3 regimes (high / mid /
+    low) with their historical frequency and conditional-mean premium — the
+    inputs to the Expected-Value calc in the trade modal.
+    """
+    key = (stock_code, period)
+    hit = _prem_cache.get(key)
+    if hit and time.time() - hit[0] < _PREM_TTL:
+        return hit[1]
+
+    df, prem = _premium_series(stock_code, period)
 
     hi = prem > PREM_THRESHOLD
     lo = prem < -PREM_THRESHOLD
