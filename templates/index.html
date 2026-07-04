@@ -1544,8 +1544,8 @@
           pcp_diff_pct:     row.price_diff_pct,
           synthetic_price:  row.opt_per_share,
           bond_pv:          null,
-          warrant_iv:       null,
-          opt_iv:           null,
+          warrant_iv:       row.warrant_iv,
+          opt_iv:           row.opt_iv,
           us_stock_code:    row.us_stock_code,
         };
         openArbModal(mapped, "twus");
@@ -1587,9 +1587,22 @@
         const wEntry = row.warrant_per_share, oEntry = row.synthetic_price;
         const shares = row.opt_contract_size;   // exact-hedge share count
         const dir = row.pcp_diff >= 0 ? 1 : -1;
-        const intr = (S, K) => isCall ? Math.max(0, S - K) : Math.max(0, K - S);
         const optSpot = S0 * (1 + (p - p0));    // ADR basis moves the option leg only
-        const perShare = dir * ((intr(S0, Kw) - wEntry) + (oEntry - intr(optSpot, Ko)));
+        const intr = (S, K) => isCall ? Math.max(0, S - K) : Math.max(0, K - S);
+
+        // The trade unwinds at the FIRST expiry. The leg that has already expired
+        // settles at intrinsic; the leg still alive is marked at its Black-Scholes
+        // value with the remaining time (needs IV) — otherwise a not-yet-expired
+        // short leg looks worthless and the P&L is flat across premium regimes.
+        const H = Math.max(1, Math.min(row.warrant_dte ?? 0, row.opt_dte ?? 0));
+        const tauW = Math.max(0, (row.warrant_dte - H)) / 365;
+        const tauO = Math.max(0, (row.opt_dte - H)) / 365;
+        const legVal = (S, K, tau, iv) =>
+          (tau > 0 && iv) ? (isCall ? bsCall(S, K, tau, R_FREE, iv) : bsPut(S, K, tau, R_FREE, iv))
+                          : intr(S, K);
+        const wVal = legVal(S0, Kw, tauW, row.warrant_iv);
+        const oVal = legVal(optSpot, Ko, tauO, row.opt_iv);
+        const perShare = dir * ((wVal - wEntry) + (oEntry - oVal));
         return perShare * shares;
       }
 

@@ -565,6 +565,19 @@ def _match_option_legs(tw_df, us_df, tw_contract_shares, us_contract_shares,
             continue  # no executable entry credit
         pcp_diff = credit if trade == "Long TW / Short US" else -credit
 
+        # IV for each leg (matched pairs only, so cheap) — the modal needs it to
+        # mark the not-yet-expired leg with time value at the trade horizon, so
+        # the scenario P&L varies with the premium instead of being flat.
+        is_put = tw["type"] == "Put"
+        tw_iv = warrant_logic.implied_vol(
+            tw_mid, float(tw["underlying_price"]), float(tw["strike"]),
+            int(tw["days_to_expiry"]) / 365.0, options_logic.R, 1.0, is_put)
+        us_iv = warrant_logic.implied_vol(
+            us_mid, float(us["underlying_price"]), float(us["strike"]),
+            int(us["days_to_expiry"]) / 365.0, us_options_logic.R_US, 1.0, is_put)
+        tw_iv = round(float(tw_iv), 4) if pd.notna(tw_iv) else None
+        us_iv = round(float(us_iv), 4) if pd.notna(us_iv) else None
+
         denom = exec_opt if exec_opt else 1
         rows.append({
             "warrant_code": tw["contract"],
@@ -595,9 +608,9 @@ def _match_option_legs(tw_df, us_df, tw_contract_shares, us_contract_shares,
             "price_diff": pcp_diff,
             "price_diff_pct": round(credit / denom * 100, 2),
             "entry_credit": round(credit * matched_shares, 0),
-            "warrant_iv": None,
-            "opt_iv": None,
-            "iv_diff": 0,
+            "warrant_iv": tw_iv,
+            "opt_iv": us_iv,
+            "iv_diff": round((us_iv or 0) - (tw_iv or 0), 4),
         })
     return rows
 
