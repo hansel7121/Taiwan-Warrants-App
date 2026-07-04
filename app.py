@@ -26,6 +26,10 @@ app = Flask(
 )
 
 app.json.sort_keys = False
+# Re-read templates from disk on every request so index.html edits show up on a
+# plain browser reload — no server restart needed. (Python edits still need one.)
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+app.jinja_env.auto_reload = True
 
 CUSTOM_STOCKS_FILE = os.path.join(base_dir, "custom_stocks.json")
 
