@@ -1843,11 +1843,19 @@
           // Simple 2-leg trade: buy cheaper warrant, sell pricier same-type option
           const wLabel = `${(n/1000).toLocaleString(undefined,{maximumFractionDigits:3})} 張 (${n.toLocaleString()} units) × ${row.warrant_code} (${row.warrant_type.toLowerCase()} warrant)`;
           const oLabel = `${row.option_contract} ${row.opt_type.toLowerCase()} option (×${contractSize.toLocaleString()} shares)`;
+          // Loose (positive) prices the legs the way the backend price_diff did:
+          // buy the warrant at its BID, sell the option at its ASK. Tight uses
+          // the executable side: buy warrant at ASK, sell option at BID.
+          const looseEl = mode === "us"
+            ? document.getElementById("usPositiveLoose")
+            : document.getElementById("arbPositiveLoose");
+          const loose = !!(looseEl && looseEl.checked);
           if (row.pcp_diff >= 0) {
-            // Warrant cheaper → buy warrant, sell option at bid
-            const optSellPrice = row.opt_bid ?? row.opt_per_share;
+            // Warrant cheaper → buy warrant, sell option
+            const buyPrice  = loose ? (row.warrant_bid ?? row.warrant_ask) : row.warrant_ask;
+            const optSellPrice = loose ? row.opt_ask : (row.opt_bid ?? row.opt_per_share);
             legs = [
-              { action:"BUY",  instrument:wLabel,  qty:n,    price:row.warrant_ask,  cf:-(n*row.warrant_ask) },
+              { action:"BUY",  instrument:wLabel,  qty:n,    price:buyPrice,  cf:-(n*buyPrice) },
               { action:"SELL", instrument:oLabel,  qty:contractSize, price:optSellPrice, cf: contractSize*optSellPrice },
             ];
           } else {
