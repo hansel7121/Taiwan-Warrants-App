@@ -167,6 +167,7 @@ def adr_premium_stats(stock_code, period="3y"):
     low) with their historical frequency and conditional-mean premium — the
     inputs to the Expected-Value calc in the trade modal.
     """
+    cfg = US_ADR_MAP[stock_code]
     key = (stock_code, period)
     hit = _prem_cache.get(key)
     if hit and time.time() - hit[0] < _PREM_TTL:
