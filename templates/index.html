@@ -920,6 +920,8 @@
             <div id="us-fx-chart" style="width:100%;height:200px"></div>
             <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:18px 0 6px">Distribution of daily FX moves — isolated from ADR premium (residual)</p>
             <div id="us-fx-hist" style="width:100%;height:200px"></div>
+            <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:18px 0 6px">ADR premium change vs FX change (daily)</p>
+            <div id="us-fx-scatter" style="width:100%;height:230px"></div>
             <table id="us-fx-table" style="width:100%;border-collapse:collapse;font-size:13px;margin-top:14px"></table>
             <div id="us-fx-note" style="background:var(--surface);border-radius:6px;padding:12px 14px;margin-top:12px;font-size:12px;color:var(--muted);line-height:1.6"></div>
           </div>
@@ -1783,8 +1785,9 @@
         sec.style.display = "block";
         const fx = s.fx, ser = s.fx_series;
 
+        const chg30 = fx.chg_30d_pct ?? 0;
         document.getElementById("us-fx-latest").innerHTML =
-          `Now: <b>${fx.current_fx.toFixed(3)}</b> TWD/USD · only <b>${(fx.unexplained_frac*100).toFixed(0)}%</b> of FX moves are unexplained by the ADR premium (corr ${fx.corr_with_premium.toFixed(2)})`;
+          `Now: <b>${fx.current_fx.toFixed(3)}</b> TWD/USD · 30d <b style="color:${chg30>=0?'var(--put)':'var(--call)'}">${chg30>=0?"+":""}${chg30.toFixed(2)}%</b> · only <b>${(fx.unexplained_frac*100).toFixed(0)}%</b> of FX moves unexplained by ADR premium (corr ${fx.corr_with_premium.toFixed(2)})`;
         document.getElementById("us-fx-caption").innerHTML =
           `The US leg settles in USD and converts to TWD at exit, so FX is a second basis. It is <b>largely independent</b> of the ADR premium here, so it adds risk the premium regimes miss.`;
 
@@ -1812,6 +1815,22 @@
           yaxis: { title: "days", gridcolor: "#252836", zerolinecolor: "#252836" },
           margin: { l: 55, r: 10, t: 10, b: 38 }, showlegend: false, bargap: 0.02,
         }, { responsive: true });
+
+        // Scatter: daily ADR-premium change vs daily FX change (the correlation).
+        if (ser.dprem_pct && ser.dfx_pct) {
+          Plotly.react("us-fx-scatter", [
+            { x: ser.dprem_pct, y: ser.dfx_pct, mode: "markers", type: "scattergl",
+              marker: { color: "rgba(167,139,250,0.4)", size: 4 },
+              hovertemplate: "Δprem %{x:.2f}%<br>ΔFX %{y:.2f}%<extra></extra>" },
+          ], {
+            paper_bgcolor: "#13161f", plot_bgcolor: "#0d0f16",
+            font: { color: "#8b90a0", family: "Inter,system-ui,sans-serif", size: 11 },
+            title: { text: `corr = ${fx.corr_with_premium.toFixed(2)}  ·  R² = ${(fx.r2_with_premium*100).toFixed(0)}%`, font: { size: 11, color: "#8b90a0" }, x: 0, xanchor: "left" },
+            xaxis: { title: "Δ ADR premium (%)", gridcolor: "#252836", zerolinecolor: "#3a3f52", ticksuffix: "%" },
+            yaxis: { title: "Δ FX (%)", gridcolor: "#252836", zerolinecolor: "#3a3f52", ticksuffix: "%" },
+            margin: { l: 55, r: 10, t: 28, b: 40 }, showlegend: false,
+          }, { responsive: true });
+        }
 
         // Which FX direction hurts this trade? Bump FX +1% and see P&L sign.
         const base = _evPnlAtPremium(row, p0, p0, 1);

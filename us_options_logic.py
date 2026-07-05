@@ -178,8 +178,10 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
     stay = np.abs(fx_cond2 - 1.0) <= 0.005     # within ±0.5% = "stays"
     up = fx_cond2 > 1.005                       # TWD weakens (more TWD per USD)
     down = fx_cond2 < 0.995                      # TWD strengthens
+    fx_chg_30d = float((F0 / F[-22] - 1) * 100) if n > 22 else 0.0
     fx_panel = {
         "current_fx": round(F0, 4),
+        "chg_30d_pct": round(fx_chg_30d, 3),
         "cond_band_pct": round(fx_band * 100, 1) if fx_band is not None else None,
         "n": int(len(fx_cond2)),
         "stay_prob": float(stay.mean()),
@@ -215,6 +217,9 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
             "dates": [d.strftime("%Y-%m-%d") for d in df.index],
             "level": [round(float(x), 4) for x in F.tolist()],
             "resid_pct": [round(float(x) * 100, 4) for x in resid.tolist()],
+            # Daily % changes for the premium-vs-FX correlation scatter.
+            "dprem_pct": [round(float(x) * 100, 4) for x in rp.tolist()],
+            "dfx_pct": [round(float(x) * 100, 4) for x in rf.tolist()],
         },
     }
 
