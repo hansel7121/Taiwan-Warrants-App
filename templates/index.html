@@ -1752,8 +1752,8 @@
         cap.innerHTML =
           `Premium is <b>${(p0*100>=0?"+":"")}${(p0*100).toFixed(2)}%</b> right now (${s.current_regime_label}). `
           + (s.conditional
-              ? `Conditioning on the ${s.n_samples} historical days that started within ±${s.band_pct}% of today's premium, ${s.horizon_days}d (${s.horizon_trading} trading days) later:`
-              : `Not enough history near today's premium — showing the unconditional ${s.horizon_days}d outlook (${s.n_samples} samples):`);
+              ? `Of the ${s.n_samples} historical days that also started in the <b>${s.current_regime_label}</b> regime, ${s.horizon_days}d (${s.horizon_trading} trading days) later they landed:`
+              : `No history started in this regime — showing the unconditional ${s.horizon_days}d outlook (${s.n_samples} samples):`);
 
         const th = "padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--border)";
         const td = "padding:7px 10px;border-bottom:1px solid var(--border);color:var(--text)";
@@ -1796,7 +1796,7 @@
 
         note.innerHTML =
           `EV = Σ <code>P(band | start)</code> · <code>E[PnL | band, start]</code>, averaged jointly over each conditioned window's <b>forward premium AND forward FX</b> (so premium/FX correlation is baked in), not P&L at the band means. `
-          + `Probabilities/premiums are the <b>empirical transition</b> from days near today's premium, ${row.warrant_dte < row.opt_dte ? row.warrant_dte : row.opt_dte} trading-horizon days out. `
+          + `Probabilities/premiums are the <b>empirical transition</b> from days that started in the same regime as today, ${row.warrant_dte < row.opt_dte ? row.warrant_dte : row.opt_dte} trading-horizon days out. `
           + `"Exit premium" is the band mean, reference only. Horizon = min(TW ${row.warrant_dte}d, US ${row.opt_dte}d).`;
 
         renderFxSection(row, s, p0);

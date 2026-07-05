@@ -120,18 +120,17 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
     ends_p = p[k:]
     fx_ratio = F[k:] / F[: n - k]              # F_exit / F_entry for each window
 
-    # ── Premium: condition on windows that STARTED near today's premium ──
-    conditional = True
-    band = None
-    for b in (0.02, 0.04, 0.06):
-        m = np.abs(starts_p - p0) <= b
-        if int(m.sum()) >= 30:
-            pmask = m
-            band = b
-            break
+    # ── Premium: condition on windows that STARTED in today's regime ──
+    # (the band today's premium falls in: spike / around-0 / drop), then count
+    # where they land k days later. No proximity band — just the starting regime.
+    start_regime = np.array([regime_of(x) for x in starts_p])
+    pmask = start_regime == cur
+    if int(pmask.sum()) >= 1:
+        conditional = True
     else:
         pmask = np.ones(len(starts_p), dtype=bool)
         conditional = False
+    band = None
 
     ends_cond = ends_p[pmask]
     fx_cond = fx_ratio[pmask]                   # paired FX move for the SAME window
