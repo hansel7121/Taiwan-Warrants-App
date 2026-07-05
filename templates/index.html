@@ -910,6 +910,20 @@
           <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:18px 0 6px">Distribution of daily ADR premiums</p>
           <div id="us-prem-hist" style="width:100%;height:230px"></div>
 
+          <!-- FX factor (TWD/USD), isolated from the ADR premium -->
+          <div id="us-fx-section" style="display:none">
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin:24px 0 6px">
+              <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:0">FX — TWD/USD (the other basis)</p>
+              <span id="us-fx-latest" style="font-size:13px;color:var(--muted)"></span>
+            </div>
+            <p id="us-fx-caption" style="font-size:12px;color:var(--muted);margin:0 0 10px"></p>
+            <div id="us-fx-chart" style="width:100%;height:200px"></div>
+            <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:18px 0 6px">Distribution of daily FX moves — isolated from ADR premium (residual)</p>
+            <div id="us-fx-hist" style="width:100%;height:200px"></div>
+            <table id="us-fx-table" style="width:100%;border-collapse:collapse;font-size:13px;margin-top:14px"></table>
+            <div id="us-fx-note" style="background:var(--surface);border-radius:6px;padding:12px 14px;margin-top:12px;font-size:12px;color:var(--muted);line-height:1.6"></div>
+          </div>
+
           <!-- Conditional scenario EDA (the single EV, both US and TW/US tabs) -->
           <div id="us-scenario-section" style="display:none">
             <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:24px 0 8px">
@@ -1578,7 +1592,8 @@
       //
       // Regimes (spike / around-0 / drop) and their probabilities + conditional
       // mean premia come from the historical premium series (backend).
-      function _evPnlAtPremium(row, p, p0) {
+      function _evPnlAtPremium(row, p, p0, fxRatio) {
+        const fx = (fxRatio == null) ? 1 : fxRatio;   // F_exit / F_today on the US leg
         const isCall = row.warrant_type === "Call";
         const S0 = row.underlying_price, Kw = row.warrant_strike, Ko = row.opt_strike;
         const wEntry = row.warrant_per_share, oEntry = row.synthetic_price;
@@ -1599,7 +1614,10 @@
                           : intr(S, K);
         const wVal = legVal(S0, Kw, tauW, row.warrant_iv);
         const oVal = legVal(optSpot, Ko, tauO, row.opt_iv);
-        const perShare = dir * ((wVal - wEntry) + (oEntry - oVal));
+        // The US (opt) leg's P&L is in USD; it converts to TWD at the exit FX
+        // rate, so scale it by fxRatio = F_exit/F_today. The TW (warrant) leg is
+        // already TWD and unaffected.
+        const perShare = dir * ((wVal - wEntry) + fx * (oEntry - oVal));
         return perShare * shares;
       }
 
@@ -1690,6 +1708,7 @@
         const cap = document.getElementById("us-scenario-caption");
         const note = document.getElementById("us-scenario-note");
         tbl.innerHTML = ""; note.innerHTML = ""; cap.textContent = "loading…";
+        document.getElementById("us-fx-section").style.display = "none";
 
         // Trade closes at the first (nearest) expiry.
         const horizon = Math.max(1, Math.min(row.warrant_dte, row.opt_dte));
@@ -1722,14 +1741,15 @@
           <th style="${th};text-align:right">P × P&L</th>
         </tr></thead><tbody>`;
         s.regimes.forEach(r => {
-          // E[PnL | band] = average P&L over EACH day's premium that landed in
-          // this band (not P&L at the band mean) — correct because P&L is
-          // nonlinear in the premium (Jensen). Falls back to the mean if the
-          // per-sample premiums aren't available.
-          const samples = r.premiums && r.premiums.length ? r.premiums : null;
-          const pnl = samples
-            ? samples.reduce((sum, p) => sum + _evPnlAtPremium(row, p, p0), 0) / samples.length
-            : _evPnlAtPremium(row, r.cond_premium, p0);
+          // E[PnL | band] = average P&L over EACH conditioned window in this band,
+          // using BOTH its forward premium (US-put moneyness) AND its forward FX
+          // ratio (US-leg conversion) — jointly, so premium/FX correlation is
+          // captured. Nonlinear P&L => average the P&L, not P&L at the means.
+          const prem = r.premiums && r.premiums.length ? r.premiums : null;
+          const fxr = r.fx_ratios && r.fx_ratios.length ? r.fx_ratios : null;
+          const pnl = prem
+            ? prem.reduce((sum, p, i) => sum + _evPnlAtPremium(row, p, p0, fxr ? fxr[i] : 1), 0) / prem.length
+            : _evPnlAtPremium(row, r.cond_premium, p0, 1);
           const contrib = r.prob * pnl;
           ev += contrib;
           const col = pnl >= 0 ? "var(--put)" : "var(--call)";
@@ -1749,10 +1769,88 @@
         tbl.innerHTML = body;
 
         note.innerHTML =
-          `EV = Σ <code>P(band | start)</code> · <code>E[PnL | band, start]</code>, where <code>E[PnL|band]</code> is the P&L averaged over <b>every</b> conditioned day that landed in that band — not the P&L at the band's mean premium (they differ because P&L is nonlinear). `
-          + `Probabilities and premiums are the <b>empirical transition</b> of the ADR premium (which already embeds FX) from days near today's premium, ${row.warrant_dte < row.opt_dte ? row.warrant_dte : row.opt_dte} trading-horizon days out. `
-          + `"Exit premium" is shown as the band's mean for reference only. Best entry: current premium near 0 with positive EV. `
-          + `Horizon = min(TW ${row.warrant_dte}d, US ${row.opt_dte}d) = the first leg to expire.`;
+          `EV = Σ <code>P(band | start)</code> · <code>E[PnL | band, start]</code>, averaged jointly over each conditioned window's <b>forward premium AND forward FX</b> (so premium/FX correlation is baked in), not P&L at the band means. `
+          + `Probabilities/premiums are the <b>empirical transition</b> from days near today's premium, ${row.warrant_dte < row.opt_dte ? row.warrant_dte : row.opt_dte} trading-horizon days out. `
+          + `"Exit premium" is the band mean, reference only. Horizon = min(TW ${row.warrant_dte}d, US ${row.opt_dte}d).`;
+
+        renderFxSection(row, s, p0);
+      }
+
+      // FX (TWD/USD) factor + charts, isolated from the ADR premium.
+      function renderFxSection(row, s, p0) {
+        const sec = document.getElementById("us-fx-section");
+        if (!s.fx || !s.fx_series) { sec.style.display = "none"; return; }
+        sec.style.display = "block";
+        const fx = s.fx, ser = s.fx_series;
+
+        document.getElementById("us-fx-latest").innerHTML =
+          `Now: <b>${fx.current_fx.toFixed(3)}</b> TWD/USD · only <b>${(fx.unexplained_frac*100).toFixed(0)}%</b> of FX moves are unexplained by the ADR premium (corr ${fx.corr_with_premium.toFixed(2)})`;
+        document.getElementById("us-fx-caption").innerHTML =
+          `The US leg settles in USD and converts to TWD at exit, so FX is a second basis. It is <b>largely independent</b> of the ADR premium here, so it adds risk the premium regimes miss.`;
+
+        // FX level over time
+        Plotly.react("us-fx-chart", [
+          { x: ser.dates, y: ser.level, mode: "lines", line: { color: "#a78bfa", width: 1.3 },
+            hovertemplate: "%{x}<br>%{y:.3f} TWD/USD<extra></extra>" },
+        ], {
+          paper_bgcolor: "#13161f", plot_bgcolor: "#0d0f16",
+          font: { color: "#8b90a0", family: "Inter,system-ui,sans-serif", size: 11 },
+          xaxis: { gridcolor: "#252836", zerolinecolor: "#252836" },
+          yaxis: { title: "TWD/USD", gridcolor: "#252836", zerolinecolor: "#252836" },
+          margin: { l: 55, r: 10, t: 8, b: 30 }, showlegend: false,
+        }, { responsive: true });
+
+        // Residual daily FX moves (isolated from premium)
+        Plotly.react("us-fx-hist", [
+          { x: ser.resid_pct, type: "histogram", nbinsx: 60,
+            marker: { color: "rgba(167,139,250,0.5)", line: { color: "rgba(167,139,250,0.9)", width: 0.5 } },
+            hovertemplate: "resid FX %{x:.2f}%<br>count %{y}<extra></extra>" },
+        ], {
+          paper_bgcolor: "#13161f", plot_bgcolor: "#0d0f16",
+          font: { color: "#8b90a0", family: "Inter,system-ui,sans-serif", size: 11 },
+          xaxis: { title: "daily FX move not explained by premium (%)", gridcolor: "#252836", zerolinecolor: "#252836", ticksuffix: "%" },
+          yaxis: { title: "days", gridcolor: "#252836", zerolinecolor: "#252836" },
+          margin: { l: 55, r: 10, t: 10, b: 38 }, showlegend: false, bargap: 0.02,
+        }, { responsive: true });
+
+        // Which FX direction hurts this trade? Bump FX +1% and see P&L sign.
+        const base = _evPnlAtPremium(row, p0, p0, 1);
+        const bumped = _evPnlAtPremium(row, p0, p0, 1.01);
+        const upHelps = (bumped - base) >= 0;   // TWD weakening (fx>1) helps?
+        const againstDir = upHelps ? "down" : "up";   // the harmful move
+
+        const th = "padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--border)";
+        const td = "padding:7px 10px;border-bottom:1px solid var(--border);color:var(--text)";
+        const tdr = td + ";text-align:right;font-variant-numeric:tabular-nums";
+        const rowFx = (label, prob, meanPct, dirTag) => {
+          const fxRatio = 1 + meanPct / 100;
+          const pnl = _evPnlAtPremium(row, p0, p0, fxRatio);
+          const dPnl = pnl - base;
+          const against = dirTag && dirTag === againstDir;
+          const col = dPnl >= 0 ? "var(--put)" : "var(--call)";
+          return `<tr>
+            <td style="${td}">${label}${against ? ' <span style="color:var(--call);font-size:10px">◀ against you</span>' : ''}</td>
+            <td style="${tdr}">${(prob*100).toFixed(1)}%</td>
+            <td style="${tdr}">${meanPct>=0?"+":""}${meanPct.toFixed(2)}%</td>
+            <td style="${tdr};color:${col}">${dPnl>=0?"+":""}${Math.round(dPnl).toLocaleString()}</td>
+          </tr>`;
+        };
+        document.getElementById("us-fx-table").innerHTML = `
+          <thead><tr>
+            <th style="${th};text-align:left">FX by expiry (from ${fx.current_fx.toFixed(3)})</th>
+            <th style="${th};text-align:right">P (from here)</th>
+            <th style="${th};text-align:right">Mean move</th>
+            <th style="${th};text-align:right">Δ P&L vs flat FX</th>
+          </tr></thead><tbody>
+            ${rowFx("Stays (±0.5%)", fx.stay_prob, 0, null)}
+            ${rowFx("TWD weakens (FX up)", fx.up_prob, fx.up_mean_pct, "up")}
+            ${rowFx("TWD strengthens (FX down)", fx.down_prob, fx.down_mean_pct, "down")}
+          </tbody>`;
+
+        document.getElementById("us-fx-note").innerHTML =
+          `FX is isolated from the premium by regressing daily ΔFX on Δpremium; the histogram above is the <b>residual</b> (FX moves the premium can't explain — ${(fx.unexplained_frac*100).toFixed(0)}% of FX variance here). `
+          + `Probabilities condition on FX starting within ±${fx.cond_band_pct}% of today's rate, ${s.horizon_trading} trading days out (${fx.n} windows). `
+          + `The main EV table already folds FX in per-path; this panel isolates the standalone FX risk and flags the move that hurts you.`;
       }
 
       // ── Options Scanner ────────────────────────────────────────────────

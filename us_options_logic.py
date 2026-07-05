@@ -93,10 +93,12 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
     each end-regime plus each bucket's conditional-mean end premium — the inputs
     to a realistic "if premium is high now, what happens by expiry" EV.
     """
-    _, prem = _premium_series(stock_code, period)
-    p = prem.reset_index(drop=True)
+    df, prem = _premium_series(stock_code, period)
+    p = prem.values.astype(float)
+    F = df["fx"].values.astype(float)          # TWD per USD, aligned with premium
     n = len(p)
-    p0 = float(p.iloc[-1])
+    p0 = float(p[-1])
+    F0 = float(F[-1])
 
     # Trading-day horizon ≈ calendar days × (252/365).
     k = max(1, int(round(float(horizon_days) * 252.0 / 365.0)))
@@ -114,36 +116,83 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
                  "mid": f"Around 0 (|p| ≤ {int(PREM_THRESHOLD*100)}%)",
                  "lo": f"Drop < -{int(PREM_THRESHOLD*100)}%"}[cur]
 
-    starts = p.iloc[: n - k].reset_index(drop=True)
-    ends = p.iloc[k:].reset_index(drop=True)
+    starts_p = p[: n - k]
+    ends_p = p[k:]
+    fx_ratio = F[k:] / F[: n - k]              # F_exit / F_entry for each window
 
-    # Condition on history that STARTED near today's premium, then look k trading
-    # days ahead. Widen the band until enough samples; fall back to unconditional.
+    # ── Premium: condition on windows that STARTED near today's premium ──
     conditional = True
     band = None
     for b in (0.02, 0.04, 0.06):
-        mask = (starts - p0).abs() <= b
-        if int(mask.sum()) >= 30:
-            ends_cond = ends[mask.values]
+        m = np.abs(starts_p - p0) <= b
+        if int(m.sum()) >= 30:
+            pmask = m
             band = b
             break
     else:
-        ends_cond = ends
+        pmask = np.ones(len(starts_p), dtype=bool)
         conditional = False
+
+    ends_cond = ends_p[pmask]
+    fx_cond = fx_ratio[pmask]                   # paired FX move for the SAME window
 
     def bucket(mask, label):
         prob = float(mask.mean()) if len(mask) else 0.0
         cond = float(ends_cond[mask].mean()) if mask.any() else 0.0
-        # Every conditioned forward premium that landed in this band, so the
-        # frontend can average P&L over them (E[PnL|band]) rather than take
-        # PnL at the band mean — the two differ because P&L is nonlinear.
-        samples = [round(float(x), 6) for x in ends_cond[mask].tolist()]
-        return {"label": label, "prob": prob, "cond_premium": cond,
-                "premiums": samples}
+        # Paired (forward premium, forward FX ratio) for every conditioned window
+        # that landed in this band, so the frontend can average P&L jointly over
+        # premium AND FX (E[PnL|band]) — nonlinear, so not PnL at the means.
+        return {
+            "label": label, "prob": prob, "cond_premium": cond,
+            "premiums": [round(float(x), 6) for x in ends_cond[mask].tolist()],
+            "fx_ratios": [round(float(x), 6) for x in fx_cond[mask].tolist()],
+        }
 
     hi = ends_cond > PREM_THRESHOLD
     lo = ends_cond < -PREM_THRESHOLD
     mid = ~hi & ~lo
+
+    # ── FX orthogonalized against premium (how much FX is NOT explained by it) ──
+    rp = np.diff(np.log1p(p))
+    rf = np.diff(np.log(F))
+    if rp.std() > 0 and rf.std() > 0:
+        corr = float(np.corrcoef(rp, rf)[0, 1])
+        beta = float(np.cov(rf, rp)[0, 1] / np.var(rp))
+        resid = rf - (rf.mean() + beta * (rp - rp.mean()))
+    else:
+        corr, beta, resid = 0.0, 0.0, rf - rf.mean()
+    r2 = corr ** 2                             # shared variance fraction
+
+    # ── FX factor: condition on windows that STARTED near today's FX level ──
+    starts_f = F[: n - k]
+    fx_band = None
+    for fb in (0.01, 0.02, 0.03):
+        mf = np.abs(starts_f / F0 - 1.0) <= fb
+        if int(mf.sum()) >= 30:
+            fmask = mf
+            fx_band = fb
+            break
+    else:
+        fmask = np.ones(len(starts_f), dtype=bool)
+    fx_cond2 = fx_ratio[fmask]
+    stay = np.abs(fx_cond2 - 1.0) <= 0.005     # within ±0.5% = "stays"
+    up = fx_cond2 > 1.005                       # TWD weakens (more TWD per USD)
+    down = fx_cond2 < 0.995                      # TWD strengthens
+    fx_panel = {
+        "current_fx": round(F0, 4),
+        "cond_band_pct": round(fx_band * 100, 1) if fx_band is not None else None,
+        "n": int(len(fx_cond2)),
+        "stay_prob": float(stay.mean()),
+        "up_prob": float(up.mean()),
+        "down_prob": float(down.mean()),
+        "up_mean_pct": float((fx_cond2[up].mean() - 1) * 100) if up.any() else 0.0,
+        "down_mean_pct": float((fx_cond2[down].mean() - 1) * 100) if down.any() else 0.0,
+        # forward FX % move for every FX-conditioned window (for the modal)
+        "ratios_pct": [round(float((x - 1) * 100), 4) for x in fx_cond2.tolist()],
+        "r2_with_premium": round(r2, 4),        # coupling of FX & premium moves
+        "corr_with_premium": round(corr, 4),
+        "unexplained_frac": round(1 - r2, 4),   # FX variance NOT explained by premium
+    }
 
     return {
         "stock_code": stock_code,
@@ -160,6 +209,13 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
             bucket(mid, f"Around 0 (|p| ≤ {int(PREM_THRESHOLD*100)}%)"),
             bucket(lo, f"Drop < -{int(PREM_THRESHOLD*100)}%"),
         ],
+        "fx": fx_panel,
+        # Series for the FX charts (level over time + isolated residual moves).
+        "fx_series": {
+            "dates": [d.strftime("%Y-%m-%d") for d in df.index],
+            "level": [round(float(x), 4) for x in F.tolist()],
+            "resid_pct": [round(float(x) * 100, 4) for x in resid.tolist()],
+        },
     }
 
 
