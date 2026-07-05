@@ -1426,6 +1426,7 @@
           warrant_iv:       row.warrant_iv,
           opt_iv:           row.opt_iv,
           us_stock_code:    row.us_stock_code,
+          loose:            document.getElementById("usPositiveLoose").checked,
         };
         openArbModal(mapped, "us");
       }
@@ -1565,6 +1566,7 @@
           warrant_iv:       row.warrant_iv,
           opt_iv:           row.opt_iv,
           us_stock_code:    row.us_stock_code,
+          loose:            false,   // TW/US tab has no loose toggle (always executable)
         };
         openArbModal(mapped, "twus");
       }
@@ -1619,8 +1621,25 @@
         const legVal = (S, K, tau, iv) =>
           (tau > 0 && iv) ? (isCall ? bsCall(S, K, tau, R_FREE, iv) : bsPut(S, K, tau, R_FREE, iv))
                           : intr(S, K);
-        const wVal = legVal(S0, Kw, tauW, row.warrant_iv);
-        const oVal = legVal(optSpot, Ko, tauO, row.opt_iv);
+        let wVal = legVal(S0, Kw, tauW, row.warrant_iv);
+        let oVal = legVal(optSpot, Ko, tauO, row.opt_iv);
+
+        // Loose mode: price BOTH entry and exit at the favorable side of the
+        // spread (buy@bid, sell@ask). The entry already flips loose in the
+        // backend matcher; here we also unwind loose — sell the long (warrant)
+        // leg at its ask and buy back the short (option) leg at its bid, using
+        // today's half-spread as the exit-spread proxy. Only the tradeable
+        // positive direction (dir>0) has a loose toggle.
+        if (row.loose && dir > 0) {
+          const ratio = row.warrants_needed > 0 ? row.opt_contract_size / row.warrants_needed : 1;
+          const hw = (row.warrant_ask != null && row.warrant_bid != null)
+            ? (row.warrant_ask - row.warrant_bid) / 2 / ratio : 0;   // per-share
+          const ho = (row.opt_ask != null && row.opt_bid != null)
+            ? (row.opt_ask - row.opt_bid) / 2 : 0;                    // already per-share
+          wVal += hw;   // exit: sell the warrant at its ask
+          oVal -= ho;   // exit: buy back the option at its bid
+        }
+
         // The US (opt) leg's P&L is in USD; it converts to TWD at the exit FX
         // rate, so scale it by fxRatio = F_exit/F_today. The TW (warrant) leg is
         // already TWD and unaffected.
