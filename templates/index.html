@@ -629,7 +629,6 @@
 
           <div id="arb-sort-direct" class="sort-btns">
             <button onclick="sortArbBy('price_diff_pct', false)">Price Diff % ↓</button>
-            <button onclick="sortArbBy('iv_diff', false)">IV Diff ↓</button>
             <button onclick="sortArbBy('dte_diff', true)">DTE Diff ↑</button>
             <button onclick="sortArbBy('strike_diff_pct', true)">Strike Diff ↑</button>
           </div>
@@ -685,7 +684,6 @@
 
           <div class="sort-btns">
             <button onclick="sortUsBy('price_diff_pct', false)">Price Diff % ↓</button>
-            <button onclick="sortUsBy('iv_diff', false)">IV Diff ↓</button>
             <button onclick="sortUsBy('dte_diff', true)">DTE Diff ↑</button>
             <button onclick="sortUsBy('strike_diff_pct', true)">Strike Diff ↑</button>
           </div>
@@ -1340,17 +1338,24 @@
         renderUsTable(currentUsData);
       }
 
+      // IV is no longer computed for arb — hide those columns everywhere.
+      const HIDDEN_COLS = ["warrant_iv", "opt_iv", "iv_diff"];
+      // The US Option Match "us_stock_code" value is actually the TW stock code.
+      const COL_LABELS = { us_stock_code: "tw_stock_code" };
+      const visCols = (row) => Object.keys(row).filter(c => !HIDDEN_COLS.includes(c));
+      const colLabel = (c) => COL_LABELS[c] || c;
+
       function renderUsTable(rows) {
         const container = document.getElementById("us-tableContainer");
         if (!rows.length) {
           container.innerHTML = "<p style='padding:16px;color:var(--muted)'>No matches found. Try relaxing the thresholds.</p>";
           return;
         }
-        const cols = Object.keys(rows[0]);
+        const cols = visCols(rows[0]);
         let html = "<table><thead><tr>";
         cols.forEach((c, i) => {
           const arrow = usSortCol === i ? (usSortAsc ? " ▲" : " ▼") : "";
-          html += `<th onclick="sortUsByIndex(${i})">${c}${arrow}</th>`;
+          html += `<th onclick="sortUsByIndex(${i})">${colLabel(c)}${arrow}</th>`;
         });
         html += "</tr></thead><tbody>";
         rows.forEach((row, ri) => {
@@ -1374,7 +1379,7 @@
 
       function sortUsByIndex(colIndex) {
         if (!currentUsData.length) return;
-        const key = Object.keys(currentUsData[0])[colIndex];
+        const key = visCols(currentUsData[0])[colIndex];
         if (usSortCol === colIndex) usSortAsc = !usSortAsc;
         else { usSortCol = colIndex; usSortAsc = true; }
         currentUsData.sort((a, b) => {
@@ -1488,11 +1493,11 @@
           container.innerHTML = "<p style='padding:16px;color:var(--muted)'>No matches found. Try relaxing the thresholds.</p>";
           return;
         }
-        const cols = Object.keys(rows[0]);
+        const cols = visCols(rows[0]);
         let html = "<table><thead><tr>";
         cols.forEach((c, i) => {
           const arrow = twusSortCol === i ? (twusSortAsc ? " ▲" : " ▼") : "";
-          html += `<th onclick="sortTwUsByIndex(${i})">${c}${arrow}</th>`;
+          html += `<th onclick="sortTwUsByIndex(${i})">${colLabel(c)}${arrow}</th>`;
         });
         html += "</tr></thead><tbody>";
         rows.forEach((row, ri) => {
@@ -1512,7 +1517,7 @@
 
       function sortTwUsByIndex(colIndex) {
         if (!currentTwUsData.length) return;
-        const key = Object.keys(currentTwUsData[0])[colIndex];
+        const key = visCols(currentTwUsData[0])[colIndex];
         if (twusSortCol === colIndex) twusSortAsc = !twusSortAsc;
         else { twusSortCol = colIndex; twusSortAsc = true; }
         currentTwUsData.sort((a, b) => {
@@ -2080,11 +2085,11 @@
           container.innerHTML = "<p style='padding:16px;color:var(--muted)'>No matches found. Try relaxing the thresholds.</p>";
           return;
         }
-        const cols = Object.keys(rows[0]);
+        const cols = visCols(rows[0]);
         let html = "<table><thead><tr>";
         cols.forEach((c, i) => {
           const arrow = arbSortCol === i ? (arbSortAsc ? " ▲" : " ▼") : "";
-          html += `<th onclick="sortArbByIndex(${i})">${c}${arrow}</th>`;
+          html += `<th onclick="sortArbByIndex(${i})">${colLabel(c)}${arrow}</th>`;
         });
         html += "</tr></thead><tbody>";
         rows.forEach((row, ri) => {
@@ -2111,7 +2116,7 @@
 
       function sortArbByIndex(colIndex) {
         if (!currentArbData.length) return;
-        const key = Object.keys(currentArbData[0])[colIndex];
+        const key = visCols(currentArbData[0])[colIndex];
         if (arbSortCol === colIndex) arbSortAsc = !arbSortAsc;
         else { arbSortCol = colIndex; arbSortAsc = true; }
         currentArbData.sort((a, b) => {
@@ -2301,7 +2306,7 @@
         }
         const netCf = legs.reduce((s,l)=>s+l.cf, 0);
 
-        const actionColor = a => a==="BUY"||a==="LEND" ? "var(--call)" : "var(--put)";
+        const actionColor = a => (a==="BUY"||a==="LEND"||a==="BORROW") ? "var(--put)" : "var(--call)";
         let tbody = "";
         legs.forEach(l=>{
           tbody+=`<tr>
