@@ -32,11 +32,28 @@ app.config["TEMPLATES_AUTO_RELOAD"] = True
 app.jinja_env.auto_reload = True
 
 CUSTOM_STOCKS_FILE = os.path.join(base_dir, "custom_stocks.json")
+PORTFOLIO_FILE = os.path.join(base_dir, "portfolio.json")
 
 
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/get_portfolio")
+def get_portfolio():
+    if os.path.exists(PORTFOLIO_FILE):
+        with open(PORTFOLIO_FILE) as f:
+            return jsonify(json.load(f))
+    return jsonify([])
+
+
+@app.route("/save_portfolio", methods=["POST"])
+def save_portfolio():
+    trades = request.json
+    with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
+        json.dump(trades, f, ensure_ascii=False, indent=2)
+    return jsonify({"ok": True})
 
 
 @app.route("/get_custom_stocks")
