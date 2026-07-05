@@ -1798,17 +1798,22 @@
         fxBadge.style.background = up30 ? "rgba(74,222,128,0.15)" : "rgba(248,113,113,0.15)";
         fxBadge.style.color = up30 ? "var(--put)" : "var(--call)";
         document.getElementById("us-fx-caption").innerHTML =
-          `The US leg settles in USD and converts to TWD at exit, so FX is a second basis. It is <b>largely independent</b> of the ADR premium here, so it adds risk the premium regimes miss.`;
+          `The US leg settles in USD and converts to TWD at exit, so FX is a second basis. Line below = FX <b>isolated from the premium</b> (compounded residual moves, index=100) — the FX drift the ADR premium can't explain.`;
 
-        // FX level over time
+        // FX path ISOLATED from the premium: compound the residual daily moves
+        // (FX with the premium-explained component removed) into an index=100.
+        // resid_pct[i] corresponds to dates[i+1].
+        const isoDates = ser.dates.slice(1);
+        const iso = []; let lvl = 100;
+        (ser.resid_pct || []).forEach(r => { lvl *= (1 + r / 100); iso.push(lvl); });
         Plotly.react("us-fx-chart", [
-          { x: ser.dates, y: ser.level, mode: "lines", line: { color: "#a78bfa", width: 1.3 },
-            hovertemplate: "%{x}<br>%{y:.3f} TWD/USD<extra></extra>" },
+          { x: isoDates, y: iso, mode: "lines", line: { color: "#a78bfa", width: 1.3 },
+            hovertemplate: "%{x}<br>isolated FX index %{y:.2f}<extra></extra>" },
         ], {
           paper_bgcolor: "#13161f", plot_bgcolor: "#0d0f16",
           font: { color: "#8b90a0", family: "Inter,system-ui,sans-serif", size: 11 },
           xaxis: { gridcolor: "#252836", zerolinecolor: "#252836" },
-          yaxis: { title: "TWD/USD", gridcolor: "#252836", zerolinecolor: "#252836" },
+          yaxis: { title: "FX isolated (index=100)", gridcolor: "#252836", zerolinecolor: "#252836" },
           margin: { l: 55, r: 10, t: 8, b: 30 }, showlegend: false,
         }, { responsive: true });
 
