@@ -134,7 +134,12 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
     def bucket(mask, label):
         prob = float(mask.mean()) if len(mask) else 0.0
         cond = float(ends_cond[mask].mean()) if mask.any() else 0.0
-        return {"label": label, "prob": prob, "cond_premium": cond}
+        # Every conditioned forward premium that landed in this band, so the
+        # frontend can average P&L over them (E[PnL|band]) rather than take
+        # PnL at the band mean — the two differ because P&L is nonlinear.
+        samples = [round(float(x), 6) for x in ends_cond[mask].tolist()]
+        return {"label": label, "prob": prob, "cond_premium": cond,
+                "premiums": samples}
 
     hi = ends_cond > PREM_THRESHOLD
     lo = ends_cond < -PREM_THRESHOLD

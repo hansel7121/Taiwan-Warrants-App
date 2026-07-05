@@ -1766,7 +1766,14 @@
           <th style="${th};text-align:right">P × P&L</th>
         </tr></thead><tbody>`;
         s.regimes.forEach(r => {
-          const pnl = _evPnlAtPremium(row, r.cond_premium, p0);
+          // E[PnL | band] = average P&L over EACH day's premium that landed in
+          // this band (not P&L at the band mean) — correct because P&L is
+          // nonlinear in the premium (Jensen). Falls back to the mean if the
+          // per-sample premiums aren't available.
+          const samples = r.premiums && r.premiums.length ? r.premiums : null;
+          const pnl = samples
+            ? samples.reduce((sum, p) => sum + _evPnlAtPremium(row, p, p0), 0) / samples.length
+            : _evPnlAtPremium(row, r.cond_premium, p0);
           const contrib = r.prob * pnl;
           ev += contrib;
           const col = pnl >= 0 ? "var(--put)" : "var(--call)";
@@ -1786,9 +1793,9 @@
         tbl.innerHTML = body;
 
         note.innerHTML =
-          `This uses the <b>empirical transition</b> of the ADR premium (which already embeds FX), not just its unconditional frequency. `
-          + `If today's premium is stretched, the table shows the historical odds it reverts toward par by expiry and the P&L in each landing zone. `
-          + `Best entry: current premium near 0 with positive EV — you're not just short a stretched basis. `
+          `EV = Σ <code>P(band | start)</code> · <code>E[PnL | band, start]</code>, where <code>E[PnL|band]</code> is the P&L averaged over <b>every</b> conditioned day that landed in that band — not the P&L at the band's mean premium (they differ because P&L is nonlinear). `
+          + `Probabilities and premiums are the <b>empirical transition</b> of the ADR premium (which already embeds FX) from days near today's premium, ${row.warrant_dte < row.opt_dte ? row.warrant_dte : row.opt_dte} trading-horizon days out. `
+          + `"Exit premium" is shown as the band's mean for reference only. Best entry: current premium near 0 with positive EV. `
           + `Horizon = min(TW ${row.warrant_dte}d, US ${row.opt_dte}d) = the first leg to expire.`;
       }
 
