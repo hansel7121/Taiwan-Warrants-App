@@ -1650,9 +1650,16 @@
         const H = Math.max(1, Math.min(row.warrant_dte ?? 0, row.opt_dte ?? 0));
         const tauW = Math.max(0, (row.warrant_dte - H)) / 365;
         const tauO = Math.max(0, (row.opt_dte - H)) / 365;
-        const legVal = (S, K, tau, iv) =>
-          (tau > 0 && iv) ? (isCall ? bsCall(S, K, tau, R_FREE, iv) : bsPut(S, K, tau, R_FREE, iv))
-                          : intr(S, K);
+        // At the first expiry the near leg is done (settles intrinsic). The far
+        // (surviving) leg is unwound by rule: EXERCISE if ITM (take intrinsic),
+        // otherwise SELL it back to the market (its time value = BS value, since
+        // OTM intrinsic is 0). BS needs IV — if absent, fall back to intrinsic.
+        const legVal = (S, K, tau, iv) => {
+          const ix = intr(S, K);
+          if (tau <= 0) return ix;              // near leg: expired -> intrinsic
+          if (ix > 0) return ix;                // survivor ITM -> exercise
+          return iv ? (isCall ? bsCall(S, K, tau, R_FREE, iv) : bsPut(S, K, tau, R_FREE, iv)) : ix;  // OTM -> sell (time value)
+        };
         let wVal = legVal(S0, Kw, tauW, row.warrant_iv);
         let oVal = legVal(optSpot, Ko, tauO, row.opt_iv);
 

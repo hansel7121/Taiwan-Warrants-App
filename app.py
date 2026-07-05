@@ -312,7 +312,16 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             warrant_bid_val = float(w["bid"]) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else float(w["ask"])
             warrant_bid_per_share = round(warrant_bid_val / ratio, 4)
             warrants_needed = round(opt_contract_size / ratio)
-            warrant_iv = round(float(w["iv_ask"]), 4) if pd.notna(w.get("iv_ask")) else None
+            is_put = w["type"] == "Put"
+            # IV per leg (matched pair only, cheap) so the modal can mark an OTM
+            # surviving leg at its time value ("sell") — the fetch dropped IV.
+            if pd.notna(w.get("iv_ask")):
+                warrant_iv = round(float(w["iv_ask"]), 4)
+            else:
+                _wiv = warrant_logic.implied_vol(
+                    float(w["ask"]), float(w["underlying_price"]), float(w["strike"]),
+                    int(w["days_to_expiry"]) / 365.0, 0.02, ratio, is_put)
+                warrant_iv = round(float(_wiv), 4) if pd.notna(_wiv) and 0 < float(_wiv) <= 3 else None
             warrant_bid_disp = round(float(w["bid"]), 4) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else None
 
             # Emit EVERY profitable option for this warrant, not just the
@@ -361,7 +370,18 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                 else:
                     trade = "Buy Option / Sell Warrant"
 
-                opt_iv = round(float(opt["iv_bid"]), 4) if pd.notna(opt.get("iv_bid")) else None
+                if pd.notna(opt.get("iv_bid")):
+                    opt_iv = round(float(opt["iv_bid"]), 4)
+                else:
+                    _omid = None
+                    if pd.notna(opt.get("bid")) and pd.notna(opt.get("ask")) and float(opt["bid"]) > 0 and float(opt["ask"]) > 0:
+                        _omid = (float(opt["bid"]) + float(opt["ask"])) / 2
+                    elif pd.notna(opt.get("ask")) and float(opt["ask"]) > 0:
+                        _omid = float(opt["ask"])
+                    _oiv = warrant_logic.implied_vol(
+                        _omid, float(opt["underlying_price"]), float(opt["strike"]),
+                        int(opt["days_to_expiry"]) / 365.0, options_logic.R, 1.0, is_put) if _omid else None
+                    opt_iv = round(float(_oiv), 4) if (_oiv is not None and pd.notna(_oiv) and 0 < float(_oiv) <= 3) else None
 
                 rows.append({
                     "warrant_code": w["warrant_code"],
@@ -592,8 +612,8 @@ def _match_option_legs(tw_df, us_df, tw_contract_shares, us_contract_shares,
         us_iv = warrant_logic.implied_vol(
             us_mid, float(us["underlying_price"]), float(us["strike"]),
             int(us["days_to_expiry"]) / 365.0, us_options_logic.R_US, 1.0, is_put)
-        tw_iv = round(float(tw_iv), 4) if pd.notna(tw_iv) else None
-        us_iv = round(float(us_iv), 4) if pd.notna(us_iv) else None
+        tw_iv = round(float(tw_iv), 4) if pd.notna(tw_iv) and 0 < float(tw_iv) <= 3 else None
+        us_iv = round(float(us_iv), 4) if pd.notna(us_iv) and 0 < float(us_iv) <= 3 else None
 
         denom = exec_opt if exec_opt else 1
         rows.append({
