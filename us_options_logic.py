@@ -120,36 +120,42 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
     ends_p = p[k:]
     fx_ratio = F[k:] / F[: n - k]              # F_exit / F_entry for each window
 
-    # ── Premium: condition on windows that STARTED in today's regime ──
-    # (the band today's premium falls in: spike / around-0 / drop), then count
-    # where they land k days later. No proximity band — just the starting regime.
-    start_regime = np.array([regime_of(x) for x in starts_p])
-    pmask = start_regime == cur
-    if int(pmask.sum()) >= 1:
-        conditional = True
-    else:
-        pmask = np.ones(len(starts_p), dtype=bool)
-        conditional = False
+    # ── Premium: center on TODAY, use the UNCONDITIONAL move distribution ──
+    # Take every k-day forward premium *move* in history (not conditioned on the
+    # starting level), apply it to today's premium, and bucket by whether it
+    # carries premium more than ±5% beyond today (bigger drop / reverts) or stays.
+    moves = ends_p - starts_p                    # all k-day forward changes
+    ends_cond = p0 + moves                        # exit premium centered on today
+    fx_cond = fx_ratio                            # paired FX move per window
+    conditional = True
     band = None
-
-    ends_cond = ends_p[pmask]
-    fx_cond = fx_ratio[pmask]                   # paired FX move for the SAME window
 
     def bucket(mask, label):
         prob = float(mask.mean()) if len(mask) else 0.0
         cond = float(ends_cond[mask].mean()) if mask.any() else 0.0
-        # Paired (forward premium, forward FX ratio) for every conditioned window
-        # that landed in this band, so the frontend can average P&L jointly over
-        # premium AND FX (E[PnL|band]) — nonlinear, so not PnL at the means.
+        # Paired (exit premium, forward FX ratio) for every window in this bucket,
+        # so the frontend averages P&L jointly over premium AND FX (E[PnL|band]).
         return {
             "label": label, "prob": prob, "cond_premium": cond,
             "premiums": [round(float(x), 6) for x in ends_cond[mask].tolist()],
             "fx_ratios": [round(float(x), 6) for x in fx_cond[mask].tolist()],
         }
 
-    hi = ends_cond > PREM_THRESHOLD
-    lo = ends_cond < -PREM_THRESHOLD
-    mid = ~hi & ~lo
+    C = PREM_THRESHOLD                            # ±5% band around today
+    lo = moves < -C                               # drops >5% below today
+    hi = moves > C                                # rises >5% above today
+    mid = ~lo & ~hi                               # stays within ±5% of today
+    thr = int(C * 100)
+    if p0 < 0:
+        lo_lbl, mid_lbl, hi_lbl = (f"Bigger drop (≥{thr}% below now)",
+                                   f"Stays (±{thr}% of now)",
+                                   f"Reverts up (≥{thr}% above now)")
+    elif p0 > 0:
+        lo_lbl, mid_lbl, hi_lbl = (f"Reverts down (≥{thr}% below now)",
+                                   f"Stays (±{thr}% of now)",
+                                   f"Bigger spike (≥{thr}% above now)")
+    else:
+        lo_lbl, mid_lbl, hi_lbl = (f"Falls ≥{thr}%", f"Stays (±{thr}%)", f"Rises ≥{thr}%")
 
     # ── FX orthogonalized against premium (how much FX is NOT explained by it) ──
     rp = np.diff(np.log1p(p))
@@ -206,9 +212,9 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
         "band_pct": round(band * 100, 1) if band is not None else None,
         "n_samples": int(len(ends_cond)),
         "regimes": [
-            bucket(hi, f"Spike > +{int(PREM_THRESHOLD*100)}%"),
-            bucket(mid, f"Around 0 (|p| ≤ {int(PREM_THRESHOLD*100)}%)"),
-            bucket(lo, f"Drop < -{int(PREM_THRESHOLD*100)}%"),
+            bucket(lo, lo_lbl),
+            bucket(mid, mid_lbl),
+            bucket(hi, hi_lbl),
         ],
         "fx": fx_panel,
         # Series for the FX charts (level over time + isolated residual moves).
