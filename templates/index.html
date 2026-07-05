@@ -912,16 +912,21 @@
 
           <!-- FX factor (TWD/USD), isolated from the ADR premium -->
           <div id="us-fx-section" style="display:none">
-            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin:24px 0 6px">
+            <div style="border-top:1px solid var(--border);margin-top:24px;padding-top:20px"></div>
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:12px">
               <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:0">FX — TWD/USD (the other basis)</p>
-              <span id="us-fx-latest" style="font-size:13px;color:var(--muted)"></span>
+              <div style="display:flex;align-items:center;gap:10px">
+                <span style="font-size:12px;color:var(--muted)">Latest FX:</span>
+                <span id="us-fx-rate" style="font-size:18px;font-weight:700;font-variant-numeric:tabular-nums">—</span>
+                <span id="us-fx-badge" style="font-size:11px;padding:2px 8px;border-radius:10px"></span>
+              </div>
             </div>
             <p id="us-fx-caption" style="font-size:12px;color:var(--muted);margin:0 0 10px"></p>
             <div id="us-fx-chart" style="width:100%;height:200px"></div>
             <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:18px 0 6px">Distribution of daily FX moves — isolated from ADR premium (residual)</p>
             <div id="us-fx-hist" style="width:100%;height:200px"></div>
             <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:18px 0 6px">ADR premium change vs FX change (daily)</p>
-            <div id="us-fx-scatter" style="width:100%;height:230px"></div>
+            <div id="us-fx-scatter" style="width:100%;height:380px"></div>
             <table id="us-fx-table" style="width:100%;border-collapse:collapse;font-size:13px;margin-top:14px"></table>
             <div id="us-fx-note" style="background:var(--surface);border-radius:6px;padding:12px 14px;margin-top:12px;font-size:12px;color:var(--muted);line-height:1.6"></div>
           </div>
@@ -1786,8 +1791,12 @@
         const fx = s.fx, ser = s.fx_series;
 
         const chg30 = fx.chg_30d_pct ?? 0;
-        document.getElementById("us-fx-latest").innerHTML =
-          `Now: <b>${fx.current_fx.toFixed(3)}</b> TWD/USD · 30d <b style="color:${chg30>=0?'var(--put)':'var(--call)'}">${chg30>=0?"+":""}${chg30.toFixed(2)}%</b> · only <b>${(fx.unexplained_frac*100).toFixed(0)}%</b> of FX moves unexplained by ADR premium (corr ${fx.corr_with_premium.toFixed(2)})`;
+        document.getElementById("us-fx-rate").textContent = fx.current_fx.toFixed(3);
+        const fxBadge = document.getElementById("us-fx-badge");
+        fxBadge.textContent = `30d ${chg30>=0?"+":""}${chg30.toFixed(2)}%`;
+        const up30 = chg30 >= 0;
+        fxBadge.style.background = up30 ? "rgba(74,222,128,0.15)" : "rgba(248,113,113,0.15)";
+        fxBadge.style.color = up30 ? "var(--put)" : "var(--call)";
         document.getElementById("us-fx-caption").innerHTML =
           `The US leg settles in USD and converts to TWD at exit, so FX is a second basis. It is <b>largely independent</b> of the ADR premium here, so it adds risk the premium regimes miss.`;
 
@@ -1818,14 +1827,23 @@
 
         // Scatter: daily ADR-premium change vs daily FX change (the correlation).
         if (ser.dprem_pct && ser.dfx_pct) {
+          // Least-squares best-fit line ΔFX = a + b·Δprem over the plotted points.
+          const xs = ser.dprem_pct, ys = ser.dfx_pct, m = xs.length;
+          let sx=0, sy=0, sxx=0, sxy=0;
+          for (let i=0;i<m;i++){ sx+=xs[i]; sy+=ys[i]; sxx+=xs[i]*xs[i]; sxy+=xs[i]*ys[i]; }
+          const b = (m*sxy - sx*sy) / (m*sxx - sx*sx);
+          const a = (sy - b*sx) / m;
+          const xmin = Math.min(...xs), xmax = Math.max(...xs);
           Plotly.react("us-fx-scatter", [
             { x: ser.dprem_pct, y: ser.dfx_pct, mode: "markers", type: "scattergl",
-              marker: { color: "rgba(167,139,250,0.4)", size: 4 },
+              marker: { color: "rgba(167,139,250,0.4)", size: 4 }, name: "days",
               hovertemplate: "Δprem %{x:.2f}%<br>ΔFX %{y:.2f}%<extra></extra>" },
+            { x: [xmin, xmax], y: [a+b*xmin, a+b*xmax], mode: "lines", name: "best fit",
+              line: { color: "#f0abfc", width: 2 }, hoverinfo: "skip" },
           ], {
             paper_bgcolor: "#13161f", plot_bgcolor: "#0d0f16",
             font: { color: "#8b90a0", family: "Inter,system-ui,sans-serif", size: 11 },
-            title: { text: `corr = ${fx.corr_with_premium.toFixed(2)}  ·  R² = ${(fx.r2_with_premium*100).toFixed(0)}%`, font: { size: 11, color: "#8b90a0" }, x: 0, xanchor: "left" },
+            title: { text: `corr = ${fx.corr_with_premium.toFixed(2)}  ·  R² = ${(fx.r2_with_premium*100).toFixed(0)}%  ·  slope = ${b.toFixed(3)}`, font: { size: 11, color: "#8b90a0" }, x: 0, xanchor: "left" },
             xaxis: { title: "Δ ADR premium (%)", gridcolor: "#252836", zerolinecolor: "#3a3f52", ticksuffix: "%" },
             yaxis: { title: "Δ FX (%)", gridcolor: "#252836", zerolinecolor: "#3a3f52", ticksuffix: "%" },
             margin: { l: 55, r: 10, t: 28, b: 40 }, showlegend: false,
