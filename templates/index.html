@@ -910,11 +910,7 @@
           <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:18px 0 6px">Distribution of daily ADR premiums</p>
           <div id="us-prem-hist" style="width:100%;height:230px"></div>
 
-          <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:20px 0 8px">Expected Value (P&L at option expiry)</p>
-          <table id="us-ev-table" style="width:100%;border-collapse:collapse;font-size:13px"></table>
-          <div id="us-ev-formula" style="background:var(--surface);border-radius:6px;padding:12px 14px;margin-top:12px;font-size:12px;color:var(--muted);line-height:1.6"></div>
-
-          <!-- Conditional scenario EDA (TW-option / US-option tab only) -->
+          <!-- Conditional scenario EDA (the single EV, both US and TW/US tabs) -->
           <div id="us-scenario-section" style="display:none">
             <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:24px 0 8px">
               If you enter now — where does the premium land by expiry?</p>
@@ -1611,8 +1607,6 @@
         const setTxt = (id, t) => { document.getElementById(id).textContent = t; };
         setTxt("us-latest-prem", "…");
         document.getElementById("us-prem-flag").textContent = "";
-        document.getElementById("us-ev-table").innerHTML = "";
-        document.getElementById("us-ev-formula").innerHTML = "";
         Plotly.purge("us-prem-chart");
         Plotly.purge("us-prem-hist");
 
@@ -1624,7 +1618,7 @@
           });
           s = await res.json();
         } catch (e) { setTxt("us-latest-prem", "error"); return; }
-        if (s.error) { setTxt("us-latest-prem", "n/a"); document.getElementById("us-ev-formula").textContent = s.error; return; }
+        if (s.error) { setTxt("us-latest-prem", "n/a"); return; }
 
         // Latest premium badge
         const p0 = s.latest_premium;                 // fraction
@@ -1685,46 +1679,8 @@
           ],
         }, { responsive: true });
 
-        // Expected Value table over premium regimes
-        const th = "padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--border)";
-        const td = "padding:7px 10px;border-bottom:1px solid var(--border);color:var(--text)";
-        const tdr = td + ";text-align:right;font-variant-numeric:tabular-nums";
-        let ev = 0;
-        let body = `<thead><tr>
-          <th style="${th};text-align:left">Premium regime</th>
-          <th style="${th};text-align:right">P (hist)</th>
-          <th style="${th};text-align:right">Exit premium</th>
-          <th style="${th};text-align:right">Trade P&L</th>
-          <th style="${th};text-align:right">P × P&L</th>
-        </tr></thead><tbody>`;
-        s.regimes.forEach(r => {
-          const pnl = _evPnlAtPremium(row, r.cond_premium, p0);
-          const contrib = r.prob * pnl;
-          ev += contrib;
-          const col = pnl >= 0 ? "var(--put)" : "var(--call)";
-          body += `<tr>
-            <td style="${td}">${r.label}</td>
-            <td style="${tdr}">${(r.prob*100).toFixed(1)}%</td>
-            <td style="${tdr}">${(r.cond_premium*100>=0?"+":"")}${(r.cond_premium*100).toFixed(2)}%</td>
-            <td style="${tdr};color:${col}">${pnl>=0?"+":""}${Math.round(pnl).toLocaleString()}</td>
-            <td style="${tdr};color:${col}">${contrib>=0?"+":""}${Math.round(contrib).toLocaleString()}</td>
-          </tr>`;
-        });
-        const evCol = ev >= 0 ? "var(--put)" : "var(--call)";
-        body += `</tbody><tfoot><tr>
-          <td colspan="4" style="${td};font-weight:700;text-transform:uppercase;font-size:11px;letter-spacing:.4px;color:var(--muted)">Expected Value (NT$)</td>
-          <td style="${tdr};font-weight:700;font-size:14px;color:${evCol}">${ev>=0?"+":""}${Math.round(ev).toLocaleString()}</td>
-        </tr></tfoot>`;
-        document.getElementById("us-ev-table").innerHTML = body;
-
-        document.getElementById("us-ev-formula").innerHTML = `
-          <b>How this is derived</b><br>
-          Premium&nbsp;<code>p = (ADR_usd / ${s.adr_ratio} × FX) / local_price − 1</code>, measured daily over ${s.n} sessions (${s.period}).<br>
-          Regime probabilities <code>P</code> = historical frequency of each band; exit premium = that band's mean premium.<br>
-          Direction is delta-hedged (same underlying), so only the ADR basis varies:<br>
-          <code>PnL(p) = dir · [ (W_intrinsic(S₀,K_w) − W_entry) + (O_entry − O_intrinsic(S₀·(1+(p−p₀)), K_o)) ] · shares</code><br>
-          where <code>p₀ = ${(p0*100).toFixed(2)}%</code> (today), warrant settles on local S₀, option on ADR-implied S₀·(1+(p−p₀)).<br>
-          <code>EV = Σ P(regime) · PnL(regime mean premium)</code>. Positive EV with premium already ≈ 0 is the clean setup.`;
+        // (Unconditional EV table removed — the conditional "enter now" scenario
+        //  below is now the single EV, for both US Option Match and TW/US Opt.)
       }
 
       // Conditional "enter now" scenario: given today's premium, where does it
@@ -2290,13 +2246,9 @@
         const scenSection = document.getElementById("us-scenario-section");
         if ((mode === "us" || mode === "twus") && row.us_stock_code) {
           premSection.style.display = "block";
+          scenSection.style.display = "block";
           loadAdrPremium(row);
-          if (mode === "twus") {
-            scenSection.style.display = "block";
-            loadAdrScenario(row);
-          } else {
-            scenSection.style.display = "none";
-          }
+          loadAdrScenario(row);   // conditional EV — now the single EV for both tabs
         } else {
           premSection.style.display = "none";
           scenSection.style.display = "none";
