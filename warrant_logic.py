@@ -28,6 +28,13 @@ CMONEY_HEADERS = {
     "Referer": "https://www.cmoney.tw/finance/warrantsquery.aspx",
 }
 
+# Warrant-name abbreviations that differ from the registered security name.
+# Used only to widen the fetch prefilter; CommKey verification then confirms the
+# true underlying, so an over-broad alias is safe.
+WARRANT_NAME_ALIASES = {
+    "0050": ["台灣50"],   # 元大台灣50 ETF -> warrants named "台灣50..."
+}
+
 COL_ORDER = [
     "warrant_code",
     "warrant_name",
@@ -379,11 +386,18 @@ def fetch_warrants(
             continue
         name = stock_info.name
         name_matches = _make_matcher(name)
+        # Some underlyings appear in warrant names under an abbreviation that is
+        # not the registered security name (e.g. ETF 元大台灣50 -> "台灣50"). The
+        # authoritative CommKey check below drops any wrong-underlying strays, so
+        # the alias here only needs to be permissive enough to fetch them.
+        aliases = WARRANT_NAME_ALIASES.get(stock_code, [])
         codes = [
             k
             for k, v in twstock.codes.items()
             if "權證" in v.type
-            and (name_matches(v.name) or v.name.startswith(stock_code))
+            and (name_matches(v.name)
+                 or v.name.startswith(stock_code)
+                 or any(v.name.startswith(a) for a in aliases))
             and (name_filter is None or name_filter in v.name)
             and datetime.strptime(v.start, "%Y/%m/%d") <= today
         ]
