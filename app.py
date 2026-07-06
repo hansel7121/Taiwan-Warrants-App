@@ -19,6 +19,15 @@ import pandas as pd
 from scipy.interpolate import griddata
 
 base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+
+# User data (portfolio, custom stocks) must persist across runs. When frozen,
+# base_dir is a per-launch temp extraction dir (_MEIPASS) that is wiped each
+# run — writing data there loses it. Keep data next to the executable instead
+# (in dev this is the source dir). Templates/static still load from base_dir.
+if getattr(sys, "frozen", False):
+    data_dir = os.path.dirname(sys.executable)
+else:
+    data_dir = os.path.dirname(os.path.abspath(__file__))
 app = Flask(
     __name__,
     template_folder=os.path.join(base_dir, "templates"),
@@ -31,8 +40,8 @@ app.json.sort_keys = False
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 app.jinja_env.auto_reload = True
 
-CUSTOM_STOCKS_FILE = os.path.join(base_dir, "custom_stocks.json")
-PORTFOLIO_FILE = os.path.join(base_dir, "portfolio.json")
+CUSTOM_STOCKS_FILE = os.path.join(data_dir, "custom_stocks.json")
+PORTFOLIO_FILE = os.path.join(data_dir, "portfolio.json")
 
 
 @app.route("/")

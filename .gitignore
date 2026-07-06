@@ -4,3 +4,7 @@ build/
 __pycache__/
 *.pyc
 CLAUDE.md
+
+# user data — never commit / clobber
+portfolio.json
+custom_stocks.json
