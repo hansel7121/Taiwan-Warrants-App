@@ -886,7 +886,13 @@
     <div id="pcpModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
       <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;max-width:920px;margin:36px auto 60px;padding:28px;position:relative">
         <button onclick="closePcpModal()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
-        <button id="pcp-enter-trade" onclick="enterTrade()" style="position:absolute;top:16px;right:58px;background:var(--put);border:none;color:#0d0f16;border-radius:4px;padding:6px 14px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Enter Trade</button>
+        <div style="position:absolute;top:16px;right:58px;display:flex;align-items:center;gap:8px">
+          <label style="font-size:11px;color:var(--muted);font-weight:600">×
+            <input id="pcp-trade-mult" type="number" min="1" step="1" value="1" title="Number of times to place this trade (scales every leg, cash flow and P&L)"
+              style="width:52px;margin-left:4px;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:5px 6px;font-size:13px;font-family:inherit;text-align:right">
+          </label>
+          <button id="pcp-enter-trade" onclick="enterTrade()" style="background:var(--put);border:none;color:#0d0f16;border-radius:4px;padding:6px 14px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Enter Trade</button>
+        </div>
 
         <h2 id="pcp-modal-title" style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:20px"></h2>
 
@@ -2638,8 +2644,65 @@
           portfolioData = await res.json();
         } catch (e) { portfolioData = []; }
         await autoCloseTrades();
+        _basisCache = {};
+        await refreshBasis();
         renderPortfolio();
         renderPnlChart();
+      }
+
+      // Current ADR premium + FX per underlying, for the per-row "entry -> now"
+      // P&L. Fetched once per us_stock_code (endpoint is cached server-side).
+      let _basisCache = {};
+      async function refreshBasis() {
+        const codes = [...new Set(portfolioData
+          .filter(t => !t.closed && (t.mode === "us" || t.mode === "twus") && t.us_stock_code)
+          .map(t => t.us_stock_code))];
+        await Promise.all(codes.map(async code => {
+          if (code in _basisCache) return;
+          try {
+            const res = await fetch("/adr_premium_scenario", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ stock_code: code, horizon_days: 30 }),
+            });
+            const s = await res.json();
+            _basisCache[code] = s.error ? null : { p: s.current_premium, fx: (s.fx || {}).current_fx };
+          } catch (e) { _basisCache[code] = null; }
+        }));
+      }
+
+      // Entry-basis P&L (ADR & FX unmoved) vs P&L if unwound now at the live
+      // basis. For a closed trade, "now" is the booked realized P&L.
+      function _rowPnl(t) {
+        const r = t.row; if (!r) return null;
+        const mult = t.mult || 1;
+        const p0 = t.entry_premium ?? 0, fx0 = t.entry_fx ?? 1;
+        const base = _evPnlAtPremium(r, p0, p0, 1) * mult;
+        let now = base, live = false;
+        if (t.closed) { now = t.closed.realized_pnl; live = true; }
+        else if ((t.mode === "us" || t.mode === "twus") && t.us_stock_code) {
+          const b = _basisCache[t.us_stock_code];
+          if (b && b.p != null && b.fx != null) {
+            now = _evPnlAtPremium(r, b.p, p0, (fx0 && b.fx) ? b.fx / fx0 : 1) * mult;
+            live = true;
+          }
+        }
+        return { base, now, live };
+      }
+
+      // Two-point sparkline: entry-basis P&L (muted dot) -> now (colored dot).
+      function _sparkline(base, now) {
+        const w = 116, h = 30, pad = 5;
+        const lo = Math.min(0, base, now), hi = Math.max(0, base, now);
+        const span = (hi - lo) || 1;
+        const yOf = v => pad + (h - 2 * pad) * (1 - (v - lo) / span);
+        const x0 = pad, x1 = w - pad;
+        const col = now >= base ? "var(--put)" : "var(--call)";
+        return `<svg width="${w}" height="${h}" style="vertical-align:middle;overflow:visible">
+          <line x1="${x0}" y1="${yOf(0)}" x2="${x1}" y2="${yOf(0)}" stroke="var(--border)" stroke-dasharray="2 2"/>
+          <line x1="${x0}" y1="${yOf(base)}" x2="${x1}" y2="${yOf(now)}" stroke="${col}" stroke-width="1.5"/>
+          <circle cx="${x0}" cy="${yOf(base)}" r="2.5" fill="var(--muted)"/>
+          <circle cx="${x1}" cy="${yOf(now)}" r="3" fill="${col}"/>
+        </svg>`;
       }
 
       // The short (near-dated) leg's expiry, in ms. The trade realizes once now
@@ -2694,7 +2757,7 @@
           }
 
           const opts = { survivor, survivorSell };
-          const realized = _evPnlAtPremium(r, pClose, p0, fxRatio, opts);
+          const realized = _evPnlAtPremium(r, pClose, p0, fxRatio, opts) * (t.mult || 1);
           const method = _survivorExitMethod(r, survivor, shortDte, pClose, p0, survivorSell);
 
           t.closed = {
@@ -2786,13 +2849,17 @@
 
       function enterTrade() {
         if (!_pcpRow || !_pcpLegs) return;
+        // How many times to place this trade — scales every leg qty, cash flow
+        // and all downstream P&L. Stored as `mult` so P&L math can re-scale.
+        const mult = Math.max(1, Math.round(parseFloat(document.getElementById("pcp-trade-mult").value) || 1));
         const t = {
           id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
           ts: new Date().toISOString(),
           mode: _pcpMode,
           title: document.getElementById("pcp-modal-title").textContent,
-          legs: _pcpLegs.map(l => ({ action: l.action, instrument: l.instrument, qty: l.qty, price: l.price, cf: l.cf })),
-          net_cf: _pcpNetCf,
+          mult: mult,
+          legs: _pcpLegs.map(l => ({ action: l.action, instrument: l.instrument, qty: l.qty * mult, price: l.price, cf: l.cf * mult })),
+          net_cf: _pcpNetCf * mult,
           entry_premium: _pcpEntry ? _pcpEntry.premium : null,
           entry_fx: _pcpEntry ? _pcpEntry.fx : null,
           us_stock_code: _pcpRow.us_stock_code || null,
@@ -2819,12 +2886,24 @@
         status.textContent = `${portfolioData.length} trade${portfolioData.length>1?"s":""} · ${nClosed} closed`;
         const modeLabel = { direct: "Direct", us: "US Opt", twus: "TW/US Opt" };
         let html = "<table><thead><tr>"
-          + ["Entered","Type","Trade","Net premium (NT$)","Status","Realized P&L (NT$)",""].map(h=>`<th>${h}</th>`).join("")
+          + ["Entered","Type","×","Trade","Net premium (NT$)","P&L: entry → now","Status","Realized P&L (NT$)",""].map(h=>`<th>${h}</th>`).join("")
           + "</tr></thead><tbody>";
         portfolioData.forEach((t, i) => {
           const d = new Date(t.ts);
           const dstr = d.toLocaleString(undefined, { year:"2-digit", month:"short", day:"numeric", hour:"2-digit", minute:"2-digit" });
           const netCol = t.net_cf >= 0 ? "put" : "call";
+          // Per-row entry-basis -> now P&L sparkline.
+          const pp = _rowPnl(t);
+          let graphCell = "<span style='color:var(--muted)'>—</span>";
+          if (pp) {
+            const arrow = pp.live ? "→" : "· entry only";
+            const nowLbl = `<span class="${pp.now>=0?'put':'call'}">${pp.now>=0?"+":""}${Math.round(pp.now).toLocaleString()}</span>`;
+            const baseLbl = `<span style="color:var(--muted)">${pp.base>=0?"+":""}${Math.round(pp.base).toLocaleString()}</span>`;
+            graphCell = `<div style="display:flex;flex-direction:column;gap:1px" title="Entry-basis P&L (ADR & FX unmoved) vs ${t.closed?'realized at close':'P&L if unwound now at live ADR & FX'}">
+              ${_sparkline(pp.base, pp.now)}
+              <span style="font-size:10px;font-variant-numeric:tabular-nums">${baseLbl} ${arrow==='→'?'→':''} ${pp.live?nowLbl:"<span style='color:var(--muted);font-size:10px'>entry only</span>"}</span>
+            </div>`;
+          }
           let statusCell, pnlCell;
           if (t.closed) {
             const cd = new Date(t.closed.close_date).toLocaleDateString(undefined, { year:"2-digit", month:"short", day:"numeric" });
@@ -2841,8 +2920,10 @@
           html += `<tr style="cursor:pointer" onclick="openPortfolioDetail('${t.id}')" title="Click for detail">
             <td>${dstr}</td>
             <td>${modeLabel[t.mode] || t.mode}</td>
-            <td style="max-width:320px">${legsSummary(t.legs)}</td>
+            <td style="text-align:center;color:var(--muted)">${(t.mult||1)>1?"×"+(t.mult||1):""}</td>
+            <td style="max-width:300px">${legsSummary(t.legs)}</td>
             <td class="${netCol}">${t.net_cf>=0?"+":""}${Math.round(t.net_cf).toLocaleString()}</td>
+            <td>${graphCell}</td>
             <td>${statusCell}</td>
             <td style="text-align:right;font-variant-numeric:tabular-nums">${pnlCell}</td>
             <td style="text-align:right"><span style="color:var(--muted)">▸</span></td>
@@ -2939,9 +3020,11 @@
         const dFx = fx0 ? (curFx / fx0 - 1) * 100 : 0; // FX move, %
 
         // P&L at expiry at current basis, plus the premium-only / FX split.
-        const pnlNow = _evPnlAtPremium(row, curP, p0, fxRatio);
-        const pnlPremOnly = _evPnlAtPremium(row, curP, p0, 1);
-        const pnlEntry = _evPnlAtPremium(row, p0, p0, 1);
+        // Scaled by the trade multiplier (number of times placed).
+        const mult = t.mult || 1;
+        const pnlNow = _evPnlAtPremium(row, curP, p0, fxRatio) * mult;
+        const pnlPremOnly = _evPnlAtPremium(row, curP, p0, 1) * mult;
+        const pnlEntry = _evPnlAtPremium(row, p0, p0, 1) * mult;
         const fxEffect = pnlNow - pnlPremOnly;
         const premEffect = pnlPremOnly - pnlEntry;
 
