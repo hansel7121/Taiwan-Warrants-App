@@ -372,21 +372,21 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                 else candidates["strike"] <= w["strike"]
             )
 
-            # max_dte_diff only applies to the "unfavorable" side:
-            # Positive direction: risky when opt_dte > warrant_dte (warrant expires first,
-            #   leaving a naked short option). Cap max(0, opt_dte - warrant_dte) <= max_dte_diff.
-            #   Safe side (opt_dte <= warrant_dte) is unbounded.
-            # Negative direction: risky when warrant_dte > opt_dte (option expires first,
-            #   leaving a naked short warrant). Cap max(0, warrant_dte - opt_dte) <= max_dte_diff.
-            #   Safe side (opt_dte >= warrant_dte) is unbounded.
+            # Never hold the SHORT leg as the longer-dated one — the long
+            # (hedge) leg would expire first, leaving a naked short position.
+            #   Positive: short = option -> require opt_dte <= warrant_dte.
+            #   Negative: short = warrant -> require warrant_dte <= opt_dte,
+            #     with max_dte_diff bounding the remaining (safe) gap.
+            # The safe side (long leg outliving the short) is otherwise fine.
             if direction == "positive":
-                bad_dte = (candidates["days_to_expiry"] - w["days_to_expiry"]).clip(lower=0)
+                dte_ok = candidates["days_to_expiry"] <= w["days_to_expiry"]
             else:
                 bad_dte = (w["days_to_expiry"] - candidates["days_to_expiry"]).clip(lower=0)
+                dte_ok = bad_dte <= max_dte_diff
 
             candidates = candidates[
                 (candidates["strike_diff_pct"] <= max_strike_diff_pct)
-                & (bad_dte <= max_dte_diff)
+                & dte_ok
                 & strike_filter
             ]
             if candidates.empty:
