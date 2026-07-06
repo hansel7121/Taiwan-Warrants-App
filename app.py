@@ -526,7 +526,8 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
 
         try:
             opt_df = options_logic.fetch_options([code], option_type, min_days=1, compute_iv=False)
-            opt_df = opt_df[opt_df["is_live"]]
+            # Use the last bid/ask snapshot (falls back to settlement off-hours)
+            # so the arb finder works even when the market is closed.
             if min_volume > 0:
                 opt_df = opt_df[opt_df["volume"] >= min_volume]
         except Exception as e:
@@ -585,7 +586,6 @@ def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
 
         try:
             opt_df = us_options_logic.fetch_us_options(code, option_type, min_days=1, compute_iv=False)
-            opt_df = opt_df[opt_df["is_live"]]
             if min_volume > 0:
                 opt_df = opt_df[opt_df["volume"] >= min_volume]
         except Exception as e:
@@ -758,7 +758,6 @@ def _build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct, max_dt
 
         try:
             tw_df = options_logic.fetch_options([code], option_type, min_days=1, compute_iv=False)
-            tw_df = tw_df[tw_df["is_live"]]
             if min_volume > 0:
                 tw_df = tw_df[tw_df["volume"] >= min_volume]
         except Exception as e:
@@ -767,7 +766,6 @@ def _build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct, max_dt
 
         try:
             us_df = us_options_logic.fetch_us_options(code, option_type, min_days=1, compute_iv=False)
-            us_df = us_df[us_df["is_live"]]
             if min_volume > 0:
                 us_df = us_df[us_df["volume"] >= min_volume]
         except Exception as e:
