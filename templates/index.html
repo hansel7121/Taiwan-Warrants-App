@@ -85,6 +85,15 @@
         border-bottom-color: var(--accent);
       }
 
+      /* ── Portfolio sub-tabs ── */
+      .pfsub-btn {
+        background: none; border: none; border-bottom: 2px solid transparent;
+        color: var(--muted); font-family: inherit; font-size: 13px; font-weight: 600;
+        padding: 8px 14px; cursor: pointer; margin-bottom: -1px;
+      }
+      .pfsub-btn:hover { color: var(--text); }
+      .pfsub-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
       /* ── Main layout ── */
       .tab-content { display: none; }
       .tab-content.active { display: block; }
@@ -750,13 +759,30 @@
     <div id="tab-portfolio" class="tab-content">
       <main>
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
-          <span style="font-size:14px;font-weight:600;color:var(--text)">Portfolio — trades entered from Arb Finder</span>
+          <span style="font-size:14px;font-weight:600;color:var(--text)">Portfolio</span>
           <button class="sm" onclick="loadPortfolio()">Refresh</button>
+          <span id="portfolio-status" style="font-size:12px;color:var(--muted)"></span>
+          <span id="portfolio-realized" style="margin-left:auto;font-size:13px;font-weight:600"></span>
         </div>
-        <p style="font-size:12px;color:var(--muted);margin:0 0 14px">
-          Click <b>Enter Trade</b> in any arb trade popup to add a position here. Click a row to see how ADR premium &amp; FX have moved and the P&amp;L at expiry at the current basis.</p>
-        <div id="portfolio-status"></div>
-        <div id="portfolio-tableContainer"></div>
+
+        <!-- Sub-tabs: P&L equity curve | Trade History -->
+        <div style="display:flex;gap:6px;border-bottom:1px solid var(--border);margin-bottom:16px">
+          <button id="pfsub-btn-pnl"     class="pfsub-btn active" onclick="switchPfSub('pnl', this)">P&amp;L</button>
+          <button id="pfsub-btn-history" class="pfsub-btn"        onclick="switchPfSub('history', this)">Trade History</button>
+        </div>
+
+        <div id="pfsub-pnl" class="pfsub-content" style="display:block">
+          <p style="font-size:12px;color:var(--muted);margin:0 0 10px">
+            Cumulative <b>realized</b> P&amp;L. A trade realizes only after its short-dated leg expires; the surviving leg is then exercised or sold to market, whichever pays more. Active trades contribute nothing.</p>
+          <div id="portfolio-pnlChart" style="width:100%;height:420px"></div>
+          <div id="portfolio-pnlEmpty" style="display:none;padding:40px 16px;text-align:center;color:var(--muted)">No realized trades yet.</div>
+        </div>
+
+        <div id="pfsub-history" class="pfsub-content" style="display:none">
+          <p style="font-size:12px;color:var(--muted);margin:0 0 14px">
+            Every trade entered from Arb Finder. <b>Realized P&amp;L</b> fills in once the short leg has expired and the trade auto-closes. Click a row for detail.</p>
+          <div id="portfolio-tableContainer"></div>
+        </div>
       </main>
     </div>
 
@@ -1633,7 +1659,7 @@
       //
       // Regimes (spike / around-0 / drop) and their probabilities + conditional
       // mean premia come from the historical premium series (backend).
-      function _evPnlAtPremium(row, p, p0, fxRatio) {
+      function _evPnlAtPremium(row, p, p0, fxRatio, opts) {
         const fx = (fxRatio == null) ? 1 : fxRatio;   // F_exit / F_today on the US leg
         const isCall = row.warrant_type === "Call";
         const S0 = row.underlying_price, Kw = row.warrant_strike, Ko = row.opt_strike;
@@ -1654,14 +1680,21 @@
         // (surviving) leg is unwound by rule: EXERCISE if ITM (take intrinsic),
         // otherwise SELL it back to the market (its time value = BS value, since
         // OTM intrinsic is 0). BS needs IV — if absent, fall back to intrinsic.
-        const legVal = (S, K, tau, iv) => {
+        // Survivor unwind: ALWAYS compare EXERCISE (take intrinsic) against
+        // SELL to market and keep whichever pays more — selling captures time
+        // value, so it usually beats exercising even when ITM. Sell value =
+        // real market quote (mktSell) when we have one, else the BS value.
+        const legVal = (S, K, tau, iv, mktSell) => {
           const ix = intr(S, K);
-          if (tau <= 0) return ix;              // near leg: expired -> intrinsic
-          if (ix > 0) return ix;                // survivor ITM -> exercise
-          return iv ? (isCall ? bsCall(S, K, tau, R_FREE, iv) : bsPut(S, K, tau, R_FREE, iv)) : ix;  // OTM -> sell (time value)
+          if (tau <= 0) return ix;              // near leg: expired -> settles intrinsic
+          const bs = iv ? (isCall ? bsCall(S, K, tau, R_FREE, iv) : bsPut(S, K, tau, R_FREE, iv)) : ix;
+          const sell = (mktSell != null) ? mktSell : bs;
+          return Math.max(ix, sell);
         };
-        let wVal = legVal(S0, Kw, tauW, row.warrant_iv);
-        let oVal = legVal(optSpot, Ko, tauO, row.opt_iv);
+        const wSell = (opts && opts.survivor === "warrant") ? opts.survivorSell : null;
+        const oSell = (opts && opts.survivor === "option")  ? opts.survivorSell : null;
+        let wVal = legVal(S0, Kw, tauW, row.warrant_iv, wSell);
+        let oVal = legVal(optSpot, Ko, tauO, row.opt_iv, oSell);
 
         // Loose mode: price BOTH entry and exit at the favorable side of the
         // spread (buy@bid, sell@ask). The entry already flips loose in the
@@ -1669,7 +1702,7 @@
         // leg at its ask and buy back the short (option) leg at its bid, using
         // today's half-spread as the exit-spread proxy. Only the tradeable
         // positive direction (dir>0) has a loose toggle.
-        if (row.loose && dir > 0) {
+        if (row.loose && dir > 0 && !opts) {
           const ratio = row.warrants_needed > 0 ? row.opt_contract_size / row.warrants_needed : 1;
           const hw = (row.warrant_ask != null && row.warrant_bid != null)
             ? (row.warrant_ask - row.warrant_bid) / 2 / ratio : 0;   // per-share
@@ -2191,6 +2224,7 @@
           opt_strike:       row.opt_strike,
           strike_diff_pct:  row.strike_diff_pct,
           warrants_needed:  row.warrants_needed,
+          opt_contract_size:row.opt_contract_size,
           warrant_ask:      row.warrant_ask,
           warrant_bid:      row.warrant_bid,
           opt_bid:          row.opt_bid,
@@ -2588,12 +2622,154 @@
       // ── Portfolio ──────────────────────────────────────────────────────
       let portfolioData = [];
 
+      let _pfSub = "pnl";
+      function switchPfSub(sub, btn) {
+        _pfSub = sub;
+        document.querySelectorAll(".pfsub-content").forEach(el => el.style.display = "none");
+        document.querySelectorAll(".pfsub-btn").forEach(el => el.classList.remove("active"));
+        document.getElementById("pfsub-" + sub).style.display = "block";
+        btn.classList.add("active");
+        if (sub === "pnl") renderPnlChart();
+      }
+
       async function loadPortfolio() {
         try {
           const res = await fetch("/get_portfolio");
           portfolioData = await res.json();
         } catch (e) { portfolioData = []; }
+        await autoCloseTrades();
         renderPortfolio();
+        renderPnlChart();
+      }
+
+      // The short (near-dated) leg's expiry, in ms. The trade realizes once now
+      // is past this — the near leg has settled and the survivor can be closed.
+      function _shortExpiryMs(t) {
+        const r = t.row || {};
+        const shortDte = Math.min(r.warrant_dte ?? 0, r.opt_dte ?? 0);
+        return new Date(t.ts).getTime() + shortDte * 86400000;
+      }
+
+      // On load: for every open trade whose short leg has now expired, fetch the
+      // close basis + a live quote for the surviving leg and book realized P&L.
+      // Runs once per trade — t.closed is persisted so it never recomputes.
+      async function autoCloseTrades() {
+        let changed = false;
+        for (const t of portfolioData) {
+          if (t.closed) continue;
+          if (Date.now() < _shortExpiryMs(t)) continue;   // still active
+          const r = t.row || {};
+          const survivor = (r.warrant_dte ?? 0) >= (r.opt_dte ?? 0) ? "warrant" : "option";
+          const shortDte = Math.min(r.warrant_dte ?? 0, r.opt_dte ?? 0);
+          const optExpiryIso = new Date(new Date(t.ts).getTime() + (r.opt_dte ?? 0) * 86400000).toISOString();
+
+          let q = {};
+          try {
+            const res = await fetch("/close_quote", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                mode: t.mode, survivor,
+                warrant_code: r.warrant_code, us_stock_code: t.us_stock_code,
+                opt_type: r.opt_type, opt_strike: r.opt_strike, opt_expiry_iso: optExpiryIso,
+              }),
+            });
+            q = await res.json();
+          } catch (e) { q = {}; }
+
+          const p0 = t.entry_premium ?? 0, fx0 = t.entry_fx ?? 1;
+          const pClose  = (q.current_premium != null) ? q.current_premium : p0;
+          const fxClose = (q.current_fx != null) ? q.current_fx : fx0;
+          const fxRatio = (fx0 && fxClose) ? fxClose / fx0 : 1;
+
+          // Surviving leg's real sell value, normalized into the same per-share
+          // space _evPnlAtPremium values legs in (null => fall back to model BS).
+          let survivorSell = null, sellSource = "model";
+          if (survivor === "warrant" && q.warrant_bid) {
+            const ratio = r.warrants_needed > 0 ? r.opt_contract_size / r.warrants_needed : 1;
+            survivorSell = q.warrant_bid / ratio;
+            sellSource = "market";
+          } else if (survivor === "option" && q.opt_last_usd && q.adr_ratio) {
+            survivorSell = q.opt_last_usd / q.adr_ratio * fx0;   // entry-fx TWD/share
+            sellSource = "market";
+          }
+
+          const opts = { survivor, survivorSell };
+          const realized = _evPnlAtPremium(r, pClose, p0, fxRatio, opts);
+          const method = _survivorExitMethod(r, survivor, shortDte, pClose, p0, survivorSell);
+
+          t.closed = {
+            close_date: new Date(_shortExpiryMs(t)).toISOString(),
+            realized_pnl: realized,
+            exit_method: method,          // "sell" | "exercise"
+            surviving_leg: survivor,
+            sell_source: sellSource,      // "market" | "model"
+            p_close: pClose, fx_close: fxClose,
+          };
+          changed = true;
+        }
+        if (changed) await savePortfolio();
+      }
+
+      // Which unwind pays more for the surviving leg: exercise (intrinsic) or
+      // sell (market quote, else BS time value). Mirrors _evPnlAtPremium.legVal.
+      function _survivorExitMethod(r, survivor, shortDte, p, p0, mktSell) {
+        const isCall = r.warrant_type === "Call";
+        const intr = (S, K) => isCall ? Math.max(0, S - K) : Math.max(0, K - S);
+        let S, K, tau, iv;
+        if (survivor === "warrant") {
+          S = r.underlying_price; K = r.warrant_strike;
+          tau = Math.max(0, (r.warrant_dte - shortDte)) / 365; iv = r.warrant_iv;
+        } else {
+          S = r.underlying_price * (1 + (p - p0)); K = r.opt_strike;
+          tau = Math.max(0, (r.opt_dte - shortDte)) / 365; iv = r.opt_iv;
+        }
+        const ix = intr(S, K);
+        const bs = iv ? (isCall ? bsCall(S, K, tau, R_FREE, iv) : bsPut(S, K, tau, R_FREE, iv)) : ix;
+        const sell = (mktSell != null) ? mktSell : bs;
+        return sell > ix ? "sell" : "exercise";
+      }
+
+      // Cumulative realized-P&L equity curve over close dates.
+      function renderPnlChart() {
+        const empty = document.getElementById("portfolio-pnlEmpty");
+        const chart = document.getElementById("portfolio-pnlChart");
+        const closed = portfolioData
+          .filter(t => t.closed)
+          .sort((a, b) => new Date(a.closed.close_date) - new Date(b.closed.close_date));
+        const totalEl = document.getElementById("portfolio-realized");
+        if (!closed.length) {
+          empty.style.display = "block"; chart.style.display = "none";
+          Plotly.purge(chart);
+          totalEl.textContent = "";
+          return;
+        }
+        empty.style.display = "none"; chart.style.display = "block";
+        let cum = 0;
+        const x = [], y = [], text = [];
+        closed.forEach(t => {
+          cum += t.closed.realized_pnl;
+          x.push(new Date(t.closed.close_date));
+          y.push(cum);
+          text.push(`${t.title || t.mode}<br>trade P&L: ${t.closed.realized_pnl>=0?"+":""}${Math.round(t.closed.realized_pnl).toLocaleString()} NT$`);
+        });
+        totalEl.textContent = `Realized: ${cum>=0?"+":""}${Math.round(cum).toLocaleString()} NT$`;
+        totalEl.style.color = cum >= 0 ? "var(--put)" : "var(--call)";
+        const css = getComputedStyle(document.documentElement);
+        const accent = css.getPropertyValue("--accent").trim() || "#5b9bd5";
+        const muted = css.getPropertyValue("--muted").trim() || "#888";
+        Plotly.react(chart, [{
+          x, y, text, mode: "lines+markers", type: "scatter",
+          line: { color: accent, width: 2, shape: "hv" },
+          marker: { size: 7, color: accent },
+          hovertemplate: "%{x|%Y-%m-%d}<br>cumulative: %{y:,.0f} NT$<br>%{text}<extra></extra>",
+        }], {
+          margin: { l: 64, r: 20, t: 10, b: 40 },
+          paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
+          font: { color: muted, size: 11 },
+          xaxis: { gridcolor: "rgba(128,128,128,0.15)", zeroline: false },
+          yaxis: { title: "Cumulative realized P&L (NT$)", gridcolor: "rgba(128,128,128,0.15)", zerolinecolor: "rgba(128,128,128,0.4)" },
+          shapes: [{ type: "line", xref: "paper", x0: 0, x1: 1, y0: 0, y1: 0, line: { color: muted, width: 1, dash: "dot" } }],
+        }, { displayModeBar: false, responsive: true });
       }
 
       async function savePortfolio() {
@@ -2639,24 +2815,36 @@
           status.textContent = "";
           return;
         }
-        status.textContent = `${portfolioData.length} trade${portfolioData.length>1?"s":""}`;
+        const nClosed = portfolioData.filter(t => t.closed).length;
+        status.textContent = `${portfolioData.length} trade${portfolioData.length>1?"s":""} · ${nClosed} closed`;
         const modeLabel = { direct: "Direct", us: "US Opt", twus: "TW/US Opt" };
         let html = "<table><thead><tr>"
-          + ["Entered","Type","Trade","Net premium (NT$)","Entry ADR prem","Entry FX",""].map(h=>`<th>${h}</th>`).join("")
+          + ["Entered","Type","Trade","Net premium (NT$)","Status","Realized P&L (NT$)",""].map(h=>`<th>${h}</th>`).join("")
           + "</tr></thead><tbody>";
         portfolioData.forEach((t, i) => {
           const d = new Date(t.ts);
           const dstr = d.toLocaleString(undefined, { year:"2-digit", month:"short", day:"numeric", hour:"2-digit", minute:"2-digit" });
-          const prem = t.entry_premium != null ? (t.entry_premium*100>=0?"+":"") + (t.entry_premium*100).toFixed(2) + "%" : "—";
-          const fx = t.entry_fx != null ? t.entry_fx.toFixed(3) : "—";
           const netCol = t.net_cf >= 0 ? "put" : "call";
+          let statusCell, pnlCell;
+          if (t.closed) {
+            const cd = new Date(t.closed.close_date).toLocaleDateString(undefined, { year:"2-digit", month:"short", day:"numeric" });
+            const method = t.closed.exit_method === "sell" ? "sold" : "exercised";
+            const src = t.closed.sell_source === "market" ? "" : " <span style='color:var(--muted);font-size:10px'>(model)</span>";
+            statusCell = `<span style="color:var(--muted)">closed ${cd}<br><span style="font-size:10px">survivor ${method}${src}</span></span>`;
+            const v = t.closed.realized_pnl;
+            pnlCell = `<span class="${v>=0?"put":"call"}" style="font-weight:600">${v>=0?"+":""}${Math.round(v).toLocaleString()}</span>`;
+          } else {
+            const daysLeft = Math.ceil((_shortExpiryMs(t) - Date.now()) / 86400000);
+            statusCell = `<span style="color:var(--accent)">active</span><br><span style="font-size:10px;color:var(--muted)">short leg ${daysLeft}d</span>`;
+            pnlCell = `<span style="color:var(--muted)">—</span>`;
+          }
           html += `<tr style="cursor:pointer" onclick="openPortfolioDetail('${t.id}')" title="Click for detail">
             <td>${dstr}</td>
             <td>${modeLabel[t.mode] || t.mode}</td>
-            <td style="max-width:340px">${legsSummary(t.legs)}</td>
+            <td style="max-width:320px">${legsSummary(t.legs)}</td>
             <td class="${netCol}">${t.net_cf>=0?"+":""}${Math.round(t.net_cf).toLocaleString()}</td>
-            <td>${prem}</td>
-            <td>${fx}</td>
+            <td>${statusCell}</td>
+            <td style="text-align:right;font-variant-numeric:tabular-nums">${pnlCell}</td>
             <td style="text-align:right"><span style="color:var(--muted)">▸</span></td>
           </tr>`;
         });
@@ -2700,6 +2888,29 @@
 
         document.getElementById("pf-body").innerHTML = body + `<div id="pf-basis" style="margin-top:22px;color:var(--muted);font-size:12px">Loading current basis…</div>`;
         document.getElementById("portfolioModal").style.display = "block";
+
+        // Closed trade: show the booked realized P&L instead of a live basis.
+        if (t.closed) {
+          const cl = t.closed;
+          const v = cl.realized_pnl;
+          const money = x => `<span style="color:${x>=0?'var(--put)':'var(--call)'}">${x>=0?"+":""}${Math.round(x).toLocaleString()}</span>`;
+          const method = cl.exit_method === "sell" ? "sold to market" : "exercised (cash settled)";
+          const src = cl.sell_source === "market" ? "live market quote" : "Black-Scholes model value (no live quote available)";
+          document.getElementById("pf-sub").textContent =
+            `Entered ${new Date(t.ts).toLocaleDateString()} · closed ${new Date(cl.close_date).toLocaleDateString()}`;
+          document.getElementById("pf-basis").innerHTML = `
+            <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:0 0 8px">Realized P&L</p>
+            <table style="width:100%;border-collapse:collapse;font-size:13px"><tbody>
+              <tr><td style="${td}">Short (near) leg</td><td style="${tdr};color:var(--muted)">expired, settled at intrinsic</td></tr>
+              <tr><td style="${td}">Surviving ${cl.surviving_leg} leg</td><td style="${tdr}">${method}</td></tr>
+              <tr><td style="${td}">Sell value source</td><td style="${tdr};color:var(--muted)">${src}</td></tr>
+              <tr><td style="${td};font-weight:700;text-transform:uppercase;font-size:11px;letter-spacing:.4px;color:var(--muted)">Realized P&L (NT$)</td><td style="${tdr};font-weight:700;font-size:15px">${money(v)}</td></tr>
+            </tbody></table>
+            <div style="background:var(--surface);border-radius:6px;padding:12px 14px;margin-top:12px;font-size:12px;color:var(--muted);line-height:1.6">
+              Booked when the short leg expired. The surviving leg was valued at whichever paid more — exercise (intrinsic) vs sell to market — using the ${cl.sell_source==="market"?"live":"model"} value at close. Premium/FX at close: ${cl.p_close!=null?(cl.p_close*100).toFixed(2)+"%":"—"} / ${cl.fx_close!=null?cl.fx_close.toFixed(3):"—"}.
+            </div>`;
+          return;
+        }
 
         // Direct Match: no ADR/FX basis.
         if (t.mode === "direct" || !t.us_stock_code || t.entry_premium == null) {

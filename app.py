@@ -56,6 +56,93 @@ def save_portfolio():
     return jsonify({"ok": True})
 
 
+def _us_option_last(us_code, opt_type, strike_twd, expiry_iso, fx, adr_ratio):
+    """Last traded price (USD per ADR) of the surviving US option leg.
+
+    Matches the ADR option chain by nearest expiry then nearest strike. The
+    stored strike is TWD-per-TW-share, so it is converted back to a USD/ADR
+    strike (× adr_ratio ÷ FX) before matching. Returns None if anything is
+    missing so the caller can fall back to a model value.
+    """
+    import yfinance as yf
+    cfg = us_options_logic.US_ADR_MAP.get(us_code)
+    if not cfg or not fx or not adr_ratio or strike_twd <= 0:
+        return None
+    strike_usd = strike_twd * adr_ratio / fx
+    tk = yf.Ticker(cfg["adr_ticker"])
+    exps = tk.options
+    if not exps:
+        return None
+    if expiry_iso:
+        target = pd.Timestamp(expiry_iso).normalize()
+        exp = min(exps, key=lambda e: abs((pd.Timestamp(e) - target).days))
+    else:
+        exp = exps[0]
+    chain = tk.option_chain(exp)
+    leg = chain.calls if str(opt_type).lower().startswith("c") else chain.puts
+    if leg is None or leg.empty:
+        return None
+    row = leg.iloc[(leg["strike"] - strike_usd).abs().argmin()]
+    last = float(row.get("lastPrice") or 0)
+    return last if last > 0 else None
+
+
+@app.route("/close_quote", methods=["POST"])
+def close_quote():
+    """Current market inputs used to book a trade's realized P&L at close.
+
+    Returns the live ADR premium / FX (basis for the option leg) and a real
+    market quote for the *surviving* (long-dated) leg where one can be fetched:
+    a warrant's current bid from CMoney, or a US ADR option's last price from
+    yfinance. Anything else falls back to source="model" and the frontend
+    values that leg with Black-Scholes instead. The near (expired) leg always
+    settles at intrinsic, so it needs no quote here.
+    """
+    d = request.json or {}
+    mode = d.get("mode")
+    survivor = d.get("survivor")
+    us_code = d.get("us_stock_code")
+    out = {
+        "ok": True, "survivor": survivor, "source": "model",
+        "current_premium": None, "current_fx": None, "adr_ratio": None,
+        "warrant_bid": None, "opt_last_usd": None,
+    }
+
+    # Live ADR premium + FX drive the option leg for US / TW-US trades.
+    if mode in ("us", "twus") and us_code:
+        try:
+            s = us_options_logic.adr_premium_scenario(us_code, 30)
+            out["current_premium"] = s.get("current_premium")
+            out["current_fx"] = (s.get("fx") or {}).get("current_fx")
+            out["adr_ratio"] = us_options_logic.US_ADR_MAP.get(us_code, {}).get("adr_ratio")
+        except Exception:
+            pass
+
+    try:
+        if survivor == "warrant" and mode in ("direct", "us"):
+            # A real warrant (not a TW option): CMoney has a live bid.
+            code = d.get("warrant_code")
+            res = warrant_logic.get_cmoney_prices([code]) if code else {}
+            w = (res.get(code) or {}).get("Warrant") if res else None
+            if w:
+                bid = float(w.get("BuyPr1") or 0)
+                if bid > 0:
+                    out["warrant_bid"] = bid
+                    out["source"] = "market"
+        elif survivor == "option" and mode in ("us", "twus") and us_code:
+            last = _us_option_last(
+                us_code, d.get("opt_type"), float(d.get("opt_strike") or 0),
+                d.get("opt_expiry_iso"), out["current_fx"], out["adr_ratio"],
+            )
+            if last:
+                out["opt_last_usd"] = last
+                out["source"] = "market"
+    except Exception:
+        pass
+
+    return jsonify(out)
+
+
 @app.route("/get_custom_stocks")
 def get_custom_stocks():
     if os.path.exists(CUSTOM_STOCKS_FILE):
