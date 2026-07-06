@@ -996,6 +996,10 @@
         <button id="pf-delete" style="position:absolute;top:16px;right:58px;background:var(--call);border:none;color:#0d0f16;border-radius:4px;padding:6px 14px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Delete</button>
         <h2 id="pf-title" style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:6px"></h2>
         <p id="pf-sub" style="font-size:12px;color:var(--muted);margin:0 0 20px"></p>
+        <div id="pf-payoff-wrap" style="display:none;margin-bottom:22px">
+          <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:0 0 8px">P&amp;L curve at expiry — entry basis vs now</p>
+          <div id="pf-payoff-chart" style="width:100%;height:340px"></div>
+        </div>
         <div id="pf-body"></div>
       </div>
     </div>
@@ -2644,65 +2648,72 @@
           portfolioData = await res.json();
         } catch (e) { portfolioData = []; }
         await autoCloseTrades();
-        _basisCache = {};
-        await refreshBasis();
         renderPortfolio();
         renderPnlChart();
       }
 
-      // Current ADR premium + FX per underlying, for the per-row "entry -> now"
-      // P&L. Fetched once per us_stock_code (endpoint is cached server-side).
-      let _basisCache = {};
-      async function refreshBasis() {
-        const codes = [...new Set(portfolioData
-          .filter(t => !t.closed && (t.mode === "us" || t.mode === "twus") && t.us_stock_code)
-          .map(t => t.us_stock_code))];
-        await Promise.all(codes.map(async code => {
-          if (code in _basisCache) return;
-          try {
-            const res = await fetch("/adr_premium_scenario", {
-              method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ stock_code: code, horizon_days: 30 }),
-            });
-            const s = await res.json();
-            _basisCache[code] = s.error ? null : { p: s.current_premium, fx: (s.fx || {}).current_fx };
-          } catch (e) { _basisCache[code] = null; }
-        }));
+      // Terminal (at-expiry) P&L of the whole position for a given underlying
+      // spot S, at premium p / FX ratio — mirrors _evPnlAtPremium but both legs
+      // settle at intrinsic and S is swept. The ADR premium shifts the option
+      // leg's spot (S*(1+(p-p0))) and FX scales its TWD value. Entry-basis curve
+      // uses p=p0, fxRatio=1; current-basis curve uses live premium/FX.
+      function _payoffAtSpot(row, S, p, p0, fxRatio, mult) {
+        const isCall = row.warrant_type === "Call";
+        const intr = (x, K) => isCall ? Math.max(0, x - K) : Math.max(0, K - x);
+        const shares = row.opt_contract_size;
+        const dir = row.pcp_diff >= 0 ? 1 : -1;
+        const wEntry = row.warrant_per_share, oEntry = row.synthetic_price;
+        const Kw = row.warrant_strike, Ko = row.opt_strike;
+        const optSpot = S * (1 + (p - p0));
+        const perShare = dir * ((intr(S, Kw) - wEntry) + fxRatio * (oEntry - intr(optSpot, Ko)));
+        return perShare * shares * (mult || 1);
       }
 
-      // Entry-basis P&L (ADR & FX unmoved) vs P&L if unwound now at the live
-      // basis. For a closed trade, "now" is the booked realized P&L.
-      function _rowPnl(t) {
-        const r = t.row; if (!r) return null;
+      // Payoff-curve chart in the trade-detail popup: P&L at expiry across spot,
+      // one line at entry basis (ADR & FX unmoved) and one at the current basis.
+      function renderPfPayoff(t, curP, curFx) {
+        const r = t.row;
+        const wrap = document.getElementById("pf-payoff-wrap");
+        const chart = document.getElementById("pf-payoff-chart");
+        if (!r || r.warrant_strike == null || r.opt_strike == null || r.underlying_price == null) {
+          wrap.style.display = "none"; Plotly.purge(chart); return;
+        }
         const mult = t.mult || 1;
         const p0 = t.entry_premium ?? 0, fx0 = t.entry_fx ?? 1;
-        const base = _evPnlAtPremium(r, p0, p0, 1) * mult;
-        let now = base, live = false;
-        if (t.closed) { now = t.closed.realized_pnl; live = true; }
-        else if ((t.mode === "us" || t.mode === "twus") && t.us_stock_code) {
-          const b = _basisCache[t.us_stock_code];
-          if (b && b.p != null && b.fx != null) {
-            now = _evPnlAtPremium(r, b.p, p0, (fx0 && b.fx) ? b.fx / fx0 : 1) * mult;
-            live = true;
-          }
+        const S0 = r.underlying_price, Kw = r.warrant_strike, Ko = r.opt_strike;
+        const lo0 = Math.min(S0, Kw, Ko), hi0 = Math.max(S0, Kw, Ko);
+        const pad = Math.max((hi0 - lo0) * 0.25, S0 * 0.15);
+        const lo = Math.max(0, lo0 - pad), hi = hi0 + pad, n = 160;
+        const haveNow = curP != null && curFx != null;
+        const fxRatioNow = (fx0 && curFx) ? curFx / fx0 : 1;
+        const spots = [], entry = [], now = [];
+        for (let i = 0; i <= n; i++) {
+          const S = lo + (hi - lo) * i / n;
+          spots.push(parseFloat(S.toFixed(2)));
+          entry.push(Math.round(_payoffAtSpot(r, S, p0, p0, 1, mult)));
+          if (haveNow) now.push(Math.round(_payoffAtSpot(r, S, curP, p0, fxRatioNow, mult)));
         }
-        return { base, now, live };
-      }
-
-      // Two-point sparkline: entry-basis P&L (muted dot) -> now (colored dot).
-      function _sparkline(base, now) {
-        const w = 116, h = 30, pad = 5;
-        const lo = Math.min(0, base, now), hi = Math.max(0, base, now);
-        const span = (hi - lo) || 1;
-        const yOf = v => pad + (h - 2 * pad) * (1 - (v - lo) / span);
-        const x0 = pad, x1 = w - pad;
-        const col = now >= base ? "var(--put)" : "var(--call)";
-        return `<svg width="${w}" height="${h}" style="vertical-align:middle;overflow:visible">
-          <line x1="${x0}" y1="${yOf(0)}" x2="${x1}" y2="${yOf(0)}" stroke="var(--border)" stroke-dasharray="2 2"/>
-          <line x1="${x0}" y1="${yOf(base)}" x2="${x1}" y2="${yOf(now)}" stroke="${col}" stroke-width="1.5"/>
-          <circle cx="${x0}" cy="${yOf(base)}" r="2.5" fill="var(--muted)"/>
-          <circle cx="${x1}" cy="${yOf(now)}" r="3" fill="${col}"/>
-        </svg>`;
+        const traces = [{ x: [lo, hi], y: [0, 0], mode: "lines",
+          line: { color: "rgba(255,255,255,0.15)", dash: "dash", width: 1 }, showlegend: false, hoverinfo: "skip" }];
+        traces.push({ x: spots, y: entry, mode: "lines", name: "At entry (ADR & FX unmoved)",
+          line: { color: "#8b90a0", width: 2, dash: "dot" },
+          hovertemplate: "Spot %{x:,.0f}<br>entry: %{y:+,.0f} NT$<extra></extra>" });
+        if (haveNow) traces.push({ x: spots, y: now, mode: "lines", name: "Now (current ADR & FX)",
+          line: { color: "#4ade80", width: 2.5 },
+          hovertemplate: "Spot %{x:,.0f}<br>now: %{y:+,.0f} NT$<extra></extra>" });
+        const markPnl = Math.round(_payoffAtSpot(r, S0, haveNow ? curP : p0, p0, haveNow ? fxRatioNow : 1, mult));
+        traces.push({ x: [S0], y: [markPnl], mode: "markers", name: "Current spot",
+          marker: { color: "white", size: 7 },
+          hovertemplate: "Current spot %{x:,.0f}<br>P&L: %{y:+,.0f} NT$<extra></extra>" });
+        wrap.style.display = "block";
+        Plotly.react(chart, traces, {
+          paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
+          font: { color: "#8b90a0", size: 11 },
+          xaxis: { title: `Spot (NT$) — ${r.warrant_name || ""}`, gridcolor: "#252836", zerolinecolor: "#252836", tickformat: "," },
+          yaxis: { title: "P&L at expiry (NT$)", gridcolor: "#252836", zerolinecolor: "#252836", tickformat: "+," },
+          legend: { orientation: "h", y: 1.14, bgcolor: "rgba(0,0,0,0)" },
+          margin: { l: 72, r: 16, t: 34, b: 46 }, hovermode: "x unified",
+        }, { responsive: true, displayModeBar: false });
       }
 
       // The short (near-dated) leg's expiry, in ms. The trade realizes once now
@@ -2886,24 +2897,12 @@
         status.textContent = `${portfolioData.length} trade${portfolioData.length>1?"s":""} · ${nClosed} closed`;
         const modeLabel = { direct: "Direct", us: "US Opt", twus: "TW/US Opt" };
         let html = "<table><thead><tr>"
-          + ["Entered","Type","×","Trade","Net premium (NT$)","P&L: entry → now","Status","Realized P&L (NT$)",""].map(h=>`<th>${h}</th>`).join("")
+          + ["Entered","Type","×","Trade","Net premium (NT$)","Status","Realized P&L (NT$)",""].map(h=>`<th>${h}</th>`).join("")
           + "</tr></thead><tbody>";
         portfolioData.forEach((t, i) => {
           const d = new Date(t.ts);
           const dstr = d.toLocaleString(undefined, { year:"2-digit", month:"short", day:"numeric", hour:"2-digit", minute:"2-digit" });
           const netCol = t.net_cf >= 0 ? "put" : "call";
-          // Per-row entry-basis -> now P&L sparkline.
-          const pp = _rowPnl(t);
-          let graphCell = "<span style='color:var(--muted)'>—</span>";
-          if (pp) {
-            const arrow = pp.live ? "→" : "· entry only";
-            const nowLbl = `<span class="${pp.now>=0?'put':'call'}">${pp.now>=0?"+":""}${Math.round(pp.now).toLocaleString()}</span>`;
-            const baseLbl = `<span style="color:var(--muted)">${pp.base>=0?"+":""}${Math.round(pp.base).toLocaleString()}</span>`;
-            graphCell = `<div style="display:flex;flex-direction:column;gap:1px" title="Entry-basis P&L (ADR & FX unmoved) vs ${t.closed?'realized at close':'P&L if unwound now at live ADR & FX'}">
-              ${_sparkline(pp.base, pp.now)}
-              <span style="font-size:10px;font-variant-numeric:tabular-nums">${baseLbl} ${arrow==='→'?'→':''} ${pp.live?nowLbl:"<span style='color:var(--muted);font-size:10px'>entry only</span>"}</span>
-            </div>`;
-          }
           let statusCell, pnlCell;
           if (t.closed) {
             const cd = new Date(t.closed.close_date).toLocaleDateString(undefined, { year:"2-digit", month:"short", day:"numeric" });
@@ -2923,7 +2922,6 @@
             <td style="text-align:center;color:var(--muted)">${(t.mult||1)>1?"×"+(t.mult||1):""}</td>
             <td style="max-width:300px">${legsSummary(t.legs)}</td>
             <td class="${netCol}">${t.net_cf>=0?"+":""}${Math.round(t.net_cf).toLocaleString()}</td>
-            <td>${graphCell}</td>
             <td>${statusCell}</td>
             <td style="text-align:right;font-variant-numeric:tabular-nums">${pnlCell}</td>
             <td style="text-align:right"><span style="color:var(--muted)">▸</span></td>
@@ -2969,10 +2967,13 @@
 
         document.getElementById("pf-body").innerHTML = body + `<div id="pf-basis" style="margin-top:22px;color:var(--muted);font-size:12px">Loading current basis…</div>`;
         document.getElementById("portfolioModal").style.display = "block";
+        // Entry-basis payoff curve up front; branches below overlay the "now" line.
+        renderPfPayoff(t, null, null);
 
         // Closed trade: show the booked realized P&L instead of a live basis.
         if (t.closed) {
           const cl = t.closed;
+          renderPfPayoff(t, cl.p_close, cl.fx_close);
           const v = cl.realized_pnl;
           const money = x => `<span style="color:${x>=0?'var(--put)':'var(--call)'}">${x>=0?"+":""}${Math.round(x).toLocaleString()}</span>`;
           const method = cl.exit_method === "sell" ? "sold to market" : "exercised (cash settled)";
@@ -3016,6 +3017,7 @@
         const curP = s.current_premium, curFx = s.fx.current_fx;
         const p0 = t.entry_premium, fx0 = t.entry_fx;
         const fxRatio = (fx0 && curFx) ? curFx / fx0 : 1;
+        renderPfPayoff(t, curP, curFx);   // overlay current-basis payoff line
         const dPrem = (curP - p0) * 100;              // premium move, pct points
         const dFx = fx0 ? (curFx / fx0 - 1) * 100 : 0; // FX move, %
 
