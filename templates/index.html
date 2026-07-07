@@ -3022,11 +3022,15 @@
         const dFx = fx0 ? (curFx / fx0 - 1) * 100 : 0; // FX move, %
 
         // P&L at expiry at current basis, plus the premium-only / FX split.
-        // Scaled by the trade multiplier (number of times placed).
+        // Scaled by the trade multiplier. Pass an opts object so the loose-mode
+        // EXIT half-spread bonus is skipped — at expiry the legs cash-settle at
+        // intrinsic, there is no bid-ask spread to recapture. This keeps the
+        // table consistent with the payoff graph and the realized-P&L math.
         const mult = t.mult || 1;
-        const pnlNow = _evPnlAtPremium(row, curP, p0, fxRatio) * mult;
-        const pnlPremOnly = _evPnlAtPremium(row, curP, p0, 1) * mult;
-        const pnlEntry = _evPnlAtPremium(row, p0, p0, 1) * mult;
+        const noLoose = { survivor: null, survivorSell: null };
+        const pnlNow = _evPnlAtPremium(row, curP, p0, fxRatio, noLoose) * mult;
+        const pnlPremOnly = _evPnlAtPremium(row, curP, p0, 1, noLoose) * mult;
+        const pnlEntry = _evPnlAtPremium(row, p0, p0, 1, noLoose) * mult;
         const fxEffect = pnlNow - pnlPremOnly;
         const premEffect = pnlPremOnly - pnlEntry;
 
