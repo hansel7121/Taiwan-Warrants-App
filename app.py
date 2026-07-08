@@ -813,8 +813,11 @@ def _build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct, max_dt
         us_contract_shares = us_options_logic.contract_tw_shares(code)            # 500 (2303)
 
         try:
+            # Like US Option Match's warrant leg: don't require a live two-sided
+            # quote on the TW option leg — fall back to the last settlement
+            # snapshot so the scan still works when TAIFEX is closed. (Off-hours
+            # prices are stale marks, not executable until the market reopens.)
             tw_df = options_logic.fetch_options([code], option_type, min_days=1, compute_iv=False)
-            tw_df = tw_df[tw_df["is_live"]]
             if min_volume > 0:
                 tw_df = tw_df[tw_df["volume"] >= min_volume]
         except Exception as e:
