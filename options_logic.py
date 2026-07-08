@@ -401,7 +401,9 @@ def fetch_options_mis(code, compute_iv=True):
 
         intrinsic = max(0, K - spot) if is_put else max(0, spot - K)
         time_value_am = round(ask - intrinsic, 4)
-        exp_label = dec["expiry"].strftime("%b%y")
+        # Full expiry date, not just month+year — weeklies in the same month
+        # would otherwise share an identical (ambiguous) label.
+        exp_label = dec["expiry"].strftime("%d%b%y")
         contract = f"{'P' if is_put else 'C'}{K:g} {exp_label}"
         rows.append({
             "contract": contract, "type": "Put" if is_put else "Call",
