@@ -45,10 +45,10 @@ def contract_tw_shares(stock_code):
     return US_CONTRACT_ADRS * US_ADR_MAP[stock_code]["adr_ratio"]
 
 _cache: dict = {}
-_CACHE_TTL = 300  # 5 minutes
+_CACHE_TTL = 45  # keep US option quotes fresh (Yahoo is already ~15 min delayed)
 
 _prem_cache: dict = {}
-_PREM_TTL = 1800  # 30 minutes
+_PREM_TTL = 1800  # 30 minutes — 3y premium HISTORY only; the "now" point is refreshed live
 
 # ADR premium is the % gap between the ADR (converted to TWD/share) and the
 # local Taiwan share. Regime thresholds: |p| <= 5% is "around 0" (the safe
@@ -97,8 +97,16 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
     p = prem.values.astype(float)
     F = df["fx"].values.astype(float)          # TWD per USD, aligned with premium
     n = len(p)
+    # "Now" = freshest intraday snapshot, NOT the last daily close. The 3y
+    # history (cached) only supplies the move distribution; the current premium
+    # and FX come live so the entry basis matches real-time execution.
     p0 = float(p[-1])
     F0 = float(F[-1])
+    live_now = False
+    _live = _live_premium_fx(stock_code)
+    if _live is not None:
+        p0, F0 = _live
+        live_now = True
 
     # Trading-day horizon ≈ calendar days × (252/365).
     k = max(1, int(round(float(horizon_days) * 252.0 / 365.0)))
@@ -206,6 +214,7 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
         "horizon_days": int(horizon_days),
         "horizon_trading": int(k),
         "current_premium": p0,
+        "current_premium_live": live_now,   # True = intraday snapshot, False = last daily close
         "current_regime": cur,
         "current_regime_label": cur_label,
         "conditional": conditional,   # False = fell back to unconditional
@@ -240,9 +249,18 @@ def adr_premium_stats(stock_code, period="3y"):
     """
     cfg = US_ADR_MAP[stock_code]
     key = (stock_code, period)
+
+    def _with_live(stats):
+        # History (dates/series/regimes) is cached; the *latest* premium is
+        # refreshed to an intraday snapshot each call so the badge isn't stale.
+        live = _live_premium_fx(stock_code)
+        if live is None:
+            return {**stats, "latest_premium_live": False}
+        return {**stats, "latest_premium": live[0], "latest_premium_live": True}
+
     hit = _prem_cache.get(key)
     if hit and time.time() - hit[0] < _PREM_TTL:
-        return hit[1]
+        return _with_live(hit[1])
 
     df, prem = _premium_series(stock_code, period)
 
@@ -274,22 +292,51 @@ def adr_premium_stats(stock_code, period="3y"):
         ],
     }
     _prem_cache[key] = (time.time(), stats)
-    return stats
+    return _with_live(stats)
 
 
 def _last_price(ticker: str) -> float:
     tk = yf.Ticker(ticker)
-    # fast_info is cheap and usually populated; fall back to history.
+    # fast_info.last_price is the freshest single snapshot Yahoo exposes
+    # (intraday during market hours, ~15 min delayed on the free feed).
     try:
         p = float(tk.fast_info["last_price"])
         if p > 0:
             return p
     except Exception:
         pass
-    hist = tk.history(period="5d")
-    if hist.empty:
-        raise RuntimeError(f"no price for {ticker}")
-    return float(hist["Close"].dropna().iloc[-1])
+    # Fallback order: freshest intraday 1-minute bar, then daily close. Prefer
+    # the 1-minute bar so we never silently drop back to a stale prior close.
+    for period, interval in (("1d", "1m"), ("5d", "1d")):
+        try:
+            hist = tk.history(period=period, interval=interval)
+            s = hist["Close"].dropna() if not hist.empty else None
+            if s is not None and len(s):
+                return float(s.iloc[-1])
+        except Exception:
+            continue
+    raise RuntimeError(f"no price for {ticker}")
+
+
+def _live_premium_fx(stock_code):
+    """Intraday snapshot of (ADR premium, FX) for 'now', bypassing the daily
+    history. premium = (adr_usd/adr_ratio * fx) / tw_share - 1, all from the
+    freshest available Yahoo snapshot. Returns (premium, fx) or None on failure
+    so callers can fall back to the last daily close.
+    """
+    cfg = US_ADR_MAP.get(stock_code)
+    if not cfg:
+        return None
+    try:
+        adr = _last_price(cfg["adr_ticker"])          # USD per ADR
+        fx = _last_price(cfg["fx_ticker"])            # TWD per USD
+        tw = _last_price(f"{stock_code}.TW")          # TWD per Taiwan share
+        if adr > 0 and fx > 0 and tw > 0:
+            prem = (adr / cfg["adr_ratio"] * fx) / tw - 1.0
+            return float(prem), float(fx)
+    except Exception:
+        return None
+    return None
 
 
 def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
