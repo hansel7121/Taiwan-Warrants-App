@@ -1,4 +1,5 @@
 import io
+import re
 import time
 import requests
 import pandas as pd
@@ -246,6 +247,182 @@ def _parse_and_compute(raw_df, underlying_price, exercise_ratio, compute_iv=True
     return pd.DataFrame(rows)
 
 
+# ── TAIFEX MIS intraday quotes (~20 min delayed) ────────────────────────────
+# The EOD data-download file (_fetch_taifex) is up to a day stale. MIS serves
+# the same public quotes intraday via a JSON API — the freshest free TW-option
+# source. We use it as the PRIMARY source and fall back to EOD on any failure.
+MIS_URL = "https://mis.taifex.com.tw/futures/api/getQuoteList"
+_MIS_TTL = 60  # intraday: refresh often
+_mis_cache: dict = {}
+
+# Contract SymbolID = [3-char product][5-digit strike][month-letter][week/yr].
+#   month-letter A–L = call Jan–Dec, M–X = put Jan–Dec.
+#   strike: raw for the index (TXO/TX#), /10 for single-stock options.
+_MIS_SYM_RE = re.compile(r"^([A-Z0-9]{3})(\d{5})([A-X])([A-Z0-9])-O$")
+
+
+def _mis_third_wednesday(year, month):
+    d = pd.Timestamp(year=year, month=month, day=1)
+    # 0=Mon..2=Wed; first Wednesday then +14 days.
+    first_wed = 1 + ((2 - d.dayofweek) % 7)
+    return pd.Timestamp(year=year, month=month, day=first_wed + 14)
+
+
+def _decode_mis_symbol(symbol, disp_cname, is_index):
+    m = _MIS_SYM_RE.match(symbol)
+    if not m:
+        return None
+    _prod, strike_s, mon_letter, _last = m.groups()
+    li = ord(mon_letter) - ord("A")
+    is_put = li >= 12
+    month = (li % 12) + 1
+    strike = int(strike_s) if is_index else int(strike_s) / 10.0
+    # Expiry: weeklies print an explicit date in DispCName; monthlies expire on
+    # the 3rd Wednesday of the coded month.
+    dm = re.search(r"(\d{4})/(\d{2})/(\d{2})", disp_cname or "")
+    if dm:
+        expiry = pd.Timestamp(int(dm.group(1)), int(dm.group(2)), int(dm.group(3)))
+    else:
+        base = pd.Timestamp.today().year
+        base -= base % 10
+        year = base + int(_last) if _last.isdigit() else pd.Timestamp.today().year
+        if year < pd.Timestamp.today().year - 2:
+            year += 10
+        expiry = _mis_third_wednesday(year, month)
+    return {"strike": strike, "is_put": is_put, "expiry": expiry}
+
+
+def _mis_num(v):
+    try:
+        f = float(str(v).replace(",", ""))
+        return f if f > 0 else float("nan")
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _fetch_mis_quotes(cid, kind):
+    """Raw MIS QuoteList for one product code, with a short in-proc cache."""
+    key = (cid, kind)
+    now = time.time()
+    if key in _mis_cache and now - _mis_cache[key][0] < _MIS_TTL:
+        return _mis_cache[key][1]
+    headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0",
+               "Referer": "https://mis.taifex.com.tw/futures/"}
+    rows = []
+    page = 1
+    while page <= 20:
+        body = {"MarketType": "0", "SymbolType": "O", "KindID": kind, "CID": cid,
+                "ExpireMonth": "", "RowSize": "500", "PageNo": str(page)}
+        r = requests.post(MIS_URL, json=body, headers=headers, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("RtCode") != "0":
+            raise RuntimeError(f"MIS RtCode {data.get('RtCode')}")
+        ql = data.get("RtData", {}).get("QuoteList", [])
+        rows.extend(ql)
+        total = int(data.get("RtData", {}).get("QuoteCount", "0") or 0)
+        if len(rows) >= total or not ql:
+            break
+        page += 1
+    _mis_cache[key] = (now, rows)
+    return rows
+
+
+def fetch_options_mis(code, compute_iv=True):
+    """Intraday (~20 min delayed) TW option chain from TAIFEX MIS, in the same
+    schema as _parse_and_compute so callers are unchanged. Raises on failure."""
+    cfg = COMMODITY_MAP[code]
+    is_index = code == "TXO"
+    kind = "1" if is_index else "4"
+    r_free = R
+    ratio = cfg["exercise_ratio"]
+
+    all_q = []
+    for cid in cfg["commodity_ids"]:
+        all_q.extend(_fetch_mis_quotes(cid, kind))
+    if not all_q:
+        raise RuntimeError("MIS returned no quotes")
+
+    # Underlying spot from the 現貨 (-Q/-S) row; fall back to yfinance.
+    spot = float("nan")
+    for q in all_q:
+        if "現貨" in (q.get("DispCName") or ""):
+            spot = _mis_num(q.get("CLastPrice")) or _mis_num(q.get("CRefPrice"))
+            if pd.notna(spot):
+                break
+    if pd.isna(spot) or spot <= 0:
+        spot = _get_spot(cfg["ticker"])
+
+    today = pd.Timestamp.today().normalize()
+    quote_time = ""
+    rows = []
+    for q in all_q:
+        sym = q.get("SymbolID", "")
+        if not sym.endswith("-O"):
+            continue
+        dec = _decode_mis_symbol(sym, q.get("DispCName", ""), is_index)
+        if dec is None:
+            continue
+        dte = int((dec["expiry"] - today).days)
+        if dte <= 0:
+            continue
+        bid = _mis_num(q.get("CBestBidPrice"))
+        if pd.isna(bid):
+            bid = _mis_num(q.get("CBidPrice1"))
+        ask = _mis_num(q.get("CBestAskPrice"))
+        if pd.isna(ask):
+            ask = _mis_num(q.get("CAskPrice1"))
+        last = _mis_num(q.get("CLastPrice"))
+        settle = _mis_num(q.get("SettlementPrice"))
+        is_live = bool(pd.notna(bid) and pd.notna(ask))
+        # Fall back ask -> last -> settle so a leg is never dropped off-hours.
+        if pd.isna(ask):
+            ask = last if pd.notna(last) else settle
+        if pd.isna(bid):
+            bid = last if pd.notna(last) else settle
+        if pd.isna(ask) or ask <= 0 or spot <= 0:
+            continue
+        K = dec["strike"]
+        is_put = dec["is_put"]
+        T = dte / 365.0
+        quote_time = q.get("CTime") or quote_time
+
+        if compute_iv:
+            iv_ask = implied_vol(ask, spot, K, T, r_free, ratio, is_put)
+            iv_bid = implied_vol(bid, spot, K, T, r_free, ratio, is_put) if pd.notna(bid) else np.nan
+            if np.isnan(iv_ask) and not np.isnan(iv_bid):
+                iv_ask = iv_bid
+            if np.isnan(iv_ask):
+                continue
+            delta = bs_delta(spot, K, T, r_free, iv_ask, ratio, is_put)
+            leverage = calc_real_leverage(spot, abs(delta), ask)
+        else:
+            iv_ask = iv_bid = delta = leverage = np.nan
+
+        intrinsic = max(0, K - spot) if is_put else max(0, spot - K)
+        time_value_am = round(ask - intrinsic, 4)
+        exp_label = dec["expiry"].strftime("%b%y")
+        contract = f"{'P' if is_put else 'C'}{K:g} {exp_label}"
+        rows.append({
+            "contract": contract, "type": "Put" if is_put else "Call",
+            "underlying_price": round(spot, 4), "ask": round(ask, 4),
+            "bid": round(bid, 4) if pd.notna(bid) else None,
+            "days_to_expiry": dte, "strike": K, "exercise_ratio": ratio,
+            "volume": int(_mis_num(q.get("CTotalVolume")) or 0) if pd.notna(_mis_num(q.get("CTotalVolume"))) else 0,
+            "oi": int(_mis_num(q.get("OpenInterest")) or 0) if pd.notna(_mis_num(q.get("OpenInterest"))) else 0,
+            "time_value_am": time_value_am,
+            "iv_ask": round(iv_ask, 4) if pd.notna(iv_ask) else None,
+            "iv_bid": round(iv_bid, 4) if pd.notna(iv_bid) else None,
+            "delta_calc": round(delta, 4) if pd.notna(delta) else None,
+            "leverage_calc": round(leverage, 4) if pd.notna(leverage) else None,
+            "is_live": is_live,
+            "quote_time": quote_time,
+        })
+    if not rows:
+        raise RuntimeError("MIS: no decodable contracts")
+    return pd.DataFrame(rows)
+
+
 def fetch_options(
     stock_codes,
     option_type="All",
@@ -262,14 +439,23 @@ def fetch_options(
             errors.append(f"{code}: not supported")
             continue
         cfg = COMMODITY_MAP[code]
+        df = None
+        # Primary: MIS intraday quotes. Fallback: EOD data-download file.
         try:
-            S = _get_spot(cfg["ticker"])
-            raw = _fetch_taifex(cfg["commodity_ids"])
-            df = _parse_and_compute(raw, S, cfg["exercise_ratio"], compute_iv=compute_iv)
-            if not df.empty:
-                dfs.append(df)
+            df = fetch_options_mis(code, compute_iv=compute_iv)
         except Exception as e:
-            errors.append(f"{code}: {e}")
+            errors.append(f"{code}: MIS {e}")
+            df = None
+        if df is None or df.empty:
+            try:
+                S = _get_spot(cfg["ticker"])
+                raw = _fetch_taifex(cfg["commodity_ids"])
+                df = _parse_and_compute(raw, S, cfg["exercise_ratio"], compute_iv=compute_iv)
+            except Exception as e:
+                errors.append(f"{code}: EOD {e}")
+                df = None
+        if df is not None and not df.empty:
+            dfs.append(df)
 
     if not dfs:
         err_msg = "; ".join(errors) if errors else "No data returned"
