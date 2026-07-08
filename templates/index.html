@@ -2648,8 +2648,49 @@
           portfolioData = await res.json();
         } catch (e) { portfolioData = []; }
         await autoCloseTrades();
-        renderPortfolio();
+        renderPortfolio();          // paints rows (P&L-now shows "…" until basis lands)
         renderPnlChart();
+        _basisCache = {};
+        await refreshBasis();       // fetch live ADR premium/FX per underlying
+        renderPortfolio();          // repaint with the live P&L-at-expiry-now column
+      }
+
+      // Live ADR premium + FX per underlying, for the per-row "P&L at expiry
+      // now" column. Fetched once per us_stock_code (endpoint is cached server-side).
+      let _basisCache = {};
+      async function refreshBasis() {
+        const codes = [...new Set(portfolioData
+          .filter(t => !t.closed && (t.mode === "us" || t.mode === "twus") && t.us_stock_code)
+          .map(t => t.us_stock_code))];
+        await Promise.all(codes.map(async code => {
+          try {
+            const res = await fetch("/adr_premium_scenario", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ stock_code: code, horizon_days: 30 }),
+            });
+            const s = await res.json();
+            _basisCache[code] = s.error ? null : { p: s.current_premium, fx: (s.fx || {}).current_fx };
+          } catch (e) { _basisCache[code] = null; }
+        }));
+      }
+
+      // Same number as the popup's "P&L at expiry now": position P&L held to
+      // expiry at the current ADR premium / FX. Closed -> booked realized P&L.
+      // Returns null while the live basis is still loading. Loose-exit bonus is
+      // skipped (opts) so it matches the popup and the payoff graph.
+      function _pnlAtExpiryNow(t) {
+        const r = t.row; if (!r) return null;
+        if (t.closed) return t.closed.realized_pnl;
+        const mult = t.mult || 1;
+        const p0 = t.entry_premium ?? 0, fx0 = t.entry_fx ?? 1;
+        const noLoose = { survivor: null, survivorSell: null };
+        if ((t.mode === "us" || t.mode === "twus") && t.us_stock_code) {
+          const b = _basisCache[t.us_stock_code];
+          if (!b || b.p == null || b.fx == null) return null;   // basis pending/unavailable
+          return _evPnlAtPremium(r, b.p, p0, (fx0 && b.fx) ? b.fx / fx0 : 1, noLoose) * mult;
+        }
+        // Direct / no ADR basis: P&L at expiry at entry basis.
+        return _evPnlAtPremium(r, p0, p0, 1, noLoose) * mult;
       }
 
       // Terminal (at-expiry) P&L of the whole position for a given underlying
@@ -2897,12 +2938,22 @@
         status.textContent = `${portfolioData.length} trade${portfolioData.length>1?"s":""} · ${nClosed} closed`;
         const modeLabel = { direct: "Direct", us: "US Opt", twus: "TW/US Opt" };
         let html = "<table><thead><tr>"
-          + ["Entered","Type","×","Trade","Net premium (NT$)","Status","Realized P&L (NT$)",""].map(h=>`<th>${h}</th>`).join("")
+          + ["Entered","Type","×","Trade","Net premium (NT$)","P&L at expiry now (NT$)","Status","Realized P&L (NT$)",""].map(h=>`<th>${h}</th>`).join("")
           + "</tr></thead><tbody>";
         portfolioData.forEach((t, i) => {
           const d = new Date(t.ts);
           const dstr = d.toLocaleString(undefined, { year:"2-digit", month:"short", day:"numeric", hour:"2-digit", minute:"2-digit" });
           const netCol = t.net_cf >= 0 ? "put" : "call";
+          // P&L at expiry at the current basis — same figure as the popup.
+          const now = _pnlAtExpiryNow(t);
+          let nowCell;
+          if (t.closed) {
+            nowCell = `<span class="mut" style="color:var(--muted)">realized</span>`;
+          } else if (now == null) {
+            nowCell = `<span style="color:var(--muted)">…</span>`;
+          } else {
+            nowCell = `<span class="${now>=0?"put":"call"}" style="font-weight:600">${now>=0?"+":""}${Math.round(now).toLocaleString()}</span>`;
+          }
           let statusCell, pnlCell;
           if (t.closed) {
             const cd = new Date(t.closed.close_date).toLocaleDateString(undefined, { year:"2-digit", month:"short", day:"numeric" });
@@ -2922,6 +2973,7 @@
             <td style="text-align:center;color:var(--muted)">${(t.mult||1)>1?"×"+(t.mult||1):""}</td>
             <td style="max-width:300px">${legsSummary(t.legs)}</td>
             <td class="${netCol}">${t.net_cf>=0?"+":""}${Math.round(t.net_cf).toLocaleString()}</td>
+            <td style="text-align:right;font-variant-numeric:tabular-nums">${nowCell}</td>
             <td>${statusCell}</td>
             <td style="text-align:right;font-variant-numeric:tabular-nums">${pnlCell}</td>
             <td style="text-align:right"><span style="color:var(--muted)">▸</span></td>
