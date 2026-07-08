@@ -243,6 +243,53 @@ def fetch_options():
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
+def _us_options_scan(stock_codes, option_type, min_days, max_days, min_volume):
+    """American (US ADR) option chains for the scanner, in native USD.
+
+    Wraps fetch_us_options (which also carries the TWD-normalized view used by
+    the arb finder) and returns the USD-native columns a US options trader
+    expects: strike_usd, bid_usd, ask_usd, adr_price (underlying), plus IV /
+    delta / volume / OI.
+    """
+    frames, errors = [], []
+    for code in stock_codes:
+        try:
+            df = us_options_logic.fetch_us_options(
+                code, option_type, min_days=max(1, int(min_days)),
+                max_days=int(max_days), compute_iv=True,
+            )
+            if int(min_volume) > 0:
+                df = df[df["volume"] >= int(min_volume)]
+            if not df.empty:
+                df = df.assign(product=code)
+                frames.append(df)
+        except Exception as e:
+            errors.append(f"{code}: {e}")
+    if not frames:
+        raise RuntimeError("; ".join(errors) if errors else "No data returned")
+    out = pd.concat(frames, ignore_index=True)
+    cols = ["product", "contract", "type", "strike_usd", "adr_price",
+            "days_to_expiry", "bid_usd", "ask_usd", "iv_ask", "iv_bid",
+            "delta_calc", "volume", "oi", "fx", "is_live"]
+    return out[[c for c in cols if c in out.columns]]
+
+
+@app.route("/us_options", methods=["POST"])
+def us_options():
+    data = request.json
+    stock_codes = data.get("stock_codes", ["2303"])
+    option_type = data.get("option_type", "All")
+    min_days = data.get("min_days", 0)
+    max_days = data.get("max_days", 365)
+    min_volume = data.get("min_volume", 0)
+    try:
+        df = _us_options_scan(stock_codes, option_type, min_days, max_days, min_volume)
+        rows = json.loads(df.to_json(orient="records"))
+        return jsonify({"rows": rows, "count": len(df)})
+    except Exception as e:
+        return jsonify({"rows": [], "count": 0, "error": str(e)})
+
+
 @app.route("/download_options", methods=["POST"])
 def download_options():
     data = request.json

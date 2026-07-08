@@ -448,6 +448,8 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
                     "is_live": bool(is_live),
                     # USD reference (for display / auditing)
                     "strike_usd": round(K_usd, 4),
+                    "bid_usd": round(b_usd, 4) if (np.isfinite(b_usd) and b_usd > 0) else None,
+                    "ask_usd": round(a_usd, 4),
                     "adr_price": round(adr, 4),
                     "fx": round(fx, 4),
                 })

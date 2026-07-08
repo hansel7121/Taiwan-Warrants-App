@@ -354,12 +354,26 @@
     <!-- OPTIONS TAB -->
     <div id="tab-options" class="tab-content active">
       <main>
+        <div style="display:flex;gap:6px;border-bottom:1px solid var(--border);margin-bottom:14px">
+          <button id="optmkt-btn-tw" class="pfsub-btn active" onclick="setOptMarket('tw', this)">Taiwan options</button>
+          <button id="optmkt-btn-us" class="pfsub-btn" onclick="setOptMarket('us', this)">American options (US ADR)</button>
+        </div>
         <div class="filters">
           <div class="stock-select">
             <span>Product</span>
+            <!-- Taiwan-listed TAIFEX options -->
             <select id="optionStockSelect" multiple style="height:80px">
               <option value="TXO" selected>TXO 台指選擇權</option>
               <option value="2330">2330 台積電選擇權</option>
+              <option value="2303">2303 聯電選擇權 (UMC)</option>
+              <option value="2603">2603 長榮選擇權</option>
+              <option value="2881">2881 富邦金選擇權</option>
+              <option value="2882">2882 國泰金選擇權</option>
+            </select>
+            <!-- US ADR (American) options — hidden until toggled -->
+            <select id="optionUsSelect" multiple style="height:80px;display:none">
+              <option value="2303" selected>UMC (2303 聯電) US options</option>
+              <option value="2412">CHT (2412 中華電) US options</option>
             </select>
           </div>
           <label>Option Type
@@ -1996,8 +2010,23 @@
       }
 
       // ── Options Scanner ────────────────────────────────────────────────
+      let _optMarket = "tw";   // "tw" = TAIFEX (European), "us" = US ADR (American)
+      function setOptMarket(m, btn) {
+        _optMarket = m;
+        document.querySelectorAll("#optmkt-btn-tw,#optmkt-btn-us").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        document.getElementById("optionStockSelect").style.display = m === "tw" ? "" : "none";
+        document.getElementById("optionUsSelect").style.display   = m === "us" ? "" : "none";
+        // Min Leverage is a warrant/TW-option metric; US chain has no leverage col.
+        const lev = document.getElementById("optMinLeverage").closest("label");
+        if (lev) lev.style.display = m === "us" ? "none" : "";
+        document.getElementById("opt-tableContainer").innerHTML = "";
+        document.getElementById("opt-status").textContent = "";
+        document.getElementById("optDownloadBtn").style.display = "none";
+      }
+
       function getOptionsFilters() {
-        const select = document.getElementById("optionStockSelect");
+        const select = document.getElementById(_optMarket === "us" ? "optionUsSelect" : "optionStockSelect");
         return {
           stock_codes: Array.from(select.selectedOptions).map(o => o.value),
           option_type: document.getElementById("optionsType").value,
@@ -2014,11 +2043,11 @@
           document.getElementById("opt-status").textContent = "Please select at least one product.";
           return;
         }
-        document.getElementById("opt-status").textContent = "Fetching…";
+        document.getElementById("opt-status").textContent = _optMarket === "us" ? "Fetching US ADR options (Yahoo, ~15 min delayed)…" : "Fetching…";
         document.getElementById("opt-tableContainer").innerHTML = "";
         document.getElementById("optDownloadBtn").style.display = "none";
 
-        const res = await fetch("/fetch_options", {
+        const res = await fetch(_optMarket === "us" ? "/us_options" : "/fetch_options", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(filters),
@@ -2086,6 +2115,20 @@
       }
 
       async function downloadOptionsCSV() {
+        // US chain: build the CSV client-side from the loaded rows (the US
+        // endpoint has no dedicated CSV route). TW: stream from the server.
+        if (_optMarket === "us") {
+          if (!currentOptionsData.length) return;
+          const cols = Object.keys(currentOptionsData[0]);
+          const esc = v => v == null ? "" : `"${String(v).replace(/"/g, '""')}"`;
+          const csv = [cols.join(",")].concat(
+            currentOptionsData.map(r => cols.map(c => esc(r[c])).join(","))
+          ).join("\n");
+          const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+          const a = document.createElement("a");
+          a.href = url; a.download = "us_options.csv"; a.click();
+          return;
+        }
         const res = await fetch("/download_options", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
