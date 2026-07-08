@@ -2674,23 +2674,23 @@
         }));
       }
 
-      // Same number as the popup's "P&L at expiry now": position P&L held to
-      // expiry at the current ADR premium / FX. Closed -> booked realized P&L.
-      // Returns null while the live basis is still loading. Loose-exit bonus is
-      // skipped (opts) so it matches the popup and the payoff graph.
+      // P&L at expiry at the current spot — the exact value of the payoff
+      // graph's current-spot marker (_payoffAtSpot: both legs settle at
+      // intrinsic, spot held here). Uses the live ADR premium / FX for us/twus,
+      // entry basis for direct. Closed -> booked realized P&L. null while the
+      // live basis is still loading.
       function _pnlAtExpiryNow(t) {
-        const r = t.row; if (!r) return null;
+        const r = t.row; if (!r || r.underlying_price == null) return null;
         if (t.closed) return t.closed.realized_pnl;
         const mult = t.mult || 1;
         const p0 = t.entry_premium ?? 0, fx0 = t.entry_fx ?? 1;
-        const noLoose = { survivor: null, survivorSell: null };
         if ((t.mode === "us" || t.mode === "twus") && t.us_stock_code) {
           const b = _basisCache[t.us_stock_code];
           if (!b || b.p == null || b.fx == null) return null;   // basis pending/unavailable
-          return _evPnlAtPremium(r, b.p, p0, (fx0 && b.fx) ? b.fx / fx0 : 1, noLoose) * mult;
+          return _payoffAtSpot(r, r.underlying_price, b.p, p0, (fx0 && b.fx) ? b.fx / fx0 : 1, mult);
         }
-        // Direct / no ADR basis: P&L at expiry at entry basis.
-        return _evPnlAtPremium(r, p0, p0, 1, noLoose) * mult;
+        // Direct / no ADR basis: at-expiry payoff at entry basis, current spot.
+        return _payoffAtSpot(r, r.underlying_price, p0, p0, 1, mult);
       }
 
       // Terminal (at-expiry) P&L of the whole position for a given underlying
