@@ -277,8 +277,10 @@ def _decode_mis_symbol(symbol, disp_cname, is_index):
     is_put = li >= 12
     month = (li % 12) + 1
     strike = int(strike_s) if is_index else int(strike_s) / 10.0
-    # Expiry: weeklies print an explicit date in DispCName; monthlies expire on
-    # the 3rd Wednesday of the coded month.
+    # Expiry: weeklies print "W# (YYYY/MM/DD)" in DispCName; monthlies expire on
+    # the 3rd Wednesday of the coded month and carry no W# tag.
+    wk = re.search(r"W(\d)", disp_cname or "")
+    week = wk.group(1) if wk else None
     dm = re.search(r"(\d{4})/(\d{2})/(\d{2})", disp_cname or "")
     if dm:
         expiry = pd.Timestamp(int(dm.group(1)), int(dm.group(2)), int(dm.group(3)))
@@ -289,7 +291,7 @@ def _decode_mis_symbol(symbol, disp_cname, is_index):
         if year < pd.Timestamp.today().year - 2:
             year += 10
         expiry = _mis_third_wednesday(year, month)
-    return {"strike": strike, "is_put": is_put, "expiry": expiry}
+    return {"strike": strike, "is_put": is_put, "expiry": expiry, "week": week}
 
 
 def _mis_num(v):
@@ -401,10 +403,11 @@ def fetch_options_mis(code, compute_iv=True):
 
         intrinsic = max(0, K - spot) if is_put else max(0, spot - K)
         time_value_am = round(ask - intrinsic, 4)
-        # Full expiry date, not just month+year — weeklies in the same month
-        # would otherwise share an identical (ambiguous) label.
+        # Full expiry date + weekly tag (blank = monthly / 3rd-Wed) so weeklies
+        # in the same month are distinct and obviously not the monthly.
         exp_label = dec["expiry"].strftime("%d%b%y")
-        contract = f"{'P' if is_put else 'C'}{K:g} {exp_label}"
+        wk_label = f" W{dec['week']}" if dec.get("week") else ""
+        contract = f"{'P' if is_put else 'C'}{K:g} {exp_label}{wk_label}"
         rows.append({
             "contract": contract, "type": "Put" if is_put else "Call",
             "underlying_price": round(spot, 4), "ask": round(ask, 4),
