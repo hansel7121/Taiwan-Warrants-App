@@ -557,8 +557,159 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
     return rows
 
 
+def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
+                        max_strike_diff_pct, max_dte_diff):
+    """Put-Call-Parity matcher: price a warrant against the SYNTHETIC built from
+    the OPPOSITE-type TAIFEX option plus the underlying and a risk-free bond.
+
+    European PCP (no dividends): C - P = S - K*e^(-rT), so
+        synthetic call = P + S - K*e^(-rT)
+        synthetic put  = C - S + K*e^(-rT)
+    using the OPTION's strike Ko, expiry T, and r = options_logic.R.
+
+    Two directions per pair:
+      - EXECUTABLE  (long warrant / short synthetic): buy warrant@ask, sell the
+        option@bid, short the stock (call) / long the stock (put), lend/borrow
+        PV(Ko). Kept only when the warrant is cheap vs synthetic (price_diff>0)
+        AND the guards hold (short option expires no later than the long warrant,
+        and the strike gap is on the no-downside side).
+      - NON-EXECUTABLE (short warrant / long synthetic): warrants can't be
+        shorted — emitted for debugging only, flagged executable=False, guards
+        skipped. Kept when the warrant is rich vs synthetic (price_diff<0).
+    """
+    rows = []
+    r = options_logic.R
+
+    for _, w in warrant_df.iterrows():
+        opp = "Put" if w["type"] == "Call" else "Call"
+        candidates = opt_df[opt_df["type"] == opp].copy()
+        if candidates.empty:
+            continue
+
+        ratio = float(w["exercise_ratio"])
+        if ratio <= 0:
+            continue  # can't size or normalise a warrant with no exercise ratio
+
+        candidates["strike_diff_pct"] = (
+            (candidates["strike"] - w["strike"]).abs() / w["strike"] * 100
+        )
+        candidates["dte_diff"] = (
+            (candidates["days_to_expiry"] - w["days_to_expiry"]).abs()
+        )
+        candidates = candidates[candidates["strike_diff_pct"] <= max_strike_diff_pct]
+        if candidates.empty:
+            continue
+
+        S = float(w["underlying_price"])
+        Kw = float(w["strike"])
+        is_call = w["type"] == "Call"
+        warrant_ask_per_share = round(float(w["ask"]) / ratio, 4)
+        warrant_bid_val = float(w["bid"]) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else float(w["ask"])
+        warrant_bid_per_share = round(warrant_bid_val / ratio, 4)
+        warrants_needed = round(opt_contract_size / ratio)
+        warrant_bid_disp = round(float(w["bid"]), 4) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else None
+
+        # Warrant-leg IV (display only; payoff is intrinsic). Use warrant type.
+        if pd.notna(w.get("iv_ask")):
+            warrant_iv = round(float(w["iv_ask"]), 4)
+        else:
+            _wiv = warrant_logic.implied_vol(
+                float(w["ask"]), S, Kw,
+                int(w["days_to_expiry"]) / 365.0, r, ratio, not is_call)
+            warrant_iv = round(float(_wiv), 4) if pd.notna(_wiv) and 0 < float(_wiv) <= 3 else None
+
+        for _, opt in candidates.iterrows():
+            Ko = float(opt["strike"])
+            To = int(opt["days_to_expiry"]) / 365.0
+            bond_pv = round(Ko * float(np.exp(-r * To)), 4)
+            opt_bid_ps = round(float(opt["bid"]), 4) if pd.notna(opt.get("bid")) and float(opt.get("bid", 0)) > 0 else None
+            opt_ask_ps = round(float(opt["ask"]), 4) if pd.notna(opt.get("ask")) and float(opt.get("ask", 0)) > 0 else None
+
+            # Option-leg IV (display only) — use the OPTION's put/call flag.
+            is_put_opt = opp == "Put"
+            if pd.notna(opt.get("iv_bid")):
+                opt_iv = round(float(opt["iv_bid"]), 4)
+            else:
+                _omid = None
+                if opt_bid_ps is not None and opt_ask_ps is not None:
+                    _omid = (opt_bid_ps + opt_ask_ps) / 2
+                elif opt_ask_ps is not None:
+                    _omid = opt_ask_ps
+                _oiv = warrant_logic.implied_vol(
+                    _omid, S, Ko, To, r, 1.0, is_put_opt) if _omid else None
+                opt_iv = round(float(_oiv), 4) if (_oiv is not None and pd.notna(_oiv) and 0 < float(_oiv) <= 3) else None
+
+            def _synth(opt_ps):
+                # synthetic call = P + S - PV(K);  synthetic put = C - S + PV(K)
+                return round((opt_ps + S - bond_pv) if is_call else (opt_ps - S + bond_pv), 4)
+
+            def _emit(executable, opt_ps, warrant_ps, price_diff):
+                synthetic_price = _synth(opt_ps)
+                pct = round(price_diff / synthetic_price * 100, 2) if synthetic_price > 0 else None
+                if executable:
+                    if is_call:
+                        trade = "Buy Call Warrant / Short Synthetic (short Put + short stock + lend)"
+                    else:
+                        trade = "Buy Put Warrant / Short Synthetic (short Call + long stock + borrow)"
+                else:
+                    side = "short Put + short stock + lend" if is_call else "short Call + long stock + borrow"
+                    trade = f"Short {w['type']} Warrant / Long Synthetic ({side}) — NON-EXECUTABLE"
+                rows.append({
+                    "warrant_code": w["warrant_code"],
+                    "warrant_name": w["warrant_name"],
+                    "option_contract": opt["contract"],
+                    "type": w["type"],
+                    "opt_type": opp,
+                    "trade": trade,
+                    "executable": bool(executable),
+                    "underlying_price": round(S, 4),
+                    "warrant_dte": int(w["days_to_expiry"]),
+                    "opt_dte": int(opt["days_to_expiry"]),
+                    "dte_diff": int(opt["dte_diff"]),
+                    "warrant_strike": round(Kw, 2),
+                    "opt_strike": round(Ko, 2),
+                    "strike_diff_pct": round(float(opt["strike_diff_pct"]), 2),
+                    "warrants_needed": warrants_needed,
+                    "board_lots": round(warrants_needed / 1000, 4),
+                    "opt_contract_size": opt_contract_size,
+                    "warrant_ask": round(float(w["ask"]), 4),
+                    "warrant_bid": warrant_bid_disp,
+                    "opt_bid": opt_bid_ps,
+                    "opt_ask": opt_ask_ps,
+                    "warrant_per_share": warrant_ps,
+                    "opt_per_share": round(opt_ps, 4),
+                    "synthetic_price": synthetic_price,
+                    "bond_pv": bond_pv,
+                    "price_diff": round(price_diff, 4),
+                    "price_diff_pct": pct,
+                    "warrant_iv": warrant_iv,
+                    "opt_iv": opt_iv,
+                    "iv_diff": round((opt_iv or 0) - (warrant_iv or 0), 4),
+                })
+
+            # Executable: long warrant (buy@ask) vs short synthetic (sell opt@bid).
+            if opt_bid_ps is not None:
+                price_diff = round(_synth(opt_bid_ps) - warrant_ask_per_share, 4)
+                # Guards: short option must not outlive the long warrant, and the
+                # strike gap must be on the no-downside side (Call: Ko>=Kw, Put:
+                # Ko<=Kw) so the residual is a bounded, never-negative vertical.
+                dte_ok = int(opt["days_to_expiry"]) <= int(w["days_to_expiry"])
+                strike_ok = (Ko >= Kw) if is_call else (Ko <= Kw)
+                if price_diff > 0 and dte_ok and strike_ok:
+                    _emit(True, opt_bid_ps, warrant_ask_per_share, price_diff)
+
+            # Non-executable debug: short warrant (sell@bid) vs long synthetic
+            # (buy opt@ask). No guards — warrants aren't shortable anyway.
+            if opt_ask_ps is not None:
+                price_diff = round(_synth(opt_ask_ps) - warrant_bid_per_share, 4)
+                if price_diff < 0:
+                    _emit(False, opt_ask_ps, warrant_bid_per_share, price_diff)
+
+    return rows
+
+
 def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
-                  positive_loose=False, min_volume=0):
+                  positive_loose=False, min_volume=0, strategy="same_type"):
     all_rows = []
     errors = []
 
@@ -581,7 +732,10 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
             continue
 
         try:
-            opt_df = options_logic.fetch_options([code], option_type, min_days=1, compute_iv=False)
+            # PCP pairs a warrant with the OPPOSITE-type option, so the option
+            # fetch must include both types regardless of the warrant filter.
+            opt_type_fetch = "All" if strategy == "pcp" else option_type
+            opt_df = options_logic.fetch_options([code], opt_type_fetch, min_days=1, compute_iv=False)
             opt_df = opt_df[opt_df["is_live"]]
             if min_volume > 0:
                 opt_df = opt_df[opt_df["volume"] >= min_volume]
@@ -593,10 +747,15 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
             errors.append(f"{code}: no live options")
             continue
 
-        rows = _match_warrants_to_options(
-            warrant_df, opt_df, opt_contract_size, max_strike_diff_pct, max_dte_diff,
-            positive_loose=positive_loose,
-        )
+        if strategy == "pcp":
+            rows = _match_warrants_pcp(
+                warrant_df, opt_df, opt_contract_size, max_strike_diff_pct, max_dte_diff,
+            )
+        else:
+            rows = _match_warrants_to_options(
+                warrant_df, opt_df, opt_contract_size, max_strike_diff_pct, max_dte_diff,
+                positive_loose=positive_loose,
+            )
         all_rows.extend(rows)
 
     if not all_rows:
@@ -604,7 +763,12 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
         raise RuntimeError(msg)
 
     result = pd.DataFrame(all_rows)
-    if "price_diff_pct" in result.columns:
+    if strategy == "pcp" and "executable" in result.columns:
+        # Executable arbs first, then by richest mispricing.
+        result = result.sort_values(
+            ["executable", "price_diff_pct"], ascending=[False, False]
+        )
+    elif "price_diff_pct" in result.columns:
         result = result.sort_values("price_diff_pct", ascending=False)
     return result
 
@@ -1001,9 +1165,11 @@ def arb_finder():
     max_dte_diff = int(data.get("max_dte_diff", 5))
     positive_loose = bool(data.get("positive_loose", False))
     min_volume = int(data.get("min_volume", 0) or 0)
+    strategy = data.get("strategy", "same_type")
     try:
         df = _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
-                           positive_loose=positive_loose, min_volume=min_volume)
+                           positive_loose=positive_loose, min_volume=min_volume,
+                           strategy=strategy)
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
         return jsonify({"rows": rows, "count": len(rows)})
     except Exception as e:
@@ -1019,9 +1185,11 @@ def arb_finder_csv():
     max_dte_diff = int(data.get("max_dte_diff", 5))
     positive_loose = bool(data.get("positive_loose", False))
     min_volume = int(data.get("min_volume", 0) or 0)
+    strategy = data.get("strategy", "same_type")
     try:
         df = _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
-                           positive_loose=positive_loose, min_volume=min_volume)
+                           positive_loose=positive_loose, min_volume=min_volume,
+                           strategy=strategy)
     except Exception:
         df = pd.DataFrame()
     output = io.StringIO()

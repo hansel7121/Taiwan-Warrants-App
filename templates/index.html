@@ -622,6 +622,12 @@
                   <option value="2882">2882 國泰金</option>
                 </select>
               </div>
+              <label>Strategy
+                <select id="arbStrategy" onchange="onArbStrategyChange()" title="Call-Call/Put-Put: match warrant to same-type option. Put-Call Parity: price a warrant against the synthetic built from the opposite-type option + underlying + risk-free bond.">
+                  <option value="same_type">Call-Call / Put-Put</option>
+                  <option value="pcp">Put-Call Parity</option>
+                </select>
+              </label>
               <label>Option Type
                 <select id="arbOptionType">
                   <option value="All">All</option>
@@ -2171,7 +2177,15 @@
           max_dte_diff: parseInt(document.getElementById("arbMaxDteDiff").value) ?? 5,
           min_volume: parseInt(document.getElementById("arbMinVolume").value) || 0,
           positive_loose: document.getElementById("arbPositiveLoose").checked,
+          strategy: document.getElementById("arbStrategy").value,
         };
+      }
+
+      // In PCP mode the loose-price toggle is meaningless (synthetic is priced
+      // off bid/ask directly), so hide it to avoid confusion.
+      function onArbStrategyChange() {
+        const pcp = document.getElementById("arbStrategy").value === "pcp";
+        document.getElementById("arbPositiveLoose").closest("label").style.display = pcp ? "none" : "";
       }
 
       async function fetchArbData() {
@@ -2195,8 +2209,10 @@
           return;
         }
         currentArbData = data.rows;
-        document.getElementById("arb-status").textContent =
-          `${data.count} matched pairs — positive price_diff: buy warrant / sell option; negative: buy option / sell warrant`;
+        const pcp = document.getElementById("arbStrategy").value === "pcp";
+        document.getElementById("arb-status").textContent = pcp
+          ? `${data.count} PCP pairs — executable: long warrant / short synthetic; non-executable (debug): short warrant / long synthetic`
+          : `${data.count} matched pairs — positive price_diff: buy warrant / sell option; negative: buy option / sell warrant`;
         document.getElementById("arbDownloadBtn").style.display = "inline-block";
         renderArbTable(currentArbData);
       }
@@ -2221,6 +2237,10 @@
             let val = row[c] === null ? "—" : row[c];
             if (c === "type") {
               val = `<span class="${typeCls}">${val}</span>`;
+            } else if (c === "executable") {
+              val = row[c]
+                ? `<span class="put" style="font-weight:600">exec</span>`
+                : `<span style="color:var(--muted)">debug</span>`;
             } else if (c === "price_diff_pct" && row[c] !== null) {
               const cls = row[c] > 0 ? "put" : "call";
               val = `<span class="${cls}">${val}%</span>`;
@@ -2262,12 +2282,13 @@
 
       // ── Direct Match Modal ─────────────────────────────────────────────
       function openDirectModal(row) {
+        const isPcp = "executable" in row;   // PCP rows carry the executable flag
         // Re-map Direct Match row fields to the shape openArbModal expects
         const mapped = {
           warrant_code:     row.warrant_code,
           warrant_name:     row.warrant_name,
           warrant_type:     row.type,
-          opt_type:         row.type,            // same type in Direct Match
+          opt_type:         isPcp ? row.opt_type : row.type,  // PCP pairs opposite type
           option_contract:  row.option_contract,
           underlying_price: row.underlying_price,
           warrant_dte:      row.warrant_dte,
@@ -2284,16 +2305,18 @@
           opt_ask:          row.opt_ask,
           warrant_per_share:row.warrant_per_share,
           opt_per_share:    row.opt_per_share,
-          // Use price_diff as the arb signal (opt_per_share - warrant_per_share)
+          // Use price_diff as the arb signal (synthetic − warrant per share)
           pcp_diff:         row.price_diff,
           pcp_diff_pct:     row.price_diff_pct,
-          // Synthetic price = opt_per_share (no PCP conversion needed — same type)
-          synthetic_price:  row.opt_per_share,
-          bond_pv:          null,
+          // PCP: real synthetic + bond PV from the backend. Same-type: synthetic
+          // = the option price itself (no conversion), no bond leg.
+          synthetic_price:  isPcp ? row.synthetic_price : row.opt_per_share,
+          bond_pv:          isPcp ? row.bond_pv : null,
+          executable:       isPcp ? row.executable : true,
           warrant_iv:       row.warrant_iv,
           opt_iv:           row.opt_iv,
         };
-        openArbModal(mapped, "direct");
+        openArbModal(mapped, isPcp ? "pcp" : "direct");
       }
 
       // ── PCP Trade Modal ─────────────────────────────────────────────────
@@ -2369,10 +2392,13 @@
         const modeLabel = mode === "twus" ? "TW Opt / US Opt" : mode === "us" ? "US Option Match" : mode === "direct" ? "Direct Match" : "PCP Arb";
         document.getElementById("pcp-modal-title").textContent =
           `${row.warrant_name} (${row.warrant_type}) ↔ ${row.option_contract} (${row.opt_type})  —  ${modeLabel}`;
-        document.getElementById("pcp-legs-caption").textContent =
-          mode === "twus"
+        const pcpNonExec = mode === "pcp" && row.executable === false;
+        document.getElementById("pcp-legs-caption").innerHTML =
+          (mode === "twus"
             ? `Trade Legs (matched ${contractSize.toLocaleString()} TW shares = ${row.tw_contracts} TW contract × 2,000 = ${row.us_contracts} US contracts × 500)`
-            : `Trade Legs (per 1 options contract = ${contractSize.toLocaleString()} ${mode === "us" ? "TW shares" : "shares"})`;
+            : `Trade Legs (per 1 options contract = ${contractSize.toLocaleString()} ${mode === "us" ? "TW shares" : "shares"})`)
+          + (pcpNonExec ? ` <span class="call" style="font-weight:700">— NON-EXECUTABLE (warrants can't be shorted; debug only)</span>` : "")
+          + (mode === "pcp" ? `<br><span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted)">European PCP, dividends ignored — a pair whose expiry crosses an ex-dividend date is mispriced (synthetic call biased high / put low).</span>` : "");
 
         // ── Trade legs ──────────────────────────────────────────────────
         let legs;
@@ -2419,17 +2445,45 @@
             ];
           }
         } else {
-          legs = isCall ? [
-            { action:"BUY",   instrument:`${(n/1000).toLocaleString(undefined,{maximumFractionDigits:3})} 張 (${n.toLocaleString()} units) × ${row.warrant_code} (call warrant)`,  qty:n,      price:row.warrant_ask,       cf:-(n*row.warrant_ask) },
-            { action:"SHORT", instrument:`${contractSize.toLocaleString()} shares TSMC`,   qty:-contractSize, price:S0,           cf: contractSize*S0 },
-            { action:"LEND",  instrument:`Bond (receive ${Ko.toFixed(0)} × ${contractSize.toLocaleString()} at expiry)`, qty:contractSize, price:bondPv.toFixed(2), cf:-(contractSize*bondPv) },
-            { action:"SELL",  instrument:`${row.option_contract} put option (×${contractSize.toLocaleString()} shares)`, qty:contractSize, price:row.opt_ask, cf: contractSize*row.opt_ask },
-          ] : [
-            { action:"BUY",   instrument:`${(n/1000).toLocaleString(undefined,{maximumFractionDigits:3})} 張 (${n.toLocaleString()} units) × ${row.warrant_code} (put warrant)`,   qty:n,      price:row.warrant_ask,       cf:-(n*row.warrant_ask) },
-            { action:"BUY",   instrument:`${contractSize.toLocaleString()} shares TSMC`,  qty:contractSize, price:S0,           cf:-contractSize*S0 },
-            { action:"BORROW",instrument:`Bond (repay ${Ko.toFixed(0)} × ${contractSize.toLocaleString()} at expiry)`, qty:contractSize, price:bondPv.toFixed(2), cf: contractSize*bondPv },
-            { action:"SELL",  instrument:`${row.option_contract} call option (×${contractSize.toLocaleString()} shares)`, qty:contractSize, price:row.opt_ask, cf: contractSize*row.opt_ask },
-          ];
+          // PCP: 4-leg synthetic. Executable = long warrant / short synthetic;
+          // non-executable = short warrant / long synthetic (every leg flipped).
+          // Warrant priced per unit (ask when buying, bid when shorting); option
+          // uses opt_per_share (bid for exec, ask for non-exec, set by backend).
+          const executable = row.executable !== false;
+          const pcpBondPv = row.bond_pv ?? bondPv;
+          const wPrice = executable ? row.warrant_ask : (row.warrant_bid ?? row.warrant_ask);
+          const optPrice = row.opt_per_share;
+          const cs = contractSize;
+          const wLabel = `${(n/1000).toLocaleString(undefined,{maximumFractionDigits:3})} 張 (${n.toLocaleString()} units) × ${row.warrant_code} (${row.warrant_type.toLowerCase()} warrant)`;
+          const stockLabel = `${cs.toLocaleString()} shares ${row.warrant_name || row.warrant_code}`;
+          const optLabel = `${row.option_contract} ${row.opt_type.toLowerCase()} option (×${cs.toLocaleString()} shares)`;
+          const lendLabel = `Bond (lend ${pcpBondPv.toFixed(2)} → receive ${Ko.toFixed(0)} × ${cs.toLocaleString()} at expiry)`;
+          const borrowLabel = `Bond (borrow ${pcpBondPv.toFixed(2)} → repay ${Ko.toFixed(0)} × ${cs.toLocaleString()} at expiry)`;
+          if (executable) {
+            legs = isCall ? [
+              { action:"BUY",   instrument:wLabel,     qty:n,   price:wPrice,     cf:-(n*wPrice) },
+              { action:"SHORT", instrument:stockLabel, qty:-cs, price:S0,         cf: cs*S0 },
+              { action:"LEND",  instrument:lendLabel,  qty:cs,  price:pcpBondPv,  cf:-(cs*pcpBondPv) },
+              { action:"SELL",  instrument:optLabel,   qty:cs,  price:optPrice,   cf: cs*optPrice },
+            ] : [
+              { action:"BUY",   instrument:wLabel,      qty:n,  price:wPrice,     cf:-(n*wPrice) },
+              { action:"BUY",   instrument:stockLabel,  qty:cs, price:S0,         cf:-cs*S0 },
+              { action:"BORROW",instrument:borrowLabel, qty:cs, price:pcpBondPv,  cf: cs*pcpBondPv },
+              { action:"SELL",  instrument:optLabel,    qty:cs, price:optPrice,   cf: cs*optPrice },
+            ];
+          } else {
+            legs = isCall ? [
+              { action:"SHORT", instrument:wLabel,      qty:-n, price:wPrice,     cf: n*wPrice },
+              { action:"BUY",   instrument:stockLabel,  qty:cs, price:S0,         cf:-cs*S0 },
+              { action:"BORROW",instrument:borrowLabel, qty:cs, price:pcpBondPv,  cf: cs*pcpBondPv },
+              { action:"BUY",   instrument:optLabel,    qty:cs, price:optPrice,   cf:-cs*optPrice },
+            ] : [
+              { action:"SHORT", instrument:wLabel,     qty:-n,  price:wPrice,     cf: n*wPrice },
+              { action:"SHORT", instrument:stockLabel, qty:-cs, price:S0,         cf: cs*S0 },
+              { action:"LEND",  instrument:lendLabel,  qty:cs,  price:pcpBondPv,  cf:-(cs*pcpBondPv) },
+              { action:"BUY",   instrument:optLabel,   qty:cs,  price:optPrice,   cf:-cs*optPrice },
+            ];
+          }
         }
         const netCf = legs.reduce((s,l)=>s+l.cf, 0);
         _pcpLegs = legs; _pcpNetCf = netCf;   // snapshot for Enter Trade
@@ -2460,7 +2514,7 @@
         // Row 1: Option (raw market price of the option leg)
         // Row 2: Warrant (raw, normalised per share)
         // Row 3: Difference after PCP — option becomes synthetic same-type as warrant
-        const optPrice  = row.opt_ask;           // raw option price per share (put or call)
+        const optPrice  = row.opt_per_share ?? row.opt_ask;   // option leg price actually traded (bid/ask per direction)
         const wPrice    = row.warrant_per_share; // warrant price per share
         const synthPrice= row.synthetic_price;   // option converted to same type as warrant via PCP
         const pcpDiff   = row.pcp_diff;          // synthPrice − wPrice
@@ -2541,6 +2595,20 @@
         } else {
           premSection.style.display = "none";
           scenSection.style.display = "none";
+        }
+
+        // Non-executable PCP debug rows can't be traded — disable Enter Trade.
+        const enterBtn = document.getElementById("pcp-enter-trade");
+        if (pcpNonExec) {
+          enterBtn.disabled = true;
+          enterBtn.style.opacity = "0.4";
+          enterBtn.style.cursor = "not-allowed";
+          enterBtn.title = "Non-executable (short warrant) — debug view only";
+        } else {
+          enterBtn.disabled = false;
+          enterBtn.style.opacity = "";
+          enterBtn.style.cursor = "pointer";
+          enterBtn.title = "";
         }
 
         document.getElementById("pcpModal").style.display = "block";
@@ -2982,7 +3050,7 @@
         }
         const nClosed = portfolioData.filter(t => t.closed).length;
         status.textContent = `${portfolioData.length} trade${portfolioData.length>1?"s":""} · ${nClosed} closed`;
-        const modeLabel = { direct: "Direct", us: "US Opt", twus: "TW/US Opt" };
+        const modeLabel = { direct: "Direct", us: "US Opt", twus: "TW/US Opt", pcp: "PCP" };
         let html = "<table><thead><tr>"
           + ["Entered","Type","×","Trade","Net premium (NT$)","P&L at expiry now (NT$)","Status","Realized P&L (NT$)",""].map(h=>`<th>${h}</th>`).join("")
           + "</tr></thead><tbody>";
@@ -3092,10 +3160,13 @@
           return;
         }
 
-        // Direct Match: no ADR/FX basis.
-        if (t.mode === "direct" || !t.us_stock_code || t.entry_premium == null) {
+        // Direct Match / PCP: no ADR/FX basis.
+        if (t.mode === "direct" || t.mode === "pcp" || !t.us_stock_code || t.entry_premium == null) {
+          const legNote = t.mode === "pcp"
+            ? "Put-call-parity trade — P&L is set by the warrant, option, underlying and risk-free bond legs held to expiry (dividends ignored; a pair spanning an ex-dividend date is mispriced)."
+            : "Same-underlying trade — no ADR premium / FX basis to track. P&L is set by the two Taiwan legs held to expiry.";
           document.getElementById("pf-basis").innerHTML =
-            `<div style="background:var(--surface);border-radius:6px;padding:12px 14px;line-height:1.6">Same-underlying trade — no ADR premium / FX basis to track. P&L is set by the two Taiwan legs held to expiry.</div>`;
+            `<div style="background:var(--surface);border-radius:6px;padding:12px 14px;line-height:1.6">${legNote}</div>`;
           return;
         }
 
