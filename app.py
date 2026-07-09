@@ -735,6 +735,15 @@ def _match_option_legs(tw_df, us_df, tw_contract_shares, us_contract_shares,
             trade = "Long US / Short TW"
             exec_opt, exec_warrant = us_ask, tw_bid
 
+        # The short leg must expire no later than the long leg. If the short
+        # leg expired first, the long leg would be gone while the short lives
+        # on — a naked short option, which is exactly the risk we refuse to
+        # carry. Short = US when "Long TW / Short US", else TW.
+        short_dte = int(us["days_to_expiry"]) if trade == "Long TW / Short US" else int(tw["days_to_expiry"])
+        long_dte = int(tw["days_to_expiry"]) if trade == "Long TW / Short US" else int(us["days_to_expiry"])
+        if short_dte > long_dte:
+            continue  # would leave a naked short leg after the long expires
+
         # Entry credit per share (sell price − buy price), sign per direction.
         # pcp_diff sign drives the modal payoff direction: >0 long-TW/short-US.
         if trade == "Long TW / Short US":
