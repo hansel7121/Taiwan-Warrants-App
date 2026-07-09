@@ -744,6 +744,21 @@ def _match_option_legs(tw_df, us_df, tw_contract_shares, us_contract_shares,
         if short_dte > long_dte:
             continue  # would leave a naked short leg after the long expires
 
+        # Strike must be on the FAVORABLE side or the pair is just a vertical
+        # spread with a real max loss, not a no-downside structure. With a
+        # received credit the no-loss vertical requires:
+        #   Call: short strike >= long strike (short the higher call)
+        #   Put:  short strike <= long strike (short the lower put)
+        # Anything else has min payoff = credit − (unfavorable gap) < 0.
+        short_strike = float(us["strike"]) if trade == "Long TW / Short US" else float(tw["strike"])
+        long_strike = float(tw["strike"]) if trade == "Long TW / Short US" else float(us["strike"])
+        if tw["type"] == "Put":
+            if short_strike > long_strike:
+                continue  # short the higher put -> downside loss
+        else:
+            if short_strike < long_strike:
+                continue  # short the lower call -> downside loss
+
         # Entry credit per share (sell price − buy price), sign per direction.
         # pcp_diff sign drives the modal payoff direction: >0 long-TW/short-US.
         if trade == "Long TW / Short US":
