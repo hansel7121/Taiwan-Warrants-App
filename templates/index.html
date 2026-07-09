@@ -2730,13 +2730,10 @@
         if ((t.mode === "us" || t.mode === "twus") && t.us_stock_code) {
           const b = _basisCache[t.us_stock_code];
           if (!b || b.p == null || b.fx == null) return null;   // basis pending/unavailable
-          // Use the SAME valuation as the popup's "P&L at expiry now": unwind at
-          // the first expiry (near leg intrinsic, surviving leg marked at its
-          // Black-Scholes time value). _payoffAtSpot settled BOTH legs at pure
-          // intrinsic, which ignores the surviving leg's time value and overstates
-          // P&L whenever the two legs have different DTE.
-          const fxRatio = (fx0 && b.fx) ? b.fx / fx0 : 1;
-          return _evPnlAtPremium(r, b.p, p0, fxRatio, { survivor: null, survivorSell: null }) * mult;
+          // Intrinsic-only floor: both legs valued at intrinsic at the current
+          // spot. The surviving (long) leg's time value is ignored, so this is a
+          // conservative lower bound on P&L. Matches the popup's bottom line.
+          return _payoffAtSpot(r, r.underlying_price, b.p, p0, (fx0 && b.fx) ? b.fx / fx0 : 1, mult);
         }
         // Direct / no ADR basis: at-expiry payoff at entry basis, current spot.
         return _payoffAtSpot(r, r.underlying_price, p0, p0, 1, mult);
@@ -3123,15 +3120,14 @@
         const dFx = fx0 ? (curFx / fx0 - 1) * 100 : 0; // FX move, %
 
         // P&L at expiry at current basis, plus the premium-only / FX split.
-        // Scaled by the trade multiplier. Pass an opts object so the loose-mode
-        // EXIT half-spread bonus is skipped — at expiry the legs cash-settle at
-        // intrinsic, there is no bid-ask spread to recapture. This keeps the
-        // table consistent with the payoff graph and the realized-P&L math.
+        // Intrinsic-only floor at the current spot — both legs at intrinsic, the
+        // surviving (long) leg's time value ignored (conservative). The column
+        // and this popup use the identical _payoffAtSpot valuation.
         const mult = t.mult || 1;
-        const noLoose = { survivor: null, survivorSell: null };
-        const pnlNow = _evPnlAtPremium(row, curP, p0, fxRatio, noLoose) * mult;
-        const pnlPremOnly = _evPnlAtPremium(row, curP, p0, 1, noLoose) * mult;
-        const pnlEntry = _evPnlAtPremium(row, p0, p0, 1, noLoose) * mult;
+        const S0 = row.underlying_price;
+        const pnlNow = _payoffAtSpot(row, S0, curP, p0, fxRatio, mult);
+        const pnlPremOnly = _payoffAtSpot(row, S0, curP, p0, 1, mult);
+        const pnlEntry = _payoffAtSpot(row, S0, p0, p0, 1, mult);
         const fxEffect = pnlNow - pnlPremOnly;
         const premEffect = pnlPremOnly - pnlEntry;
 
