@@ -2730,7 +2730,13 @@
         if ((t.mode === "us" || t.mode === "twus") && t.us_stock_code) {
           const b = _basisCache[t.us_stock_code];
           if (!b || b.p == null || b.fx == null) return null;   // basis pending/unavailable
-          return _payoffAtSpot(r, r.underlying_price, b.p, p0, (fx0 && b.fx) ? b.fx / fx0 : 1, mult);
+          // Use the SAME valuation as the popup's "P&L at expiry now": unwind at
+          // the first expiry (near leg intrinsic, surviving leg marked at its
+          // Black-Scholes time value). _payoffAtSpot settled BOTH legs at pure
+          // intrinsic, which ignores the surviving leg's time value and overstates
+          // P&L whenever the two legs have different DTE.
+          const fxRatio = (fx0 && b.fx) ? b.fx / fx0 : 1;
+          return _evPnlAtPremium(r, b.p, p0, fxRatio, { survivor: null, survivorSell: null }) * mult;
         }
         // Direct / no ADR basis: at-expiry payoff at entry basis, current spot.
         return _payoffAtSpot(r, r.underlying_price, p0, p0, 1, mult);
