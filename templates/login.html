@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      :root {
+        --bg: #0d0f16; --panel: #13161f; --surface: #1a1d2a; --border: #252836;
+        --accent: #4f8ef7; --accent2: #3a6fd8; --danger: #ef4444; --success: #22c55e;
+        --text: #e2e8f0; --muted: #8b90a0; --radius: 8px;
+      }
+      body {
+        font-family: 'Inter', system-ui, sans-serif; background: var(--bg);
+        color: var(--text); min-height: 100vh; font-size: 13px;
+        display: flex; align-items: center; justify-content: center; padding: 24px;
+      }
+      .card {
+        background: var(--panel); border: 1px solid var(--border);
+        border-radius: var(--radius); padding: 32px; width: 100%; max-width: 360px;
+      }
+      h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.5px; margin-bottom: 6px; }
+      p.sub { color: var(--muted); margin-bottom: 22px; font-size: 12px; }
+      label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+      input {
+        width: 100%; padding: 10px 12px; background: var(--surface);
+        border: 1px solid var(--border); border-radius: var(--radius);
+        color: var(--text); font-family: inherit; font-size: 13px; margin-bottom: 16px;
+      }
+      input:focus { outline: none; border-color: var(--accent); }
+      button {
+        width: 100%; padding: 11px; border: none; border-radius: var(--radius);
+        background: var(--accent); color: #fff; font-family: inherit;
+        font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s;
+      }
+      button:hover { background: var(--accent2); }
+      button:disabled { opacity: 0.6; cursor: default; }
+      .msg { margin-top: 16px; font-size: 12px; line-height: 1.5; }
+      .msg.error { color: var(--danger); }
+      .msg.ok { color: var(--success); }
+      .hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Taiwan Warrants</h1>
+      <p class="sub">Sign in with a magic link sent to your email.</p>
+
+      <div id="form">
+        <label for="email">Email address</label>
+        <input id="email" type="email" placeholder="you@example.com" autocomplete="email" />
+        <button id="send">Send magic link</button>
+      </div>
+
+      <div id="sent" class="hidden msg ok">
+        Check your email for a sign-in link. You can close this tab once you click it.
+      </div>
+
+      <div id="error" class="hidden msg error"></div>
+    </div>
+
+    <script>
+      const supabase = window.supabase.createClient(
+        "{{ supabase_url }}",
+        "{{ supabase_anon_key }}"
+      );
+
+      const emailEl = document.getElementById("email");
+      const sendBtn = document.getElementById("send");
+      const formEl  = document.getElementById("form");
+      const sentEl  = document.getElementById("sent");
+      const errEl   = document.getElementById("error");
+
+      function showError(text) {
+        errEl.textContent = text;
+        errEl.classList.remove("hidden");
+      }
+      function clearError() { errEl.classList.add("hidden"); }
+
+      // If already signed in (including after magic-link redirect), go to app.
+      supabase.auth.getSession().then(({ data }) => {
+        if (data.session) window.location.replace("/");
+      });
+
+      supabase.auth.onAuthStateChange((event, session) => {
+        if (event === "SIGNED_IN" && session) window.location.replace("/");
+      });
+
+      sendBtn.addEventListener("click", async () => {
+        clearError();
+        const email = emailEl.value.trim();
+        if (!email) { showError("Please enter your email address."); return; }
+        sendBtn.disabled = true;
+        sendBtn.textContent = "Sending...";
+        const { error } = await supabase.auth.signInWithOtp({
+          email,
+          options: { emailRedirectTo: window.location.origin + "/login" }
+        });
+        sendBtn.disabled = false;
+        sendBtn.textContent = "Send magic link";
+        if (error) { showError(error.message); return; }
+        formEl.classList.add("hidden");
+        sentEl.classList.remove("hidden");
+      });
+
+      emailEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") sendBtn.click();
+      });
+    </script>
+  </body>
+</html>

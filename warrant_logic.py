@@ -10,6 +10,7 @@ import json
 import re
 import asyncio
 import threading
+import time
 import os
 from playwright.async_api import async_playwright
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -332,34 +333,26 @@ def build_warrant_df(cmoney_results, compute_iv=True):
     return pd.DataFrame(rows)[COL_ORDER]
 
 
-def fetch_warrants(
-    stock_codes,
-    option_type="All",
-    min_days=0,
-    max_days=365,
-    min_leverage=0.0,
-    max_tv_pct=100.0,
-    min_volume=0,
-    compute_iv=True,
-):
+# ── Warrant result cache ─────────────────────────────────────────────────────
+# Raw CMoney results cached per underlying so the background scheduler can
+# refresh them off the request path. Fetch-on-miss: the first request after
+# boot (or for an uncached stock) behaves exactly like the old live path.
+_warrant_cache: dict = {}  # stock_code -> (timestamp, {warrant_code: result})
+_warrant_cache_lock = threading.Lock()
+WARRANT_CACHE_TTL = 1800  # safety margin over the 15-min scheduled refresh
+
+
+def _warrant_codes_for(stock_codes):
+    """Resolve each underlying to its full warrant-code universe (all types).
+
+    Warrant names are "<underlying><issuer><serial>", e.g. 長榮鋼國票59購01.
+    A plain prefix test leaks a longer-named stock's warrants into a shorter
+    one (長榮 vs 長榮鋼). Disambiguate structurally: a warrant belongs to this
+    underlying only if no *longer* real-security name (e.g. 長榮鋼, 長榮航) also
+    prefixes the warrant name. This replaces a hand-maintained issuer-char
+    whitelist that silently dropped every warrant of any issuer not listed.
+    """
     today = datetime.today()
-
-    if option_type == "Call":
-        name_filter = "購"
-    elif option_type == "Put":
-        name_filter = "售"
-    else:
-        name_filter = None
-
-    if isinstance(stock_codes, str):
-        stock_codes = [stock_codes]
-
-    # Warrant names are "<underlying><issuer><serial>", e.g. 長榮鋼國票59購01.
-    # A plain prefix test leaks a longer-named stock's warrants into a shorter
-    # one (長榮 vs 長榮鋼). Disambiguate structurally: a warrant belongs to this
-    # underlying only if no *longer* real-security name (e.g. 長榮鋼, 長榮航) also
-    # prefixes the warrant name. This replaces a hand-maintained issuer-char
-    # whitelist that silently dropped every warrant of any issuer not listed.
     real_names = [v.name for v in twstock.codes.values() if "權證" not in v.type]
 
     def _make_matcher(name):
@@ -373,44 +366,104 @@ def fetch_warrants(
 
         return _name_matches
 
-    all_codes = []
+    code_map = {}
     for stock_code in stock_codes:
         stock_info = twstock.codes.get(stock_code, None)
         if stock_info is None:
+            code_map[stock_code] = []
             continue
-        name = stock_info.name
-        name_matches = _make_matcher(name)
+        name_matches = _make_matcher(stock_info.name)
         # Some underlyings appear in warrant names under an abbreviation that is
         # not the registered security name (e.g. ETF 元大台灣50 -> "台灣50"). The
-        # authoritative CommKey check below drops any wrong-underlying strays, so
-        # the alias here only needs to be permissive enough to fetch them.
+        # authoritative CommKey check downstream drops wrong-underlying strays,
+        # so the alias only needs to be permissive enough to fetch them.
         aliases = WARRANT_NAME_ALIASES.get(stock_code, [])
-        codes = [
+        code_map[stock_code] = [
             k
             for k, v in twstock.codes.items()
             if "權證" in v.type
             and (name_matches(v.name)
                  or v.name.startswith(stock_code)
                  or any(v.name.startswith(a) for a in aliases))
-            and (name_filter is None or name_filter in v.name)
             and datetime.strptime(v.start, "%Y/%m/%d") <= today
         ]
-        all_codes.extend(codes)
+    return code_map
 
-    all_codes = list(set(all_codes))
 
-    if not all_codes:
-        return pd.DataFrame(), "No warrants found"
+def get_warrant_results(stock_codes, force=False):
+    """Cached raw CMoney results for the given underlyings.
 
-    cmoney_results = get_cmoney_prices(all_codes)
+    Returns (results, as_of_ts, cached): merged {warrant_code: result}, the
+    oldest cache timestamp involved, and whether everything was served from
+    cache (False when any underlying was fetched live in this call).
+    """
+    now = time.time()
+    with _warrant_cache_lock:
+        need = [
+            sc for sc in stock_codes
+            if force or sc not in _warrant_cache
+            or now - _warrant_cache[sc][0] >= WARRANT_CACHE_TTL
+        ]
+    if need:
+        code_map = _warrant_codes_for(need)
+        all_codes = sorted({c for cs in code_map.values() for c in cs})
+        fetched = get_cmoney_prices(all_codes) if all_codes else {}
+        ts = time.time()
+        with _warrant_cache_lock:
+            for sc in need:
+                _warrant_cache[sc] = (
+                    ts,
+                    {c: fetched[c] for c in code_map.get(sc, []) if c in fetched},
+                )
+    merged, as_of = {}, None
+    with _warrant_cache_lock:
+        for sc in stock_codes:
+            ent = _warrant_cache.get(sc)
+            if not ent:
+                continue
+            merged.update(ent[1])
+            as_of = ent[0] if as_of is None else min(as_of, ent[0])
+    return merged, as_of, not need
+
+
+def refresh_warrant_cache(stock_codes):
+    """Scheduler hook: force-refetch the given underlyings into the cache."""
+    get_warrant_results(stock_codes, force=True)
+
+
+def cache_as_of(stock_codes):
+    """Oldest warrant-cache timestamp (epoch) for these codes, or None."""
+    with _warrant_cache_lock:
+        ts = [_warrant_cache[sc][0] for sc in stock_codes if sc in _warrant_cache]
+    return min(ts) if ts else None
+
+
+def fetch_warrants(
+    stock_codes,
+    option_type="All",
+    min_days=0,
+    max_days=365,
+    min_leverage=0.0,
+    max_tv_pct=100.0,
+    min_volume=0,
+    compute_iv=True,
+):
+    if isinstance(stock_codes, str):
+        stock_codes = [stock_codes]
+
+    cmoney_results, as_of, cached = get_warrant_results(stock_codes)
+    meta = {
+        "as_of": datetime.fromtimestamp(as_of).isoformat() if as_of else None,
+        "cached": cached,
+    }
 
     if not cmoney_results:
-        return pd.DataFrame(), "No active warrants found"
+        return pd.DataFrame(), "No warrants found", meta
 
     df = build_warrant_df(cmoney_results, compute_iv=compute_iv)
 
     if df.empty:
-        return pd.DataFrame(), "No warrants passed filters"
+        return pd.DataFrame(), "No warrants passed filters", meta
 
     df = df[COL_ORDER]
     # Verify the true underlying: the name prefilter is intentionally permissive
@@ -419,7 +472,7 @@ def fetch_warrants(
     wanted = {str(c) for c in stock_codes}
     df = df[df["underlying_code"].astype(str).isin(wanted)]
     if df.empty:
-        return pd.DataFrame(), "No warrants for requested underlying"
+        return pd.DataFrame(), "No warrants for requested underlying", meta
     df = df[(df["days_to_expiry"] >= min_days) & (df["days_to_expiry"] <= max_days)]
     # leverage_calc is NaN when compute_iv=False; only filter when a real
     # threshold is set (NaN >= 0 is False and would wipe the whole frame).
@@ -430,11 +483,11 @@ def fetch_warrants(
     if option_type != "All":
         df = df[df["type"] == option_type]
 
-    return df, None
+    return df, None, meta
 
 
 def fetch_iv_surface(stock_codes, option_type="All"):
-    df, error = fetch_warrants(
+    df, error, meta = fetch_warrants(
         stock_codes,
         option_type=option_type,
         min_days=0,
@@ -444,7 +497,7 @@ def fetch_iv_surface(stock_codes, option_type="All"):
         min_volume=0,
     )
     if df.empty:
-        return None, error or "No data"
+        return None, error or "No data", meta
 
     df_clean = df[
         (df["iv_ask"] > 0.20)
@@ -455,6 +508,6 @@ def fetch_iv_surface(stock_codes, option_type="All"):
     ].copy()
 
     if df_clean.empty:
-        return None, "No warrants passed IV filter"
+        return None, "No warrants passed IV filter", meta
 
-    return df_clean, None
+    return df_clean, None, meta

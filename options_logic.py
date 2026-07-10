@@ -26,6 +26,45 @@ _spot_cache: dict = {}
 _CACHE_TTL = 1800  # 30 minutes
 
 
+def data_as_of(stock_codes):
+    """Oldest cache timestamp backing these codes' quotes (epoch), or None.
+
+    MIS (intraday) entries are checked first since they are the primary
+    source; EOD taifex entries only matter when MIS failed.
+    """
+    ts_list = []
+    for code in stock_codes:
+        cfg = COMMODITY_MAP.get(code)
+        if not cfg:
+            continue
+        mis_ts = [
+            ts for (cid, _kind), (ts, _rows) in _mis_cache.items()
+            if cid in cfg["commodity_ids"]
+        ]
+        if mis_ts:
+            ts_list.append(min(mis_ts))
+            continue
+        eod = _taifex_cache.get(",".join(cfg["commodity_ids"]))
+        if eod:
+            ts_list.append(eod[0])
+    return min(ts_list) if ts_list else None
+
+
+def refresh_cache(stock_codes):
+    """Scheduler hook: drop these codes' cached quotes and refetch them."""
+    for code in stock_codes:
+        cfg = COMMODITY_MAP.get(code)
+        if not cfg:
+            continue
+        for key in [k for k in _mis_cache if k[0] in cfg["commodity_ids"]]:
+            _mis_cache.pop(key, None)
+        _taifex_cache.pop(",".join(cfg["commodity_ids"]), None)
+        _spot_cache.pop(cfg["ticker"], None)
+    # compute_iv=False: warming only needs the raw quotes in cache; IV is
+    # computed per request from the cached raw data anyway.
+    fetch_options(stock_codes, option_type="All", min_days=0, compute_iv=False)
+
+
 def _decode(content):
     for enc in ("big5", "cp950", "utf-8-sig", "utf-8"):
         try:

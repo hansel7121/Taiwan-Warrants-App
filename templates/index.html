@@ -1031,6 +1031,15 @@
         "2882","3037","2303","2886",
       ];
 
+      // "updated N min ago" suffix for scanner status lines, from the
+      // as_of/cached fields the backend attaches to cached market data.
+      function asOfLabel(data) {
+        if (!data || !data.as_of) return "";
+        const mins = Math.max(0, Math.round((Date.now() - new Date(data.as_of).getTime()) / 60000));
+        const age = mins === 0 ? "updated just now" : `updated ${mins} min ago`;
+        return ` · ${age}${data.cached === false ? " (live fetch)" : ""}`;
+      }
+
       let currentData = [];
       let currentOptionsData = [];
       let sortCol = null;
@@ -1142,7 +1151,7 @@
         });
         const data = await res.json();
         currentData = data.rows;
-        document.getElementById("status").textContent = `${data.count} warrants`;
+        document.getElementById("status").textContent = `${data.count} warrants${asOfLabel(data)}`;
         document.getElementById("downloadBtn").style.display = "inline-block";
         renderTable(currentData);
       }
@@ -2064,7 +2073,7 @@
           return;
         }
         currentOptionsData = data.rows;
-        document.getElementById("opt-status").textContent = `${data.count} options`;
+        document.getElementById("opt-status").textContent = `${data.count} options${asOfLabel(data)}`;
         document.getElementById("optDownloadBtn").style.display = "inline-block";
         renderOptionsTable(currentOptionsData);
       }
@@ -2210,9 +2219,9 @@
         }
         currentArbData = data.rows;
         const pcp = document.getElementById("arbStrategy").value === "pcp";
-        document.getElementById("arb-status").textContent = pcp
+        document.getElementById("arb-status").textContent = (pcp
           ? `${data.count} PCP pairs — executable: long warrant / short synthetic; non-executable (debug): short warrant / long synthetic`
-          : `${data.count} matched pairs — positive price_diff: buy warrant / sell option; negative: buy option / sell warrant`;
+          : `${data.count} matched pairs — positive price_diff: buy warrant / sell option; negative: buy option / sell warrant`) + asOfLabel(data);
         document.getElementById("arbDownloadBtn").style.display = "inline-block";
         renderArbTable(currentArbData);
       }

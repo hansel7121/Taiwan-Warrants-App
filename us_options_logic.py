@@ -44,8 +44,28 @@ def contract_tw_shares(stock_code):
     """Taiwan shares controlled by one US option contract for this listing."""
     return US_CONTRACT_ADRS * US_ADR_MAP[stock_code]["adr_ratio"]
 
+# Full option chain per (stock_code, compute_iv); day-range and type filters
+# are applied per call so one scheduler warm-up serves every filter combo.
 _cache: dict = {}
-_CACHE_TTL = 45  # keep US option quotes fresh (Yahoo is already ~15 min delayed)
+_CACHE_TTL = 1200  # refreshed every 15 min by the scheduler (Yahoo is ~15 min delayed anyway)
+
+
+def data_as_of(stock_code):
+    """Timestamp (epoch) of the cached chain for this code, or None."""
+    ts_list = [
+        ts for (code, _civ), (ts, _df) in _cache.items() if code == stock_code
+    ]
+    return min(ts_list) if ts_list else None
+
+
+def refresh_cache(stock_codes):
+    """Scheduler hook: drop and refetch both cached chain variants per code."""
+    for code in stock_codes:
+        for civ in (True, False):
+            _cache.pop((code, civ), None)
+        # Scanner path (with IV) and arb path (without) cache separately.
+        fetch_us_options(code, "All", min_days=1, max_days=730, compute_iv=True)
+        fetch_us_options(code, "All", min_days=1, max_days=730, compute_iv=False)
 
 _prem_cache: dict = {}
 _PREM_TTL = 1800  # 30 minutes — 3y premium HISTORY only; the "now" point is refreshed live
@@ -351,10 +371,13 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
         raise RuntimeError(f"{stock_code}: no US ADR mapping")
 
     cfg = US_ADR_MAP[stock_code]
-    cache_key = (stock_code, option_type, min_days, max_days)
+    # The cache holds the FULL chain (all types, all expiries); the requested
+    # option_type/day-range are filter views applied on the way out, so a
+    # background warm-up serves every filter combination.
+    cache_key = (stock_code, compute_iv)
     hit = _cache.get(cache_key)
     if hit and time.time() - hit[0] < _CACHE_TTL:
-        return hit[1].copy()
+        return _filter_chain(hit[1], option_type, min_days, max_days)
 
     adr_ratio = cfg["adr_ratio"]             # ordinary shares per ADR
     adr = _last_price(cfg["adr_ticker"])     # USD per ADR
@@ -376,7 +399,7 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
     for exp in expiries:
         exp_ts = pd.Timestamp(exp)
         dte = int((exp_ts - today).days)
-        if dte < int(min_days) or dte > int(max_days):
+        if dte < 1:
             continue
         try:
             chain = tk.option_chain(exp)
@@ -385,8 +408,6 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
 
         for is_put, leg in ((False, chain.calls), (True, chain.puts)):
             opt_type = "Put" if is_put else "Call"
-            if option_type != "All" and opt_type != option_type:
-                continue
             for _, o in leg.iterrows():
                 K_usd = float(o.get("strike", np.nan))
                 bid_usd = float(o.get("bid", np.nan) or np.nan)
@@ -459,4 +480,13 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
 
     df = pd.DataFrame(rows).sort_values(["days_to_expiry", "strike"]).reset_index(drop=True)
     _cache[cache_key] = (time.time(), df.copy())
-    return df
+    return _filter_chain(df, option_type, min_days, max_days)
+
+
+def _filter_chain(df, option_type, min_days, max_days):
+    view = df[df["days_to_expiry"].between(int(min_days), int(max_days))]
+    if option_type != "All":
+        view = view[view["type"] == option_type]
+    if view.empty:
+        raise RuntimeError("no US options in range")
+    return view.copy().reset_index(drop=True)

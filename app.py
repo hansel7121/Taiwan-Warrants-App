@@ -2,11 +2,17 @@ from flask import Flask, render_template, request, jsonify, Response
 import warrant_logic
 import options_logic
 import us_options_logic
+import scheduler
 import os
 import json
 import numpy as np
 import pandas as pd
+from datetime import datetime
 from scipy.interpolate import griddata
+
+
+def _epoch_iso(ts):
+    return datetime.fromtimestamp(ts).isoformat() if ts else None
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
 data_dir = base_dir
@@ -161,7 +167,7 @@ def fetch():
     max_tv_pct = float(data.get("max_tv_pct", 100.0))
     min_volume = int(data.get("min_volume", 0))
 
-    df, error = warrant_logic.fetch_warrants(
+    df, error, meta = warrant_logic.fetch_warrants(
         stock_codes,
         option_type,
         min_days,
@@ -171,8 +177,8 @@ def fetch():
         min_volume,
     )
     if error and df.empty:
-        return jsonify({"rows": [], "count": 0, "error": error})
-    return jsonify({"rows": df.to_dict(orient="records"), "count": len(df)})
+        return jsonify({"rows": [], "count": 0, "error": error, **meta})
+    return jsonify({"rows": df.to_dict(orient="records"), "count": len(df), **meta})
 
 
 @app.route("/download", methods=["POST"])
@@ -186,7 +192,7 @@ def download():
     max_tv_pct = float(data.get("max_tv_pct", 100.0))
     min_volume = int(data.get("min_volume", 0))
 
-    df, error = warrant_logic.fetch_warrants(
+    df, error, _meta = warrant_logic.fetch_warrants(
         stock_codes,
         option_type,
         min_days,
@@ -220,7 +226,7 @@ def fetch_options():
         )
         # Use pandas JSON serialisation so NaN → null (browser JSON.parse rejects bare NaN)
         rows = json.loads(df.to_json(orient="records"))
-        return jsonify({"rows": rows, "count": len(df)})
+        return jsonify({"rows": rows, "count": len(df), "as_of": _epoch_iso(options_logic.data_as_of(stock_codes))})
     except Exception as e:
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
@@ -267,7 +273,11 @@ def us_options():
     try:
         df = _us_options_scan(stock_codes, option_type, min_days, max_days, min_volume)
         rows = json.loads(df.to_json(orient="records"))
-        return jsonify({"rows": rows, "count": len(df)})
+        as_of = min(
+            (t for t in (us_options_logic.data_as_of(c) for c in stock_codes) if t),
+            default=None,
+        )
+        return jsonify({"rows": rows, "count": len(df), "as_of": _epoch_iso(as_of)})
     except Exception as e:
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
@@ -340,9 +350,9 @@ def iv_surface():
     option_type = data.get("option_type", "All")
     highlight_code = data.get("highlight_code", "").strip()
 
-    df_clean, error = warrant_logic.fetch_iv_surface(stock_codes, option_type)
+    df_clean, error, meta = warrant_logic.fetch_iv_surface(stock_codes, option_type)
     if df_clean is None:
-        return jsonify({"error": error})
+        return jsonify({"error": error, **meta})
 
     x = df_clean["strike"].values.tolist()
     y = df_clean["days_to_expiry"].values.tolist()
@@ -379,6 +389,7 @@ def iv_surface():
             "codes": codes,
             "names": names,
             "highlight": highlight,
+            **meta,
         }
     )
 
@@ -706,7 +717,7 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
         # No time-value cap and no IV solve on the arb path: a positive price
         # arb only needs warrant ask + option bid, so nothing should drop a leg
         # over time value or a non-converging IV.
-        warrant_df, err = warrant_logic.fetch_warrants(
+        warrant_df, err, _meta = warrant_logic.fetch_warrants(
             [code], option_type, 0, 365, 0, 1e9, 0, compute_iv=False
         )
         if warrant_df.empty:
@@ -778,7 +789,7 @@ def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
         contract_size = us_options_logic.contract_tw_shares(code)  # TW shares/contract
 
         # No time-value cap and no IV solve on the arb path (see _build_arb_df).
-        warrant_df, err = warrant_logic.fetch_warrants(
+        warrant_df, err, _meta = warrant_logic.fetch_warrants(
             [code], option_type, 0, 365, 0, 1e9, 0, compute_iv=False
         )
         if warrant_df.empty:
@@ -1153,7 +1164,12 @@ def arb_finder():
                            positive_loose=positive_loose, min_volume=min_volume,
                            strategy=strategy)
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
-        return jsonify({"rows": rows, "count": len(rows)})
+        as_of = min(
+            (t for t in (warrant_logic.cache_as_of(stock_codes),
+                         options_logic.data_as_of(stock_codes)) if t),
+            default=None,
+        )
+        return jsonify({"rows": rows, "count": len(rows), "as_of": _epoch_iso(as_of)})
     except Exception as e:
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
@@ -1189,8 +1205,14 @@ def healthz():
     return jsonify({"status": "ok"})
 
 
+@app.route("/refresh", methods=["POST"])
+def refresh():
+    kind = (request.json or {}).get("kind", "all")
+    return jsonify(scheduler.force_refresh(kind))
+
+
 if __name__ == "__main__":
     # Local dev entry point. Production runs via wsgi.py + gunicorn.
-    warrant_logic.prefetch_cmoney_key()
+    scheduler.start()
     port = int(os.environ.get("PORT", 5001))
     app.run(host="0.0.0.0", port=port, debug=False)
