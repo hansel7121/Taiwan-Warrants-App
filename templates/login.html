@@ -106,6 +106,23 @@
         sendBtn.disabled = true;
         sendBtn.textContent = "Sending...";
         try {
+          // Pre-send allowlist check. Fail open: if the check itself errors
+          // (network/500) we still send, so a transient error can't lock out
+          // real users. Only a definite {allowed:false} blocks the send.
+          try {
+            const resp = await fetch("/check_email", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ email })
+            });
+            if (resp.ok) {
+              const j = await resp.json();
+              if (j && j.allowed === false) {
+                showError("This email is not on the invite list. Contact the administrator for access.");
+                return;
+              }
+            }
+          } catch (_) { /* fail open — proceed to send */ }
           const { error } = await _sb.auth.signInWithOtp({
             email,
             options: { emailRedirectTo: window.location.origin + "/login" }

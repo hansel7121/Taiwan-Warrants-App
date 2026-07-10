@@ -40,6 +40,18 @@ def login():
     return render_template("login.html", **auth.public_config())
 
 
+@app.route("/check_email", methods=["POST"])
+def check_email():
+    # Public pre-send allowlist check for the login page. Reuses auth._is_allowed
+    # (service-role query + 60s cache). If Supabase is unconfigured, allow so
+    # local no-auth dev isn't blocked.
+    if not os.environ.get("SUPABASE_URL"):
+        return jsonify({"allowed": True})
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    return jsonify({"allowed": auth._is_allowed(email)})
+
+
 @app.route("/get_portfolio")
 @require_auth
 def get_portfolio():
