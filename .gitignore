@@ -2,6 +2,8 @@ dist/
 build/
 .venv/
 .env
+.DS_Store
+.claude/
 *.spec
 __pycache__/
 *.pyc
