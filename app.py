@@ -1,14 +1,4 @@
-import sys
-import io
-
-if sys.stdout is None:
-    sys.stdout = io.StringIO()
-if sys.stderr is None:
-    sys.stderr = io.StringIO()
-
 from flask import Flask, render_template, request, jsonify, Response
-import threading
-import webbrowser
 import warrant_logic
 import options_logic
 import us_options_logic
@@ -18,16 +8,8 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import griddata
 
-base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-
-# User data (portfolio, custom stocks) must persist across runs. When frozen,
-# base_dir is a per-launch temp extraction dir (_MEIPASS) that is wiped each
-# run — writing data there loses it. Keep data next to the executable instead
-# (in dev this is the source dir). Templates/static still load from base_dir.
-if getattr(sys, "frozen", False):
-    data_dir = os.path.dirname(sys.executable)
-else:
-    data_dir = os.path.dirname(os.path.abspath(__file__))
+base_dir = os.path.dirname(os.path.abspath(__file__))
+data_dir = base_dir
 app = Flask(
     __name__,
     template_folder=os.path.join(base_dir, "templates"),
@@ -1202,17 +1184,13 @@ def arb_finder_csv():
     )
 
 
-def open_browser():
-    port = int(os.environ.get("PORT", 5001))
-    webbrowser.open(f"http://127.0.0.1:{port}")
+@app.route("/healthz")
+def healthz():
+    return jsonify({"status": "ok"})
 
 
 if __name__ == "__main__":
-    print("Step 1: starting browser timer", flush=True)
-    if not os.environ.get("RENDER"):
-        threading.Timer(1.5, open_browser).start()
-    print("Step 2: starting cmoney key prefetch", flush=True)
+    # Local dev entry point. Production runs via wsgi.py + gunicorn.
     warrant_logic.prefetch_cmoney_key()
-    print("Step 3: starting flask", flush=True)
     port = int(os.environ.get("PORT", 5001))
     app.run(host="0.0.0.0", port=port, debug=False)

@@ -7,3 +7,8 @@ requests==2.33.1
 twstock==1.5.1
 certifi==2026.5.20
 urllib3==2.7.0
+yfinance==1.5.1
+gunicorn==26.0.0
+apscheduler==3.11.3
+supabase==2.31.0
+PyJWT[crypto]==2.13.0

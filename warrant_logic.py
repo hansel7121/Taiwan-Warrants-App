@@ -11,12 +11,6 @@ import re
 import asyncio
 import threading
 import os
-import sys
-
-if getattr(sys, "frozen", False):
-    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(
-        os.path.dirname(sys.executable), "ms-playwright"
-    )
 from playwright.async_api import async_playwright
 from concurrent.futures import ThreadPoolExecutor, as_completed
 

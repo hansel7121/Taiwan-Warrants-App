@@ -89,17 +89,21 @@ templates/
 ## Running Locally
 
 ```bash
-# Requires Python 3.10+ and the godepy conda environment
-conda activate godepy
-python app.py
-# Opens http://127.0.0.1:5001 automatically
+# Requires Python 3.11+ (conda env: warrants)
+conda activate warrants
+pip install -r requirements.txt
+playwright install chromium   # first time only
+
+# Dev server
+python app.py                 # http://127.0.0.1:5001
+
+# Production-style (what deployment uses)
+gunicorn -w 1 --threads 8 --timeout 180 -b 0.0.0.0:5001 wsgi:app
 ```
 
-**Build standalone executable:**
-```bash
-pyinstaller app.spec
-# Output: dist/app
-```
+Exactly **1 gunicorn worker**: market-data caches live in process memory and would diverge across workers; threads provide concurrency.
+
+**macOS only:** if gunicorn workers die with `objc ... fork()` errors on routes that hit yfinance, prefix the command with `OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES`. Linux deployments are unaffected.
 
 ---
 
