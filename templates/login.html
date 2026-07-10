@@ -64,11 +64,6 @@
     </div>
 
     <script>
-      const supabase = window.supabase.createClient(
-        "{{ supabase_url }}",
-        "{{ supabase_anon_key }}"
-      );
-
       const emailEl = document.getElementById("email");
       const sendBtn = document.getElementById("send");
       const formEl  = document.getElementById("form");
@@ -81,30 +76,49 @@
       }
       function clearError() { errEl.classList.add("hidden"); }
 
-      // If already signed in (including after magic-link redirect), go to app.
-      supabase.auth.getSession().then(({ data }) => {
-        if (data.session) window.location.replace("/");
-      });
+      // The supabase-js CDN script can be blocked (ad-blockers). Fail visibly
+      // instead of throwing and leaving a dead page.
+      let _sb = null;
+      if (!window.supabase) {
+        sendBtn.disabled = true;
+        showError("Could not load the sign-in library (cdn.jsdelivr.net). Disable ad-blockers for this site and reload.");
+      } else {
+        _sb = window.supabase.createClient(
+          "{{ supabase_url }}",
+          "{{ supabase_anon_key }}"
+        );
 
-      supabase.auth.onAuthStateChange((event, session) => {
-        if (event === "SIGNED_IN" && session) window.location.replace("/");
-      });
+        // If already signed in (including after magic-link redirect), go to app.
+        _sb.auth.getSession().then(({ data }) => {
+          if (data.session) window.location.replace("/");
+        });
+
+        _sb.auth.onAuthStateChange((event, session) => {
+          if (event === "SIGNED_IN" && session) window.location.replace("/");
+        });
+      }
 
       sendBtn.addEventListener("click", async () => {
+        if (!_sb) return;
         clearError();
         const email = emailEl.value.trim();
         if (!email) { showError("Please enter your email address."); return; }
         sendBtn.disabled = true;
         sendBtn.textContent = "Sending...";
-        const { error } = await supabase.auth.signInWithOtp({
-          email,
-          options: { emailRedirectTo: window.location.origin + "/login" }
-        });
-        sendBtn.disabled = false;
-        sendBtn.textContent = "Send magic link";
-        if (error) { showError(error.message); return; }
-        formEl.classList.add("hidden");
-        sentEl.classList.remove("hidden");
+        try {
+          const { error } = await _sb.auth.signInWithOtp({
+            email,
+            options: { emailRedirectTo: window.location.origin + "/login" }
+          });
+          if (error) { showError(error.message); return; }
+          formEl.classList.add("hidden");
+          sentEl.classList.remove("hidden");
+        } catch (e) {
+          showError("Unexpected error: " + (e && e.message ? e.message : e));
+        } finally {
+          sendBtn.disabled = false;
+          sendBtn.textContent = "Send magic link";
+        }
       });
 
       emailEl.addEventListener("keydown", (e) => {

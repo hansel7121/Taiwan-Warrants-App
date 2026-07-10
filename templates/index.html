@@ -1036,8 +1036,10 @@
       // --- Supabase auth bootstrap -------------------------------------------
       const SUPABASE_URL = "{{ supabase_url }}";
       const SUPABASE_ANON_KEY = "{{ supabase_anon_key }}";
+      // window.supabase is undefined when the CDN script was blocked (ad-blocker);
+      // _boot() then shows a full-page error instead of letting the script crash.
       let _sb = null;
-      if (SUPABASE_URL) {
+      if (SUPABASE_URL && window.supabase) {
         _sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
       }
 
@@ -3277,6 +3279,14 @@
       });
 
       async function _boot() {
+        if (SUPABASE_URL && !_sb) {
+          // Auth is configured but supabase-js never loaded (CDN blocked).
+          document.body.innerHTML =
+            '<div style="max-width:420px;margin:15vh auto;text-align:center;font-family:inherit;color:#e2e8f0">' +
+            '<h2 style="font-size:18px;margin-bottom:10px">Could not load the sign-in library</h2>' +
+            '<p style="color:#8b90a0;font-size:13px">The script from cdn.jsdelivr.net was blocked. Disable ad-blockers for this site and reload.</p></div>';
+          return;
+        }
         if (_sb) {
           const { data } = await _sb.auth.getSession();
           if (!data.session) { location.replace("/login"); return; }
