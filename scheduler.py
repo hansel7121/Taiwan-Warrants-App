@@ -4,8 +4,6 @@ Runs inside the (single) web process via APScheduler so the jobs share the
 module-level caches in warrant_logic / options_logic / us_options_logic.
 Started once from wsgi.py (production) or app.py __main__ (dev).
 """
-import json
-import os
 import threading
 import time
 import traceback
@@ -36,15 +34,16 @@ _last_run: dict = {}  # job name -> epoch of last completed run
 
 
 def _custom_stock_codes():
-    """Codes from the local custom-stocks store.
+    """Union of every user's custom-stock codes, from Supabase.
 
-    Phase 3 replaces this with a Supabase query over all users' lists.
+    Returns [] on any failure (incl. unconfigured Supabase) so the refresh
+    jobs keep running against the default universe.
     """
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "custom_stocks.json")
     try:
-        with open(path) as f:
-            return [s["code"] for s in json.load(f) if s.get("code")]
-    except Exception:
+        import db
+        return db.all_custom_stock_codes()
+    except Exception as e:
+        print(f"SCHED: custom stock codes unavailable: {e}", flush=True)
         return []
 
 

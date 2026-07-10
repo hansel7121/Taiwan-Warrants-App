@@ -1,8 +1,11 @@
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify, Response, g
 import warrant_logic
 import options_logic
 import us_options_logic
 import scheduler
+import auth
+import db
+from auth import require_auth
 import os
 import json
 import numpy as np
@@ -15,7 +18,6 @@ def _epoch_iso(ts):
     return datetime.fromtimestamp(ts).isoformat() if ts else None
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
-data_dir = base_dir
 app = Flask(
     __name__,
     template_folder=os.path.join(base_dir, "templates"),
@@ -28,28 +30,26 @@ app.json.sort_keys = False
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 app.jinja_env.auto_reload = True
 
-CUSTOM_STOCKS_FILE = os.path.join(data_dir, "custom_stocks.json")
-PORTFOLIO_FILE = os.path.join(data_dir, "portfolio.json")
-
-
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", **auth.public_config())
+
+
+@app.route("/login")
+def login():
+    return render_template("login.html", **auth.public_config())
 
 
 @app.route("/get_portfolio")
+@require_auth
 def get_portfolio():
-    if os.path.exists(PORTFOLIO_FILE):
-        with open(PORTFOLIO_FILE) as f:
-            return jsonify(json.load(f))
-    return jsonify([])
+    return jsonify(db.get_portfolio(g.user["id"]))
 
 
 @app.route("/save_portfolio", methods=["POST"])
+@require_auth
 def save_portfolio():
-    trades = request.json
-    with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
-        json.dump(trades, f, ensure_ascii=False, indent=2)
+    db.save_portfolio(g.user["id"], request.json or [])
     return jsonify({"ok": True})
 
 
@@ -85,6 +85,7 @@ def _us_option_last(us_code, opt_type, strike_twd, expiry_iso, fx, adr_ratio):
 
 
 @app.route("/close_quote", methods=["POST"])
+@require_auth
 def close_quote():
     """Current market inputs used to book a trade's realized P&L at close.
 
@@ -141,22 +142,20 @@ def close_quote():
 
 
 @app.route("/get_custom_stocks")
+@require_auth
 def get_custom_stocks():
-    if os.path.exists(CUSTOM_STOCKS_FILE):
-        with open(CUSTOM_STOCKS_FILE) as f:
-            return jsonify(json.load(f))
-    return jsonify([])
+    return jsonify(db.get_custom_stocks(g.user["id"]))
 
 
 @app.route("/save_custom_stocks", methods=["POST"])
+@require_auth
 def save_custom_stocks():
-    stocks = request.json
-    with open(CUSTOM_STOCKS_FILE, "w", encoding="utf-8") as f:
-        json.dump(stocks, f, ensure_ascii=False)
+    db.save_custom_stocks(g.user["id"], request.json or [])
     return jsonify({"ok": True})
 
 
 @app.route("/fetch", methods=["POST"])
+@require_auth
 def fetch():
     data = request.json
     stock_codes = data.get("stock_codes", ["2330"])
@@ -182,6 +181,7 @@ def fetch():
 
 
 @app.route("/download", methods=["POST"])
+@require_auth
 def download():
     data = request.json
     stock_codes = data.get("stock_codes", ["2330"])
@@ -212,6 +212,7 @@ def download():
 
 
 @app.route("/fetch_options", methods=["POST"])
+@require_auth
 def fetch_options():
     data = request.json
     stock_codes = data.get("stock_codes", ["TXO"])
@@ -263,6 +264,7 @@ def _us_options_scan(stock_codes, option_type, min_days, max_days, min_volume):
 
 
 @app.route("/us_options", methods=["POST"])
+@require_auth
 def us_options():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
@@ -283,6 +285,7 @@ def us_options():
 
 
 @app.route("/download_options", methods=["POST"])
+@require_auth
 def download_options():
     data = request.json
     stock_codes = data.get("stock_codes", ["TXO"])
@@ -308,6 +311,7 @@ def download_options():
 
 
 @app.route("/iv_surface_options", methods=["POST"])
+@require_auth
 def iv_surface_options():
     data = request.json
     stock_codes = data.get("stock_codes", ["TXO"])
@@ -344,6 +348,7 @@ def iv_surface_options():
 
 
 @app.route("/iv_surface", methods=["POST"])
+@require_auth
 def iv_surface():
     data = request.json
     stock_codes = data.get("stock_codes", ["2330"])
@@ -1037,6 +1042,7 @@ def _build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct, max_dt
 
 
 @app.route("/adr_premium", methods=["POST"])
+@require_auth
 def adr_premium():
     data = request.json
     stock_code = data.get("stock_code")
@@ -1049,6 +1055,7 @@ def adr_premium():
 
 
 @app.route("/adr_premium_scenario", methods=["POST"])
+@require_auth
 def adr_premium_scenario():
     data = request.json
     stock_code = data.get("stock_code")
@@ -1062,6 +1069,7 @@ def adr_premium_scenario():
 
 
 @app.route("/us_option_match", methods=["POST"])
+@require_auth
 def us_option_match():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
@@ -1081,6 +1089,7 @@ def us_option_match():
 
 
 @app.route("/us_option_match_csv", methods=["POST"])
+@require_auth
 def us_option_match_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
@@ -1106,6 +1115,7 @@ def us_option_match_csv():
 
 
 @app.route("/tw_us_option_match", methods=["POST"])
+@require_auth
 def tw_us_option_match():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
@@ -1125,6 +1135,7 @@ def tw_us_option_match():
 
 
 @app.route("/tw_us_option_match_csv", methods=["POST"])
+@require_auth
 def tw_us_option_match_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
@@ -1150,6 +1161,7 @@ def tw_us_option_match_csv():
 
 
 @app.route("/arb_finder", methods=["POST"])
+@require_auth
 def arb_finder():
     data = request.json
     stock_codes = data.get("stock_codes", ["2330"])
@@ -1175,6 +1187,7 @@ def arb_finder():
 
 
 @app.route("/arb_finder_csv", methods=["POST"])
+@require_auth
 def arb_finder_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2330"])
@@ -1206,6 +1219,7 @@ def healthz():
 
 
 @app.route("/refresh", methods=["POST"])
+@require_auth
 def refresh():
     kind = (request.json or {}).get("kind", "all")
     return jsonify(scheduler.force_refresh(kind))

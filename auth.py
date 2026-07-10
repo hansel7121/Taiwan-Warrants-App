@@ -1,0 +1,94 @@
+"""Supabase magic-link auth: JWT verification + email allowlist.
+
+require_auth guards API routes. Verifies the Bearer token (RS256/ES256 via the
+project's JWKS, HS256 fallback with SUPABASE_JWT_SECRET), then checks the token
+email against the allowed_users table (cached 60s per email). The authenticated
+user (id + email) is exposed on flask.g.user.
+
+Imports cleanly with no env: require_auth returns 503 when SUPABASE_URL is unset
+so the app still starts for local no-auth dev / sanity checks.
+"""
+import os
+import time
+from functools import wraps
+
+import jwt
+from jwt import PyJWKClient
+from flask import request, jsonify, g
+
+import db
+
+_jwks_client = None
+_allow_cache = {}  # email -> (expiry_epoch, bool)
+_ALLOW_TTL = 60
+
+
+def public_config():
+    """Values injected into templates for the browser-side Supabase client."""
+    return {
+        "supabase_url": os.environ.get("SUPABASE_URL", ""),
+        "supabase_anon_key": os.environ.get("SUPABASE_ANON_KEY", ""),
+    }
+
+
+def _jwks():
+    global _jwks_client
+    if _jwks_client is None:
+        url = os.environ["SUPABASE_URL"].rstrip("/") + "/auth/v1/.well-known/jwks.json"
+        _jwks_client = PyJWKClient(url)
+    return _jwks_client
+
+
+def _verify(token):
+    """Verify and decode the JWT. Primary: asymmetric via JWKS; fallback: HS256."""
+    try:
+        signing_key = _jwks().get_signing_key_from_jwt(token)
+        return jwt.decode(
+            token, signing_key.key,
+            algorithms=["RS256", "ES256"], audience="authenticated",
+        )
+    except Exception:
+        secret = os.environ.get("SUPABASE_JWT_SECRET")
+        if secret:
+            return jwt.decode(
+                token, secret, algorithms=["HS256"], audience="authenticated",
+            )
+        raise
+
+
+def _is_allowed(email):
+    if not email:
+        return False
+    now = time.time()
+    hit = _allow_cache.get(email)
+    if hit and hit[0] > now:
+        return hit[1]
+    try:
+        r = db.client().table("allowed_users").select("email").eq("email", email).execute()
+        ok = bool(r.data)
+    except Exception as e:
+        print(f"AUTH: allowlist check failed for {email}: {e}", flush=True)
+        ok = False
+    _allow_cache[email] = (now + _ALLOW_TTL, ok)
+    return ok
+
+
+def require_auth(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not os.environ.get("SUPABASE_URL"):
+            return jsonify({"error": "auth not configured"}), 503
+        header = request.headers.get("Authorization", "")
+        if not header.startswith("Bearer "):
+            return jsonify({"error": "missing_token"}), 401
+        token = header[7:].strip()
+        try:
+            claims = _verify(token)
+        except Exception:
+            return jsonify({"error": "invalid_token"}), 401
+        email = claims.get("email")
+        if not _is_allowed(email):
+            return jsonify({"error": "not_allowed"}), 403
+        g.user = {"id": claims.get("sub"), "email": email}
+        return fn(*args, **kwargs)
+    return wrapper

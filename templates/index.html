@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <title>Warrant Scanner</title>
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
     <style>
@@ -338,6 +339,7 @@
     </style>
   </head>
   <body>
+    <button id="logoutBtn" onclick="_logout()" style="display:none;position:fixed;top:8px;right:12px;z-index:9999;padding:5px 10px;font-size:11px;font-family:inherit;background:var(--surface,#1a1d2a);color:var(--muted,#8b90a0);border:1px solid var(--border,#252836);border-radius:6px;cursor:pointer">Logout</button>
     <header>
       <h1>Warrant Scanner</h1>
       <span class="badge">TW</span>
@@ -1031,6 +1033,41 @@
         "2882","3037","2303","2886",
       ];
 
+      // --- Supabase auth bootstrap -------------------------------------------
+      const SUPABASE_URL = "{{ supabase_url }}";
+      const SUPABASE_ANON_KEY = "{{ supabase_anon_key }}";
+      let _sb = null;
+      if (SUPABASE_URL) {
+        _sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+      }
+
+      function _logout() {
+        if (_sb) _sb.auth.signOut();
+        else location.replace("/login");
+      }
+
+      // fetch() wrapper that injects the Supabase bearer token and handles
+      // auth failures. Falls back to plain fetch when auth is not configured.
+      async function api(url, opts) {
+        if (!_sb) return fetch(url, opts);
+        const { data } = await _sb.auth.getSession();
+        const token = data.session && data.session.access_token;
+        opts = opts || {};
+        const headers = Object.assign({}, opts.headers || {});
+        if (token) headers["Authorization"] = "Bearer " + token;
+        const res = await fetch(url, Object.assign({}, opts, { headers }));
+        if (res.status === 401) { location.replace("/login"); throw new Error("unauthorized"); }
+        if (res.status === 403) {
+          document.body.innerHTML =
+            '<div style="max-width:420px;margin:15vh auto;text-align:center;font-family:inherit;color:#e2e8f0">' +
+            '<h2 style="font-size:18px;margin-bottom:10px">Your account is not approved yet</h2>' +
+            '<p style="color:#8b90a0;font-size:13px">Ask the administrator to add your email to the allow-list.</p>' +
+            '<p style="margin-top:16px"><a href="#" onclick="_logout();return false" style="color:#4f8ef7">Sign out</a></p></div>';
+          throw new Error("not_allowed");
+        }
+        return res;
+      }
+
       // "updated N min ago" suffix for scanner status lines, from the
       // as_of/cached fields the backend attaches to cached market data.
       function asOfLabel(data) {
@@ -1096,7 +1133,7 @@
 
       async function loadCustomStocks() {
         try {
-          const res = await fetch("/get_custom_stocks");
+          const res = await api("/get_custom_stocks");
           const stocks = await res.json();
           const select = document.getElementById("stockSelect");
           stocks.forEach(s => {
@@ -1114,7 +1151,7 @@
         const custom = Array.from(select.options)
           .filter(o => !DEFAULT_STOCKS.includes(o.value))
           .map(o => ({ code: o.value, name: o.textContent.replace(o.value, "").trim() }));
-        await fetch("/save_custom_stocks", {
+        await api("/save_custom_stocks", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(custom),
@@ -1144,7 +1181,7 @@
         document.getElementById("tableContainer").innerHTML = "";
         document.getElementById("downloadBtn").style.display = "none";
 
-        const res = await fetch("/fetch", {
+        const res = await api("/fetch", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(filters),
@@ -1200,7 +1237,7 @@
       }
 
       async function downloadCSV() {
-        const res = await fetch("/download", {
+        const res = await api("/download", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(getFilters()),
@@ -1234,7 +1271,7 @@
         };
         let data;
         try {
-          const res = await fetch("/iv_surface_options", {
+          const res = await api("/iv_surface_options", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
@@ -1302,7 +1339,7 @@
           highlight_code: document.getElementById("highlightCode").value.trim(),
         };
 
-        const res = await fetch("/iv_surface", {
+        const res = await api("/iv_surface", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -1368,7 +1405,7 @@
       }
 
       async function downloadArbCSV() {
-        const res = await fetch("/arb_finder_csv", {
+        const res = await api("/arb_finder_csv", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(getArbFilters()),
@@ -1409,7 +1446,7 @@
         document.getElementById("usDownloadBtn").style.display = "none";
         let data;
         try {
-          const res = await fetch("/us_option_match", {
+          const res = await api("/us_option_match", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(getUsFilters()),
@@ -1529,7 +1566,7 @@
       }
 
       async function downloadUsCSV() {
-        const res = await fetch("/us_option_match_csv", {
+        const res = await api("/us_option_match_csv", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(getUsFilters()),
@@ -1558,7 +1595,7 @@
         document.getElementById("twusDownloadBtn").style.display = "none";
         let data;
         try {
-          const res = await fetch("/tw_us_option_match", {
+          const res = await api("/tw_us_option_match", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(getTwUsFilters()),
@@ -1669,7 +1706,7 @@
       }
 
       async function downloadTwUsCSV() {
-        const res = await fetch("/tw_us_option_match_csv", {
+        const res = await api("/tw_us_option_match_csv", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(getTwUsFilters()),
@@ -1767,7 +1804,7 @@
 
         let s;
         try {
-          const res = await fetch("/adr_premium", {
+          const res = await api("/adr_premium", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ stock_code: row.us_stock_code }),
           });
@@ -1851,7 +1888,7 @@
         const horizon = Math.max(1, Math.min(row.warrant_dte, row.opt_dte));
         let s;
         try {
-          const res = await fetch("/adr_premium_scenario", {
+          const res = await api("/adr_premium_scenario", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ stock_code: row.us_stock_code, horizon_days: horizon }),
           });
@@ -2062,7 +2099,7 @@
         document.getElementById("opt-tableContainer").innerHTML = "";
         document.getElementById("optDownloadBtn").style.display = "none";
 
-        const res = await fetch(_optMarket === "us" ? "/us_options" : "/fetch_options", {
+        const res = await api(_optMarket === "us" ? "/us_options" : "/fetch_options", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(filters),
@@ -2144,7 +2181,7 @@
           a.href = url; a.download = "us_options.csv"; a.click();
           return;
         }
-        const res = await fetch("/download_options", {
+        const res = await api("/download_options", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(getOptionsFilters()),
@@ -2203,7 +2240,7 @@
         document.getElementById("arbDownloadBtn").style.display = "none";
         let data;
         try {
-          const res = await fetch("/arb_finder", {
+          const res = await api("/arb_finder", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(getArbFilters()),
@@ -2764,7 +2801,7 @@
 
       async function loadPortfolio() {
         try {
-          const res = await fetch("/get_portfolio");
+          const res = await api("/get_portfolio");
           portfolioData = await res.json();
         } catch (e) { portfolioData = []; }
         await autoCloseTrades();
@@ -2784,7 +2821,7 @@
           .map(t => t.us_stock_code))];
         await Promise.all(codes.map(async code => {
           try {
-            const res = await fetch("/adr_premium_scenario", {
+            const res = await api("/adr_premium_scenario", {
               method: "POST", headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ stock_code: code, horizon_days: 30 }),
             });
@@ -2903,7 +2940,7 @@
 
           let q = {};
           try {
-            const res = await fetch("/close_quote", {
+            const res = await api("/close_quote", {
               method: "POST", headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 mode: t.mode, survivor,
@@ -3011,7 +3048,7 @@
       }
 
       async function savePortfolio() {
-        await fetch("/save_portfolio", {
+        await api("/save_portfolio", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify(portfolioData),
         });
@@ -3184,7 +3221,7 @@
         const horizon = Math.max(1, Math.min(row.warrant_dte, row.opt_dte));
         let s;
         try {
-          const res = await fetch("/adr_premium_scenario", {
+          const res = await api("/adr_premium_scenario", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ stock_code: t.us_stock_code, horizon_days: horizon }),
           });
@@ -3239,8 +3276,19 @@
         if (e.target === document.getElementById("portfolioModal")) closePortfolioModal();
       });
 
-      loadCustomStocks();
-      loadPortfolio();
+      async function _boot() {
+        if (_sb) {
+          const { data } = await _sb.auth.getSession();
+          if (!data.session) { location.replace("/login"); return; }
+          document.getElementById("logoutBtn").style.display = "block";
+          _sb.auth.onAuthStateChange((event, session) => {
+            if (event === "SIGNED_OUT" || !session) location.replace("/login");
+          });
+        }
+        loadCustomStocks();
+        loadPortfolio();
+      }
+      _boot();
     </script>
   </body>
 </html>
