@@ -2,8 +2,19 @@ services:
   - type: web
     name: warrant-scanner
     runtime: python
+    # Chromium (Playwright) is memory-hungry; the free tier reliably OOMs at boot.
+    plan: starter
     buildCommand: pip install -r requirements.txt && playwright install --with-deps chromium
-    startCommand: python app.py
+    # Exactly 1 worker: market-data caches live in process memory + APScheduler.
+    startCommand: gunicorn -w 1 --threads 8 --timeout 180 -b 0.0.0.0:$PORT wsgi:app
+    healthCheckPath: /healthz
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      # Paste these in the Render dashboard — never commit real values.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false

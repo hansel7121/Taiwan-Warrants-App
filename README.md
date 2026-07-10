@@ -107,6 +107,22 @@ Exactly **1 gunicorn worker**: market-data caches live in process memory and wou
 
 ---
 
+## Deploy (Render)
+
+The repo ships a `render.yaml` blueprint. In the Render dashboard, create a new **Blueprint** from this repo — it provisions a native Python web service that installs Playwright Chromium at build time and runs gunicorn with a single worker.
+
+After the service is created, set these three secrets in the Render dashboard (they are marked `sync: false`, so Render prompts for them — never commit real values):
+
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY`
+
+The blueprint uses the **starter** plan; the free tier tends to OOM because Chromium is memory-hungry.
+
+**Post-deploy:** add the live Render URL (e.g. `https://<service>.onrender.com`) to your Supabase project's **Auth → URL Configuration → Redirect URLs**, or magic-link sign-in will fail.
+
+---
+
 ## Options Exercise Ratios
 
 All Taiwan individual equity options (個股選擇權) on TAIFEX use **2,000 shares per contract**. TXO (index) uses **50 NT$/point**.
