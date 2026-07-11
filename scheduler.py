@@ -9,6 +9,7 @@ import time
 import traceback
 from datetime import datetime, timedelta
 
+from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import warrant_logic
@@ -117,17 +118,28 @@ def start():
     with _start_lock:
         if _scheduler is not None:
             return _scheduler
-        # cmkey first: the warrant warm-up 60s later needs it.
-        warrant_logic.prefetch_cmoney_key()
-        sched = BackgroundScheduler(daemon=True)
+        # Single-threaded executor: with max_workers=1 no two jobs can ever
+        # overlap, so the memory-hungry Chromium scrape (refresh_cmkey) is
+        # structurally guaranteed never to run concurrently with a pandas-heavy
+        # refresh job. This is what keeps the process under Render's 512 MB cap.
+        sched = BackgroundScheduler(
+            daemon=True,
+            executors={"default": ThreadPoolExecutor(max_workers=1)},
+            job_defaults={"max_instances": 1, "coalesce": True},
+        )
         now = datetime.now()
-        sched.add_job(refresh_cmkey, "interval", minutes=CMKEY_MINUTES)
+        # Boot order: cmkey scrape first (Chromium opens AND fully closes)
+        # before any refresh job starts. The single-worker executor serialises
+        # everything, so these staggered next_run_time offsets only decide the
+        # order jobs are queued at boot; they can never actually overlap.
+        sched.add_job(refresh_cmkey, "interval", minutes=CMKEY_MINUTES,
+                      next_run_time=now + timedelta(seconds=1))
         sched.add_job(refresh_warrants, "interval", minutes=REFRESH_MINUTES,
-                      next_run_time=now + timedelta(seconds=60))
+                      next_run_time=now + timedelta(seconds=90))
         sched.add_job(refresh_tw_options, "interval", minutes=REFRESH_MINUTES,
-                      next_run_time=now + timedelta(seconds=5))
+                      next_run_time=now + timedelta(seconds=100))
         sched.add_job(refresh_us_options, "interval", minutes=REFRESH_MINUTES,
-                      next_run_time=now + timedelta(seconds=10))
+                      next_run_time=now + timedelta(seconds=110))
         sched.start()
         _scheduler = sched
         print("SCHED: started", flush=True)

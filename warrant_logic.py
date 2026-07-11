@@ -101,34 +101,51 @@ def implied_vol(price, S, K, T, r, ratio, is_put=False):
 async def _fetch_cmoney_key_async():
     print("PW: launching chromium", flush=True)
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        print("PW: browser launched", flush=True)
-        context = await browser.new_context()
-        page = await context.new_page()
-        cmkey = None
-
-        def handle_request(request):
-            nonlocal cmkey
-            if "mainpage.ashx" in request.url and "cmkey" in request.url:
-                match = re.search(r"cmkey=([^&]+)", request.url)
-                if match:
-                    import urllib.parse
-
-                    cmkey = urllib.parse.unquote(match.group(1))
-
-        page.on("request", handle_request)
-        await page.goto(
-            "https://www.cmoney.tw/finance/warrantsquery.aspx?warrant=051666"
+        # Memory-lean flags: keeps Chromium's RSS small enough to fit under
+        # Render's 512 MB cap. --disable-dev-shm-usage matters where /dev/shm
+        # is tiny; --no-sandbox is required in unprivileged containers.
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-gpu",
+                "--disable-extensions",
+                "--no-zygote",
+                "--renderer-process-limit=1",
+                "--js-flags=--max-old-space-size=128",
+            ],
         )
-        print("PW: page loaded, waiting for key", flush=True)
-        for _ in range(100):
-            if cmkey:
-                break
-            await asyncio.sleep(0.1)
+        print("PW: browser launched", flush=True)
+        try:
+            context = await browser.new_context()
+            page = await context.new_page()
+            cmkey = None
 
-        print(f"PW: done, key={'found' if cmkey else 'NOT found'}", flush=True)
-        await browser.close()
-        return cmkey
+            def handle_request(request):
+                nonlocal cmkey
+                if "mainpage.ashx" in request.url and "cmkey" in request.url:
+                    match = re.search(r"cmkey=([^&]+)", request.url)
+                    if match:
+                        import urllib.parse
+
+                        cmkey = urllib.parse.unquote(match.group(1))
+
+            page.on("request", handle_request)
+            await page.goto(
+                "https://www.cmoney.tw/finance/warrantsquery.aspx?warrant=051666"
+            )
+            print("PW: page loaded, waiting for key", flush=True)
+            for _ in range(100):
+                if cmkey:
+                    break
+                await asyncio.sleep(0.1)
+
+            print(f"PW: done, key={'found' if cmkey else 'NOT found'}", flush=True)
+            return cmkey
+        finally:
+            # Always release Chromium's RSS, even if goto/parsing raised.
+            await browser.close()
 
 
 def _background_fetch_key():

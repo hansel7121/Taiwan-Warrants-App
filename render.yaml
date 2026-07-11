@@ -11,6 +11,10 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      # Cap glibc per-thread malloc arenas: under gunicorn threads they
+      # balloon RSS. Harmless on non-glibc platforms.
+      - key: MALLOC_ARENA_MAX
+        value: "2"
       # Land the Chromium download inside the project dir so it survives build→runtime.
       - key: PLAYWRIGHT_BROWSERS_PATH
         value: /opt/render/project/.playwright
