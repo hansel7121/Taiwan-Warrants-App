@@ -4,13 +4,16 @@ services:
     runtime: python
     # Chromium (Playwright) is memory-hungry; the free tier reliably OOMs at boot.
     plan: starter
-    buildCommand: pip install -r requirements.txt && playwright install --with-deps chromium
+    buildCommand: pip install -r requirements.txt && playwright install chromium
     # Exactly 1 worker: market-data caches live in process memory + APScheduler.
     startCommand: gunicorn -w 1 --threads 8 --timeout 180 -b 0.0.0.0:$PORT wsgi:app
     healthCheckPath: /healthz
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      # Land the Chromium download inside the project dir so it survives build→runtime.
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /opt/render/project/.playwright
       # Paste these in the Render dashboard — never commit real values.
       - key: SUPABASE_URL
         sync: false
