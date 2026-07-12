@@ -3128,7 +3128,7 @@
         }
         const nClosed = portfolioData.filter(t => t.closed).length;
         status.textContent = `${portfolioData.length} trade${portfolioData.length>1?"s":""} · ${nClosed} closed`;
-        const modeLabel = { direct: "Direct", us: "US Opt", twus: "TW/US Opt", pcp: "PCP" };
+        const modeLabel = { direct: "Direct", us: "US Opt", twus: "TW/US Opt", pcp: "PCP", uspcp: "US PCP" };
         let html = "<table><thead><tr>"
           + ["Entered","Type","×","Trade","Net premium (NT$)","P&L at expiry now (NT$)","Status","Realized P&L (NT$)",""].map(h=>`<th>${h}</th>`).join("")
           + "</tr></thead><tbody>";
@@ -3163,7 +3163,7 @@
             <td>${dstr}</td>
             <td>${modeLabel[t.mode] || t.mode}</td>
             <td style="text-align:center;color:var(--muted)">${(t.mult||1)>1?"×"+(t.mult||1):""}</td>
-            <td style="max-width:300px">${legsSummary(t.legs)}</td>
+            <td style="max-width:320px;white-space:normal;word-break:break-word;line-height:1.4" title="${legsSummary(t.legs).replace(/"/g,'&quot;')}">${legsSummary(t.legs)}</td>
             <td class="${netCol}">${t.net_cf>=0?"+":""}${Math.round(t.net_cf).toLocaleString()}</td>
             <td style="text-align:right;font-variant-numeric:tabular-nums">${nowCell}</td>
             <td>${statusCell}</td>
