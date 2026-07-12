@@ -683,6 +683,12 @@
                   <option value="2412">2412 中華電 (CHT, 1:10)</option>
                 </select>
               </div>
+              <label>Strategy
+                <select id="usStrategy" onchange="onUsStrategyChange()" title="Call-Call/Put-Put: match warrant to same-type US ADR option. Put-Call Parity: price the warrant against the synthetic built from the opposite-type US option + the US ADR + a USD bond (cross-market, financed at the US rate).">
+                  <option value="same_type">Call-Call / Put-Put</option>
+                  <option value="pcp">Put-Call Parity (cross-market)</option>
+                </select>
+              </label>
               <label>Option Type
                 <select id="usOptionType">
                   <option value="All">All</option>
@@ -1003,6 +1009,7 @@
               If you enter now — where does the premium land by expiry?</p>
             <p id="us-scenario-caption" style="font-size:12px;color:var(--muted);margin:0 0 10px"></p>
             <table id="us-scenario-table" style="width:100%;border-collapse:collapse;font-size:13px"></table>
+            <div id="us-scenario-breakeven" style="margin-top:10px;font-size:12.5px;font-weight:600"></div>
             <div id="us-scenario-note" style="background:var(--surface);border-radius:6px;padding:12px 14px;margin-top:12px;font-size:12px;color:var(--muted);line-height:1.6"></div>
           </div>
         </div>
@@ -1391,7 +1398,16 @@
           max_dte_diff: parseInt(document.getElementById("usMaxDteDiff").value) ?? 5,
           min_volume: parseInt(document.getElementById("usMinVolume").value) || 0,
           positive_loose: document.getElementById("usPositiveLoose").checked,
+          strategy: document.getElementById("usStrategy").value,
         };
+      }
+
+      // Hint only — loose still applies (to the PCP executable leg) for both.
+      function onUsStrategyChange() {
+        const pcp = document.getElementById("usStrategy").value === "pcp";
+        document.getElementById("us-status").textContent = pcp
+          ? "Cross-market PCP: warrant vs synthetic (opposite-type US option + US ADR + USD bond @ R_US). Executable = long warrant / short synthetic."
+          : "";
       }
 
       async function fetchUsData() {
@@ -1415,8 +1431,10 @@
           return;
         }
         currentUsData = data.rows;
-        document.getElementById("us-status").textContent =
-          `${data.count} matched pairs — prices in TWD/Taiwan-share; 1 US contract = 500 TW shares; FX held constant`;
+        const usPcp = document.getElementById("usStrategy").value === "pcp";
+        document.getElementById("us-status").textContent = usPcp
+          ? `${data.count} cross-market PCP pairs — executable: long warrant / short synthetic (short US opp-type option + short/long ADR + USD bond); non-executable (debug): short warrant. Prices TWD/TW-share; 1 US contract = 500 TW shares; FX held constant`
+          : `${data.count} matched pairs — prices in TWD/Taiwan-share; 1 US contract = 500 TW shares; FX held constant`;
         document.getElementById("usDownloadBtn").style.display = "inline-block";
         renderUsTable(currentUsData);
       }
@@ -1485,14 +1503,17 @@
       }
 
       function openUsModal(row) {
-        // Same field mapping as Direct Match; option leg already in TWD/TW-share.
+        // Cross-market PCP rows carry the `executable` flag (opposite-type
+        // option + real synthetic/bond); same-type rows do not.
+        const isPcp = "executable" in row;
         const mapped = {
           warrant_code:     row.warrant_code,
           warrant_name:     row.warrant_name,
           warrant_type:     row.type,
-          opt_type:         row.type,
+          opt_type:         isPcp ? row.opt_type : row.type,  // PCP pairs opposite type
           option_contract:  row.option_contract,
-          underlying_price: row.underlying_price,
+          underlying_price: row.underlying_price,   // warrant LOCAL spot (premium baseline)
+          adr_underlying:   row.adr_underlying,     // ADR-converted spot (synthetic/stock leg)
           warrant_dte:      row.warrant_dte,
           opt_dte:          row.opt_dte,
           dte_diff:         row.dte_diff,
@@ -1509,14 +1530,17 @@
           opt_per_share:    row.opt_per_share,
           pcp_diff:         row.price_diff,
           pcp_diff_pct:     row.price_diff_pct,
-          synthetic_price:  row.opt_per_share,
-          bond_pv:          null,
+          // PCP: real synthetic + USD bond PV from the backend. Same-type:
+          // synthetic = the option price itself, no bond leg.
+          synthetic_price:  isPcp ? row.synthetic_price : row.opt_per_share,
+          bond_pv:          isPcp ? row.bond_pv : null,
+          executable:       isPcp ? row.executable : true,
           warrant_iv:       row.warrant_iv,
           opt_iv:           row.opt_iv,
           us_stock_code:    row.us_stock_code,
           loose:            document.getElementById("usPositiveLoose").checked,
         };
-        openArbModal(mapped, "us");
+        openArbModal(mapped, isPcp ? "uspcp" : "us");
       }
 
       async function downloadUsCSV() {
@@ -1836,6 +1860,7 @@
         const cap = document.getElementById("us-scenario-caption");
         const note = document.getElementById("us-scenario-note");
         tbl.innerHTML = ""; note.innerHTML = ""; cap.textContent = "loading…";
+        document.getElementById("us-scenario-breakeven").innerHTML = "";
         document.getElementById("us-fx-section").style.display = "none";
 
         // Trade closes at the first (nearest) expiry.
@@ -1894,6 +1919,29 @@
           <td style="${tdr};font-weight:700;font-size:14px;color:${evCol}">${ev>=0?"+":""}${Math.round(ev).toLocaleString()}</td>
         </tr></tfoot>`;
         tbl.innerHTML = body;
+
+        // Break-even exit premium (FX held flat): scan for the exit premium at
+        // which trade P&L crosses zero. Single interpretable threshold next to the
+        // regime table — "the trade needs the premium to stay above/below X%".
+        const pnlAtP = (pp) => _evPnlAtPremium(row, pp, p0, 1);
+        const loP = p0 - 0.6, hiP = p0 + 0.6, steps = 240;
+        let be = null, prev = pnlAtP(loP), prevP = loP;
+        for (let i = 1; i <= steps; i++) {
+          const pp = loP + (hiP - loP) * i / steps, cur = pnlAtP(pp);
+          if ((prev <= 0 && cur >= 0) || (prev >= 0 && cur <= 0)) {
+            const t = (0 - prev) / ((cur - prev) || 1);
+            be = prevP + (pp - prevP) * t; break;
+          }
+          prev = cur; prevP = pp;
+        }
+        const pnlNow = pnlAtP(p0);
+        const beTxt = be == null
+          ? `P&L (FX flat) does not cross zero within ±60% premium of today — it is ${pnlNow >= 0 ? "positive" : "negative"} across that range.`
+          : `Break-even exit premium (FX flat): <b>${(be*100>=0?"+":"")}${(be*100).toFixed(2)}%</b> `
+            + `(today ${(p0*100>=0?"+":"")}${(p0*100).toFixed(2)}%). Trade is profitable while the premium stays ${pnlNow >= 0 ? (be < p0 ? "above" : "below") : (be < p0 ? "below" : "above")} it.`;
+        const beCol = pnlNow >= 0 ? "var(--put)" : "var(--call)";
+        document.getElementById("us-scenario-breakeven").innerHTML =
+          `<span style="color:${beCol}">${beTxt}</span>`;
 
         note.innerHTML =
           `EV = Σ <code>P(band | start)</code> · <code>E[PnL | band, start]</code>, averaged jointly over each conditioned window's <b>forward premium AND forward FX</b> (so premium/FX correlation is baked in), not P&L at the band means. `
@@ -2388,16 +2436,35 @@
         const contractSize = row.opt_contract_size ?? 2000;
         _contractSize = contractSize;
 
-        const modeLabel = mode === "twus" ? "TW Opt / US Opt" : mode === "us" ? "US Option Match" : mode === "direct" ? "Direct Match" : "PCP Arb";
+        const isPcpMode = mode === "pcp" || mode === "uspcp";
+        const modeLabel = mode === "twus" ? "TW Opt / US Opt" : mode === "us" ? "US Option Match"
+          : mode === "direct" ? "Direct Match" : mode === "uspcp" ? "US PCP (cross-market)" : "PCP Arb";
         document.getElementById("pcp-modal-title").textContent =
           `${row.warrant_name} (${row.warrant_type}) ↔ ${row.option_contract} (${row.opt_type})  —  ${modeLabel}`;
-        const pcpNonExec = mode === "pcp" && row.executable === false;
+        const pcpNonExec = isPcpMode && row.executable === false;
+        // American early-assignment risk (uspcp only): the executable trade SHORTS
+        // the US option (opposite type to the warrant). US ADR options are
+        // American, so a short leg deep ITM can be assigned early — collapsing the
+        // hedge before the long warrant expires. Measure the short leg's moneyness
+        // off the ADR spot. (Non-executable rows short the warrant, not the option.)
+        let usPcpAssign = "";
+        if (mode === "uspcp" && row.executable !== false) {
+          const adr = row.adr_underlying ?? S0;
+          const shortIsPut = row.opt_type === "Put";
+          const itmFrac = shortIsPut ? (Ko - adr) / Ko : (adr - Ko) / Ko;  // >0 = ITM
+          if (itmFrac > 0.0) {
+            usPcpAssign = `<br><span class="call" style="font-weight:700">⚠ Short US ${row.opt_type.toLowerCase()} is ITM by ${(itmFrac*100).toFixed(1)}% (ADR ${adr.toFixed(2)} vs strike ${Ko.toFixed(2)}) — American, real early-assignment risk; dividends / high USD rates raise it.</span>`;
+          } else if (itmFrac > -0.03) {
+            usPcpAssign = `<br><span style="font-weight:600;color:#fbbf24">Short US ${row.opt_type.toLowerCase()} is near-the-money (${(itmFrac*100).toFixed(1)}%) — American; watch for early assignment if it moves ITM.</span>`;
+          }
+        }
         document.getElementById("pcp-legs-caption").innerHTML =
           (mode === "twus"
             ? `Trade Legs (matched ${contractSize.toLocaleString()} TW shares = ${row.tw_contracts} TW contract × 2,000 = ${row.us_contracts} US contracts × 500)`
-            : `Trade Legs (per 1 options contract = ${contractSize.toLocaleString()} ${mode === "us" ? "TW shares" : "shares"})`)
+            : `Trade Legs (per 1 options contract = ${contractSize.toLocaleString()} ${(mode === "us" || mode === "uspcp") ? "TW shares" : "shares"})`)
           + (pcpNonExec ? ` <span class="call" style="font-weight:700">— NON-EXECUTABLE (warrants can't be shorted; debug only)</span>` : "")
-          + (mode === "pcp" ? `<br><span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted)">European PCP, dividends ignored — a pair whose expiry crosses an ex-dividend date is mispriced (synthetic call biased high / put low).</span>` : "");
+          + (isPcpMode ? `<br><span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted)">European PCP, dividends ignored — a pair whose expiry crosses an ex-dividend date is mispriced (synthetic call biased high / put low).${mode === "uspcp" ? ` The short US leg is <b>American</b>.` : ""}</span>` : "")
+          + usPcpAssign;
 
         // ── Trade legs ──────────────────────────────────────────────────
         let legs;
@@ -2459,32 +2526,38 @@
             : (row.warrant_bid ?? row.warrant_ask);
           const optPrice = row.opt_per_share;
           const cs = contractSize;
+          // Cross-market (uspcp): the stock/synthetic leg is the US ADR (converted
+          // to TWD/TW-share), which differs from the warrant's local spot by the
+          // ADR premium. Single-market pcp: both are the same underlying.
+          const stockSpot = row.adr_underlying ?? S0;
+          const isUsPcp = mode === "uspcp";
           const wLabel = `${(n/1000).toLocaleString(undefined,{maximumFractionDigits:3})} 張 (${n.toLocaleString()} units) × ${row.warrant_code} (${row.warrant_type.toLowerCase()} warrant)`;
-          const stockLabel = `${cs.toLocaleString()} shares ${row.warrant_name || row.warrant_code}`;
+          const stockLabel = `${cs.toLocaleString()} ${isUsPcp ? "TW-equiv shares via US ADR" : "shares"} ${row.warrant_name || row.warrant_code}`;
           const optLabel = `${row.option_contract} ${row.opt_type.toLowerCase()} option (×${cs.toLocaleString()} shares)`;
-          const lendLabel = `Bond (lend ${pcpBondPv.toFixed(2)} → receive ${Ko.toFixed(0)} × ${cs.toLocaleString()} at expiry)`;
-          const borrowLabel = `Bond (borrow ${pcpBondPv.toFixed(2)} → repay ${Ko.toFixed(0)} × ${cs.toLocaleString()} at expiry)`;
+          const bondCcy = isUsPcp ? "USD" : "";
+          const lendLabel = `Bond${bondCcy?" "+bondCcy:""} (lend ${pcpBondPv.toFixed(2)} → receive ${Ko.toFixed(0)} × ${cs.toLocaleString()} at expiry)`;
+          const borrowLabel = `Bond${bondCcy?" "+bondCcy:""} (borrow ${pcpBondPv.toFixed(2)} → repay ${Ko.toFixed(0)} × ${cs.toLocaleString()} at expiry)`;
           if (executable) {
             legs = isCall ? [
               { action:"BUY",   instrument:wLabel,     qty:n,   price:wPrice,     cf:-(n*wPrice) },
-              { action:"SHORT", instrument:stockLabel, qty:-cs, price:S0,         cf: cs*S0 },
+              { action:"SHORT", instrument:stockLabel, qty:-cs, price:stockSpot,  cf: cs*stockSpot },
               { action:"LEND",  instrument:lendLabel,  qty:cs,  price:pcpBondPv,  cf:-(cs*pcpBondPv) },
               { action:"SELL",  instrument:optLabel,   qty:cs,  price:optPrice,   cf: cs*optPrice },
             ] : [
               { action:"BUY",   instrument:wLabel,      qty:n,  price:wPrice,     cf:-(n*wPrice) },
-              { action:"BUY",   instrument:stockLabel,  qty:cs, price:S0,         cf:-cs*S0 },
+              { action:"BUY",   instrument:stockLabel,  qty:cs, price:stockSpot,  cf:-cs*stockSpot },
               { action:"BORROW",instrument:borrowLabel, qty:cs, price:pcpBondPv,  cf: cs*pcpBondPv },
               { action:"SELL",  instrument:optLabel,    qty:cs, price:optPrice,   cf: cs*optPrice },
             ];
           } else {
             legs = isCall ? [
               { action:"SHORT", instrument:wLabel,      qty:-n, price:wPrice,     cf: n*wPrice },
-              { action:"BUY",   instrument:stockLabel,  qty:cs, price:S0,         cf:-cs*S0 },
+              { action:"BUY",   instrument:stockLabel,  qty:cs, price:stockSpot,  cf:-cs*stockSpot },
               { action:"BORROW",instrument:borrowLabel, qty:cs, price:pcpBondPv,  cf: cs*pcpBondPv },
               { action:"BUY",   instrument:optLabel,    qty:cs, price:optPrice,   cf:-cs*optPrice },
             ] : [
               { action:"SHORT", instrument:wLabel,     qty:-n,  price:wPrice,     cf: n*wPrice },
-              { action:"SHORT", instrument:stockLabel, qty:-cs, price:S0,         cf: cs*S0 },
+              { action:"SHORT", instrument:stockLabel, qty:-cs, price:stockSpot,  cf: cs*stockSpot },
               { action:"LEND",  instrument:lendLabel,  qty:cs,  price:pcpBondPv,  cf:-(cs*pcpBondPv) },
               { action:"BUY",   instrument:optLabel,   qty:cs,  price:optPrice,   cf:-cs*optPrice },
             ];
@@ -2592,7 +2665,7 @@
         // TW/US mode also shows the conditional "enter now" scenario EDA.
         const premSection = document.getElementById("us-premium-section");
         const scenSection = document.getElementById("us-scenario-section");
-        if ((mode === "us" || mode === "twus") && row.us_stock_code) {
+        if ((mode === "us" || mode === "twus" || mode === "uspcp") && row.us_stock_code) {
           premSection.style.display = "block";
           scenSection.style.display = "block";
           loadAdrPremium(row);
@@ -2776,7 +2849,7 @@
       let _basisCache = {};
       async function refreshBasis() {
         const codes = [...new Set(portfolioData
-          .filter(t => !t.closed && (t.mode === "us" || t.mode === "twus") && t.us_stock_code)
+          .filter(t => !t.closed && (t.mode === "us" || t.mode === "twus" || t.mode === "uspcp") && t.us_stock_code)
           .map(t => t.us_stock_code))];
         await Promise.all(codes.map(async code => {
           try {
@@ -2800,7 +2873,7 @@
         if (t.closed) return t.closed.realized_pnl;
         const mult = t.mult || 1;
         const p0 = t.entry_premium ?? 0, fx0 = t.entry_fx ?? 1;
-        if ((t.mode === "us" || t.mode === "twus") && t.us_stock_code) {
+        if ((t.mode === "us" || t.mode === "twus" || t.mode === "uspcp") && t.us_stock_code) {
           const b = _basisCache[t.us_stock_code];
           if (!b || b.p == null || b.fx == null) return null;   // basis pending/unavailable
           // Intrinsic-only floor: both legs valued at intrinsic at the current

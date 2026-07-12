@@ -559,14 +559,27 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
 
 def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
                         max_strike_diff_pct, max_dte_diff,
-                        positive_loose=False):
+                        positive_loose=False, r=None,
+                        synthetic_underlying="warrant"):
     """Put-Call-Parity matcher: price a warrant against the SYNTHETIC built from
-    the OPPOSITE-type TAIFEX option plus the underlying and a risk-free bond.
+    the OPPOSITE-type option plus the underlying and a risk-free bond.
 
     European PCP (no dividends): C - P = S - K*e^(-rT), so
         synthetic call = P + S - K*e^(-rT)
         synthetic put  = C - S + K*e^(-rT)
-    using the OPTION's strike Ko, expiry T, and r = options_logic.R.
+    using the OPTION's strike Ko, expiry T, and discount rate ``r``
+    (defaults to ``options_logic.R``).
+
+    ``synthetic_underlying`` selects the spot S plugged into the synthetic:
+      - "warrant": use the warrant's own underlying (single-market TAIFEX PCP —
+        both legs share the same underlying).
+      - "option":  use the OPTION row's underlying — the cross-market case, where
+        the option is a US ADR converted to TWD/TW-share. The ADR-converted spot
+        differs from the warrant's local spot by the ADR premium, which is the
+        whole edge; the synthetic (put + ADR + USD bond) must be priced off the
+        ADR, so pass ``r = us_options_logic.R_US`` too. The emitted row keeps the
+        warrant's LOCAL underlying in ``underlying_price`` (premium baseline +
+        warrant payoff chart) and carries the ADR spot in ``adr_underlying``.
 
     Two directions per pair:
       - EXECUTABLE  (long warrant / short synthetic): buy warrant@ask, sell the
@@ -583,7 +596,9 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
         skipped. Kept when the warrant is rich vs synthetic (price_diff<0).
     """
     rows = []
-    r = options_logic.R
+    if r is None:
+        r = options_logic.R
+    s_from_option = synthetic_underlying == "option"
 
     for _, w in warrant_df.iterrows():
         opp = "Put" if w["type"] == "Call" else "Call"
@@ -605,7 +620,7 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
         if candidates.empty:
             continue
 
-        S = float(w["underlying_price"])
+        S_local = float(w["underlying_price"])   # warrant's own (local) spot
         Kw = float(w["strike"])
         is_call = w["type"] == "Call"
         warrant_ask_per_share = round(float(w["ask"]) / ratio, 4)
@@ -619,11 +634,14 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
             warrant_iv = round(float(w["iv_ask"]), 4)
         else:
             _wiv = warrant_logic.implied_vol(
-                float(w["ask"]), S, Kw,
+                float(w["ask"]), S_local, Kw,
                 int(w["days_to_expiry"]) / 365.0, r, ratio, not is_call)
             warrant_iv = round(float(_wiv), 4) if pd.notna(_wiv) and 0 < float(_wiv) <= 3 else None
 
         for _, opt in candidates.iterrows():
+            # Spot for the synthetic: the option's underlying in the cross-market
+            # case (ADR-converted), else the warrant's own local spot.
+            S = float(opt["underlying_price"]) if s_from_option else S_local
             Ko = float(opt["strike"])
             To = int(opt["days_to_expiry"]) / 365.0
             bond_pv = round(Ko * float(np.exp(-r * To)), 4)
@@ -667,7 +685,8 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
                     "opt_type": opp,
                     "trade": trade,
                     "executable": bool(executable),
-                    "underlying_price": round(S, 4),
+                    "underlying_price": round(S_local, 4),
+                    "adr_underlying": round(S, 4),
                     "warrant_dte": int(w["days_to_expiry"]),
                     "opt_dte": int(opt["days_to_expiry"]),
                     "dte_diff": int(opt["dte_diff"]),
@@ -788,13 +807,20 @@ R_FREE = 0.01875
 
 
 def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
-                       positive_loose=False, min_volume=0):
-    """Direct-match Taiwan warrants against the same-underlying US ADR options.
+                       positive_loose=False, min_volume=0, strategy="same_type"):
+    """Match Taiwan warrants against the same-underlying US ADR options.
 
-    Reuses _match_warrants_to_options. The US option leg is pre-converted to
-    TWD-per-Taiwan-share by us_options_logic, so it lives in the same price
-    space as the warrant leg. One US contract controls 100 * adr_ratio Taiwan
-    shares (per listing), which drives warrants_needed = contract_size/ratio.
+    The US option leg is pre-converted to TWD-per-Taiwan-share by
+    us_options_logic, so it lives in the same price space as the warrant leg.
+    One US contract controls 100 * adr_ratio Taiwan shares (per listing), which
+    drives warrants_needed = contract_size/ratio.
+
+    strategy:
+      - "same_type": direct match warrant to the SAME-type US option
+        (_match_warrants_to_options).
+      - "pcp": cross-market Put-Call Parity — price the warrant against the
+        synthetic built from the OPPOSITE-type US option + the US ADR + a USD
+        bond (_match_warrants_pcp with r=R_US, synthetic_underlying="option").
     """
     all_rows = []
     errors = []
@@ -815,7 +841,10 @@ def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
             continue
 
         try:
-            opt_df = us_options_logic.fetch_us_options(code, option_type, min_days=1, compute_iv=False)
+            # PCP pairs a warrant with the OPPOSITE-type option, so the option
+            # fetch must include both types regardless of the warrant filter.
+            opt_type_fetch = "All" if strategy == "pcp" else option_type
+            opt_df = us_options_logic.fetch_us_options(code, opt_type_fetch, min_days=1, compute_iv=False)
             opt_df = opt_df[opt_df["is_live"]]
             if min_volume > 0:
                 opt_df = opt_df[opt_df["volume"] >= min_volume]
@@ -827,10 +856,17 @@ def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
             errors.append(f"{code}: no live US options")
             continue
 
-        rows = _match_warrants_to_options(
-            warrant_df, opt_df, contract_size, max_strike_diff_pct, max_dte_diff,
-            positive_loose=positive_loose,
-        )
+        if strategy == "pcp":
+            rows = _match_warrants_pcp(
+                warrant_df, opt_df, contract_size, max_strike_diff_pct, max_dte_diff,
+                positive_loose=positive_loose, r=us_options_logic.R_US,
+                synthetic_underlying="option",
+            )
+        else:
+            rows = _match_warrants_to_options(
+                warrant_df, opt_df, contract_size, max_strike_diff_pct, max_dte_diff,
+                positive_loose=positive_loose,
+            )
         for r in rows:
             r["us_stock_code"] = code  # so the modal can pull ADR-premium history
         all_rows.extend(rows)
@@ -840,7 +876,12 @@ def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
         raise RuntimeError(msg)
 
     result = pd.DataFrame(all_rows)
-    if "price_diff_pct" in result.columns:
+    if strategy == "pcp" and "executable" in result.columns:
+        # Executable arbs first, then by richest mispricing.
+        result = result.sort_values(
+            ["executable", "price_diff_pct"], ascending=[False, False]
+        )
+    elif "price_diff_pct" in result.columns:
         result = result.sort_values("price_diff_pct", ascending=False)
     return result
 
@@ -1088,10 +1129,11 @@ def us_option_match():
     max_dte_diff = int(data.get("max_dte_diff", 5))
     positive_loose = bool(data.get("positive_loose", False))
     min_volume = int(data.get("min_volume", 0) or 0)
+    strategy = data.get("strategy", "same_type")
     try:
         df = _build_us_match_df(stock_codes, option_type, max_strike_diff_pct,
                                 max_dte_diff, positive_loose=positive_loose,
-                                min_volume=min_volume)
+                                min_volume=min_volume, strategy=strategy)
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
         return jsonify({"rows": rows, "count": len(rows)})
     except Exception as e:
@@ -1107,10 +1149,11 @@ def us_option_match_csv():
     max_dte_diff = int(data.get("max_dte_diff", 5))
     positive_loose = bool(data.get("positive_loose", False))
     min_volume = int(data.get("min_volume", 0) or 0)
+    strategy = data.get("strategy", "same_type")
     try:
         df = _build_us_match_df(stock_codes, option_type, max_strike_diff_pct,
                                 max_dte_diff, positive_loose=positive_loose,
-                                min_volume=min_volume)
+                                min_volume=min_volume, strategy=strategy)
     except Exception:
         df = pd.DataFrame()
     output = io.StringIO()
