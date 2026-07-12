@@ -2181,11 +2181,10 @@
         };
       }
 
-      // In PCP mode the loose-price toggle is meaningless (synthetic is priced
-      // off bid/ask directly), so hide it to avoid confusion.
+      // Loose applies to both strategies: same-type positive leg, and (PCP) the
+      // executable long-warrant/short-synthetic leg. Keep it visible everywhere.
       function onArbStrategyChange() {
-        const pcp = document.getElementById("arbStrategy").value === "pcp";
-        document.getElementById("arbPositiveLoose").closest("label").style.display = pcp ? "none" : "";
+        document.getElementById("arbPositiveLoose").closest("label").style.display = "";
       }
 
       async function fetchArbData() {
@@ -2450,8 +2449,14 @@
           // Warrant priced per unit (ask when buying, bid when shorting); option
           // uses opt_per_share (bid for exec, ask for non-exec, set by backend).
           const executable = row.executable !== false;
+          // Loose applies only to the executable (tradable) side. Loose buys the
+          // warrant at its BID (favorable); tight buys at ASK. opt_per_share
+          // already carries the loose/tight option side from the backend.
+          const pcpLoose = executable && !!document.getElementById("arbPositiveLoose").checked;
           const pcpBondPv = row.bond_pv ?? bondPv;
-          const wPrice = executable ? row.warrant_ask : (row.warrant_bid ?? row.warrant_ask);
+          const wPrice = executable
+            ? (pcpLoose ? (row.warrant_bid ?? row.warrant_ask) : row.warrant_ask)
+            : (row.warrant_bid ?? row.warrant_ask);
           const optPrice = row.opt_per_share;
           const cs = contractSize;
           const wLabel = `${(n/1000).toLocaleString(undefined,{maximumFractionDigits:3})} 張 (${n.toLocaleString()} units) × ${row.warrant_code} (${row.warrant_type.toLowerCase()} warrant)`;

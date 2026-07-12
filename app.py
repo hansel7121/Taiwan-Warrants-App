@@ -558,7 +558,8 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
 
 
 def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
-                        max_strike_diff_pct, max_dte_diff):
+                        max_strike_diff_pct, max_dte_diff,
+                        positive_loose=False):
     """Put-Call-Parity matcher: price a warrant against the SYNTHETIC built from
     the OPPOSITE-type TAIFEX option plus the underlying and a risk-free bond.
 
@@ -572,7 +573,11 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
         option@bid, short the stock (call) / long the stock (put), lend/borrow
         PV(Ko). Kept only when the warrant is cheap vs synthetic (price_diff>0)
         AND the guards hold (short option expires no later than the long warrant,
-        and the strike gap is on the no-downside side).
+        and the strike gap is on the no-downside side). This is the ONLY tradable
+        side (never shorts the warrant), so ``positive_loose`` applies here only:
+        loose prices the two tradable quotes at their favorable side — buy
+        warrant@bid, sell option@ask (spread not covered) — mirroring the Direct
+        Match positive-loose leg. Stock/bond legs are theoretical and unchanged.
       - NON-EXECUTABLE (short warrant / long synthetic): warrants can't be
         shorted — emitted for debugging only, flagged executable=False, guards
         skipped. Kept when the warrant is rich vs synthetic (price_diff<0).
@@ -687,16 +692,21 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
                     "iv_diff": round((opt_iv or 0) - (warrant_iv or 0), 4),
                 })
 
-            # Executable: long warrant (buy@ask) vs short synthetic (sell opt@bid).
-            if opt_bid_ps is not None:
-                price_diff = round(_synth(opt_bid_ps) - warrant_ask_per_share, 4)
+            # Executable: long warrant / short synthetic. Only tradable side, so
+            # the loose toggle applies here (and here only).
+            #   tight : buy warrant@ask, sell option@bid (real executable fills)
+            #   loose : buy warrant@bid, sell option@ask (favorable side)
+            exec_opt_ps = opt_ask_ps if positive_loose else opt_bid_ps
+            exec_warrant_ps = warrant_bid_per_share if positive_loose else warrant_ask_per_share
+            if exec_opt_ps is not None:
+                price_diff = round(_synth(exec_opt_ps) - exec_warrant_ps, 4)
                 # Guards: short option must not outlive the long warrant, and the
                 # strike gap must be on the no-downside side (Call: Ko>=Kw, Put:
                 # Ko<=Kw) so the residual is a bounded, never-negative vertical.
                 dte_ok = int(opt["days_to_expiry"]) <= int(w["days_to_expiry"])
                 strike_ok = (Ko >= Kw) if is_call else (Ko <= Kw)
                 if price_diff > 0 and dte_ok and strike_ok:
-                    _emit(True, opt_bid_ps, warrant_ask_per_share, price_diff)
+                    _emit(True, exec_opt_ps, exec_warrant_ps, price_diff)
 
             # Non-executable debug: short warrant (sell@bid) vs long synthetic
             # (buy opt@ask). No guards — warrants aren't shortable anyway.
@@ -750,6 +760,7 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
         if strategy == "pcp":
             rows = _match_warrants_pcp(
                 warrant_df, opt_df, opt_contract_size, max_strike_diff_pct, max_dte_diff,
+                positive_loose=positive_loose,
             )
         else:
             rows = _match_warrants_to_options(
