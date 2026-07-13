@@ -14,6 +14,10 @@ import options_logic
 import us_options_logic
 import os
 import json
+import socket
+import signal
+import subprocess
+import time
 import numpy as np
 import pandas as pd
 from scipy.interpolate import griddata
@@ -1271,17 +1275,83 @@ def arb_finder_csv():
     )
 
 
-def open_browser():
-    port = int(os.environ.get("PORT", 5001))
+def open_browser(port):
     webbrowser.open(f"http://127.0.0.1:{port}")
 
 
+def _port_free(port):
+    """True if we can bind the port right now (nothing listening on it)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("0.0.0.0", port))
+            return True
+        except OSError:
+            return False
+
+
+def _pids_listening(port):
+    """PIDs LISTENing on the port (macOS/Linux via lsof). Empty on any error."""
+    try:
+        out = subprocess.check_output(
+            ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+        return [int(x) for x in out.split()]
+    except Exception:
+        return []
+
+
+def _is_stale_self(pid):
+    """True if `pid` is another instance of THIS app (its command line runs
+    app.py), so it is safe to reclaim the port from it. Never our own PID."""
+    if pid == os.getpid():
+        return False
+    try:
+        cmd = subprocess.check_output(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+        return "app.py" in cmd or "app.spec" in cmd
+    except Exception:
+        return False
+
+
+def _resolve_port(preferred, span=20):
+    """Return a bindable port. If the preferred one is held by a *stale instance
+    of this same app*, kill it and reclaim the port (the usual cause of
+    'Address already in use' after a restart). If it's held by something else,
+    fall back to the next free port instead of fighting over it."""
+    if _port_free(preferred):
+        return preferred
+    reclaimed = False
+    for pid in _pids_listening(preferred):
+        if _is_stale_self(pid):
+            print(f"Port {preferred} held by stale instance pid {pid} — killing it", flush=True)
+            try:
+                os.kill(pid, signal.SIGTERM)
+                reclaimed = True
+            except Exception:
+                pass
+    if reclaimed:
+        for _ in range(30):          # up to ~3s for the socket to release
+            if _port_free(preferred):
+                return preferred
+            time.sleep(0.1)
+    for p in range(preferred + 1, preferred + span):   # else next free port
+        if _port_free(p):
+            print(f"Port {preferred} busy (not ours) — using {p} instead", flush=True)
+            return p
+    return preferred                 # give up; let app.run surface the error
+
+
 if __name__ == "__main__":
-    print("Step 1: starting browser timer", flush=True)
+    print("Step 1: resolving port", flush=True)
+    port = _resolve_port(int(os.environ.get("PORT", 5001)))
+    print(f"Step 2: starting browser timer (port {port})", flush=True)
     if not os.environ.get("RENDER"):
-        threading.Timer(1.5, open_browser).start()
-    print("Step 2: starting cmoney key prefetch", flush=True)
+        threading.Timer(1.5, lambda: open_browser(port)).start()
+    print("Step 3: starting cmoney key prefetch", flush=True)
     warrant_logic.prefetch_cmoney_key()
-    print("Step 3: starting flask", flush=True)
-    port = int(os.environ.get("PORT", 5001))
+    print("Step 4: starting flask", flush=True)
     app.run(host="0.0.0.0", port=port, debug=False)
