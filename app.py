@@ -510,8 +510,14 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
 
                 if direction == "positive":
                     trade = "Buy Warrant / Sell Option"
+                    # Buying the warrant lifts the ask -> resting SELL size gates it.
+                    warrant_depth_lots = int(w.get("ask_qty") or 0)
                 else:
                     trade = "Buy Option / Sell Warrant"
+                    # Selling the warrant hits the bid -> resting BUY size gates it.
+                    warrant_depth_lots = int(w.get("bid_qty") or 0)
+                board_lots_needed = round(warrants_needed / 1000, 4)
+                fillable = warrant_depth_lots >= board_lots_needed
 
                 if pd.notna(opt.get("iv_bid")):
                     opt_iv = round(float(opt["iv_bid"]), 4)
@@ -540,7 +546,9 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                     "opt_strike": round(float(opt["strike"]), 2),
                     "strike_diff_pct": round(float(opt["strike_diff_pct"]), 2),
                     "warrants_needed": warrants_needed,
-                    "board_lots": round(warrants_needed / 1000, 4),
+                    "board_lots": board_lots_needed,
+                    "warrant_depth_lots": warrant_depth_lots,
+                    "fillable": bool(fillable),
                     "opt_contract_size": opt_contract_size,
                     "warrant_ask": w["ask"],
                     "warrant_bid": warrant_bid_disp,
@@ -669,6 +677,11 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
             def _emit(executable, opt_ps, warrant_ps, price_diff):
                 synthetic_price = _synth(opt_ps)
                 pct = round(price_diff / synthetic_price * 100, 2) if synthetic_price > 0 else None
+                # Executable side buys the warrant (lifts ask -> SELL size gates);
+                # the non-executable debug side would short it (hits bid).
+                warrant_depth_lots = int(w.get("ask_qty") or 0) if executable else int(w.get("bid_qty") or 0)
+                board_lots_needed = round(warrants_needed / 1000, 4)
+                fillable = warrant_depth_lots >= board_lots_needed
                 if executable:
                     if is_call:
                         trade = "Buy Call Warrant / Short Synthetic (short Put + short stock + lend)"
@@ -694,7 +707,9 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
                     "opt_strike": round(Ko, 2),
                     "strike_diff_pct": round(float(opt["strike_diff_pct"]), 2),
                     "warrants_needed": warrants_needed,
-                    "board_lots": round(warrants_needed / 1000, 4),
+                    "board_lots": board_lots_needed,
+                    "warrant_depth_lots": warrant_depth_lots,
+                    "fillable": bool(fillable),
                     "opt_contract_size": opt_contract_size,
                     "warrant_ask": round(float(w["ask"]), 4),
                     "warrant_bid": warrant_bid_disp,

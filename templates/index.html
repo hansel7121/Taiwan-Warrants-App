@@ -1442,7 +1442,8 @@
       // IV is no longer computed for arb — hide those columns everywhere.
       const HIDDEN_COLS = ["warrant_iv", "opt_iv", "iv_diff"];
       // The US Option Match "us_stock_code" value is actually the TW stock code.
-      const COL_LABELS = { us_stock_code: "tw_stock_code" };
+      const COL_LABELS = { us_stock_code: "tw_stock_code",
+                           warrant_depth_lots: "depth (張)", fillable: "fillable?" };
       const visCols = (row) => Object.keys(row).filter(c => !HIDDEN_COLS.includes(c));
       const colLabel = (c) => COL_LABELS[c] || c;
 
@@ -2284,6 +2285,16 @@
             let val = row[c] === null ? "—" : row[c];
             if (c === "type") {
               val = `<span class="${typeCls}">${val}</span>`;
+            } else if (c === "fillable") {
+              // Enough resting size at the quoted price to fill board_lots?
+              val = row[c]
+                ? `<span class="put" style="font-weight:600">✓</span>`
+                : `<span class="call" style="font-weight:600">✗</span>`;
+            } else if (c === "board_lots") {
+              // Red when the needed size exceeds the best-level depth.
+              val = row.fillable === false
+                ? `<span class="call" style="font-weight:600">${val}</span>`
+                : val;
             } else if (c === "executable") {
               val = row[c]
                 ? `<span class="put" style="font-weight:600">exec</span>`

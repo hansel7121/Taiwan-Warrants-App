@@ -43,6 +43,8 @@ COL_ORDER = [
     "underlying_price",
     "ask",
     "bid",
+    "ask_qty",
+    "bid_qty",
     "days_to_expiry",
     "strike",
     "exercise_ratio",
@@ -259,6 +261,12 @@ def build_warrant_df(cmoney_results, compute_iv=True):
             underlying_price = float(s.get("SalePr") or 0)
             ask = float(w.get("SellPr1") or 0)
             bid = float(w.get("BuyPr1") or 0)
+            # Best-level orderbook size (張). CMoney returns the full 5-level
+            # depth (SellQty1..5 / BuyQty1..5); we keep only level 1 — the size
+            # actually resting at the best ask/bid — so the arb finder can check
+            # whether an arb's needed board_lots can be filled at the quoted price.
+            ask_qty = int(w.get("SellQty1") or 0)   # 張 resting at best ask
+            bid_qty = int(w.get("BuyQty1") or 0)    # 張 resting at best bid
             volume = int(w.get("SaleQty") or 0)
             warrant_name = w.get("CommName", "")
             days_to_expiry = int(w.get("LastDays") or 0)
@@ -315,6 +323,8 @@ def build_warrant_df(cmoney_results, compute_iv=True):
                     "underlying_price": underlying_price,
                     "ask": ask,
                     "bid": bid,
+                    "ask_qty": ask_qty,
+                    "bid_qty": bid_qty,
                     "days_to_expiry": days_to_expiry,
                     "strike": strike,
                     "exercise_ratio": exercise_ratio,
