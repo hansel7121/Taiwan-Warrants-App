@@ -1443,7 +1443,9 @@
       }
 
       // IV is no longer computed for arb — hide those columns everywhere.
-      const HIDDEN_COLS = ["warrant_iv", "opt_iv", "iv_diff"];
+      const HIDDEN_COLS = ["warrant_iv", "opt_iv", "iv_diff",
+        // TW/US raw depth fields — surfaced in the popup panel, not the table.
+        "tw_depth_contracts", "tw_fillable", "us_volume", "us_oi"];
       // The US Option Match "us_stock_code" value is actually the TW stock code.
       const COL_LABELS = { us_stock_code: "tw_stock_code",
                            warrant_depth_lots: "depth (張)", fillable: "fillable?" };
@@ -1526,6 +1528,8 @@
           strike_diff_pct:  row.strike_diff_pct,
           warrants_needed:  row.warrants_needed,
           opt_contract_size:row.opt_contract_size,
+          warrant_depth_lots: row.warrant_depth_lots,
+          fillable:         row.fillable,
           warrant_ask:      row.warrant_ask,
           warrant_bid:      row.warrant_bid,
           opt_bid:          row.opt_bid,
@@ -1669,6 +1673,10 @@
           opt_contract_size:row.opt_contract_size,
           tw_contracts:     row.tw_contracts,
           us_contracts:     row.us_contracts,
+          tw_depth_contracts: row.tw_depth_contracts,
+          tw_fillable:      row.tw_fillable,
+          us_volume:        row.us_volume,
+          us_oi:            row.us_oi,
           warrant_ask:      row.warrant_ask,
           warrant_bid:      row.warrant_bid,
           opt_bid:          row.opt_bid,
@@ -2604,12 +2612,15 @@
         // Only Direct Match + PCP carry warrant depth (best-level resting size
         // from CMoney). Show whether the needed board lots fill at the quote.
         const depthPanel = document.getElementById("pcp-depth-panel");
-        if (row.warrant_depth_lots != null && (mode === "direct" || mode === "pcp")) {
+        // Direct/US same-type + PCP/US-PCP all trade a warrant leg (CMoney depth);
+        // twus is option-vs-option and is handled by its own two-leg panel below.
+        const warrantModeDepth = ["direct", "pcp", "us", "uspcp"].includes(mode);
+        if (row.warrant_depth_lots != null && warrantModeDepth) {
           const depth = row.warrant_depth_lots;                 // 張 resting at best level
           const lotsNeeded = row.warrants_needed / 1000;        // 張 needed (fractional)
-          // Executable PCP + cheap-warrant Direct both BUY the warrant (ask side);
-          // the warrant-rich Direct direction SELLS it (bid side).
-          const buyWarrant = (mode === "pcp") ? (row.executable !== false) : (row.pcp_diff >= 0);
+          // Executable PCP + cheap-warrant same-type both BUY the warrant (ask side);
+          // the warrant-rich same-type direction SELLS it (bid side).
+          const buyWarrant = (mode === "pcp" || mode === "uspcp") ? (row.executable !== false) : (row.pcp_diff >= 0);
           const side = buyWarrant ? "best ask (resting sells)" : "best bid (resting buys)";
           const ok = !!row.fillable;
           const fillPct = depth > 0 ? Math.min(100, depth / lotsNeeded * 100) : 0;
@@ -2622,6 +2633,34 @@
             + `<b>${depth.toLocaleString()} 張</b> resting at ${side}, need <b>${lotsNeeded.toLocaleString(undefined,{maximumFractionDigits:3})} 張</b>`
             + (ok ? "" : ` — only ${fillPct.toFixed(0)}% covers at the quote; rest must walk the book (worse price, edge shrinks) or split the order over time.`)
             + `<div style="color:var(--muted);font-size:11px;margin-top:4px">Best-level size only (五檔 level 1); size can vanish before you fill — a gate, not a guarantee.</div>`;
+        } else if (mode === "twus") {
+          // Two option legs, no warrant. TW leg has real best-level size (口) from
+          // TAIFEX MIS; US leg (yfinance) has no size — volume + OI stand in as a
+          // liquidity proxy only.
+          const longTw = row.pcp_diff >= 0;                 // Long TW / Short US
+          const twSide = longTw ? "buy @ ask" : "sell @ bid";
+          const twDepth = row.tw_depth_contracts;           // 口 resting, TW side
+          const twNeed  = row.tw_contracts;
+          const usNeed  = row.us_contracts;
+          const twOk = !!row.tw_fillable;
+          const twKnown = twDepth != null;
+          const usVol = row.us_volume ?? 0, usOi = row.us_oi ?? 0;
+          // US proxy verdict: OI/volume comfortably above contracts needed = likely ok.
+          const usThin = Math.max(usVol, usOi) < usNeed;
+          const overallOk = twKnown && twOk;                // only the TW leg is a hard gate
+          depthPanel.style.display = "block";
+          depthPanel.style.background = overallOk ? "rgba(34,197,94,.08)" : "rgba(239,68,68,.08)";
+          depthPanel.style.border = `1px solid ${overallOk ? "rgba(34,197,94,.35)" : "rgba(239,68,68,.35)"}`;
+          const twVerdict = !twKnown
+            ? `<span style="color:var(--muted)">size —  (off-hours / no MIS quote)</span>`
+            : `<b style="color:${twOk?"var(--put)":"var(--call)"}">${twOk?"✓":"✗"} ${twDepth.toLocaleString()} 口</b> resting (${twSide}), need <b>${twNeed} 口</b>`;
+          depthPanel.innerHTML =
+            `<div style="font-weight:600;text-transform:uppercase;letter-spacing:.3px;font-size:11px;color:var(--muted);margin-bottom:4px">Orderbook depth — both option legs</div>`
+            + `<div><b>TW leg:</b> ${twVerdict}</div>`
+            + `<div style="margin-top:2px"><b>US leg:</b> need <b>${usNeed} contract${usNeed>1?"s":""}</b> · `
+            + `<span style="color:${usThin?"var(--call)":"var(--muted)"}">vol ${usVol.toLocaleString()}, OI ${usOi.toLocaleString()}</span> `
+            + `<span style="color:var(--muted)">(proxy — yfinance gives no bid/ask size)</span></div>`
+            + `<div style="color:var(--muted);font-size:11px;margin-top:4px">TW size = TAIFEX MIS best level (口, ~20 min delayed). US leg has no true depth; treat vol/OI as a rough liquidity read, not resting size.</div>`;
         } else {
           depthPanel.style.display = "none";
         }

@@ -1017,6 +1017,16 @@ def _match_option_legs(tw_df, us_df, tw_contract_shares, us_contract_shares,
         tw_iv = round(float(tw_iv), 4) if pd.notna(tw_iv) and 0 < float(tw_iv) <= 3 else None
         us_iv = round(float(us_iv), 4) if pd.notna(us_iv) and 0 < float(us_iv) <= 3 else None
 
+        # Orderbook depth per leg. TW leg: best-level size (口) from TAIFEX MIS on
+        # the side actually hit (buy TW@ask -> ask_size; sell TW@bid -> bid_size).
+        # US leg: yfinance exposes no bid/ask size, so volume + OI stand in as a
+        # liquidity proxy (NOT true resting depth).
+        tw_size = tw.get("ask_size") if trade == "Long TW / Short US" else tw.get("bid_size")
+        tw_size = int(tw_size) if pd.notna(tw_size) else None
+        tw_fillable = tw_size is not None and tw_size >= int(tw_contracts)
+        us_vol = int(us.get("volume") or 0)
+        us_oi = int(us.get("oi") or 0)
+
         denom = exec_opt if exec_opt else 1
         rows.append({
             "warrant_code": tw["contract"],
@@ -1035,6 +1045,10 @@ def _match_option_legs(tw_df, us_df, tw_contract_shares, us_contract_shares,
             "strike_diff_pct": round(float(us["strike_diff_pct"]), 2),
             "tw_contracts": int(tw_contracts),
             "us_contracts": int(us_contracts),
+            "tw_depth_contracts": tw_size,
+            "tw_fillable": bool(tw_fillable),
+            "us_volume": us_vol,
+            "us_oi": us_oi,
             "matched_shares": int(matched_shares),
             "warrants_needed": int(matched_shares),
             "opt_contract_size": int(matched_shares),
