@@ -941,6 +941,10 @@
           <!-- Orderbook depth (warrant leg): can the needed board lots actually
                fill at the quoted price? Best-level resting size from CMoney. -->
           <div id="pcp-depth-panel" style="display:none;margin-top:12px;border-radius:6px;padding:10px 14px;font-size:12.5px;line-height:1.6"></div>
+          <!-- Net residual greeks of the paired position (Delta = directional bet
+               left by strike/DTE mismatch + board-lot rounding; Vega = uncovered
+               vol exposure). Computed from the per-leg IVs, popup-only. -->
+          <div id="pcp-greeks-panel" style="display:none;margin-top:12px;border-radius:6px;padding:10px 14px;font-size:12.5px;line-height:1.6;background:var(--surface);border:1px solid var(--border)"></div>
         </div>
 
         <!-- Comparison rows -->
@@ -2415,6 +2419,20 @@
         const d1=(Math.log(S/K)+(r+.5*sigma*sigma)*T)/(sigma*Math.sqrt(T));
         return K*Math.exp(-r*T)*normCDF(-(d1-sigma*Math.sqrt(T)))-S*normCDF(-d1);
       }
+      function normPDF(x){ return Math.exp(-x*x/2)/Math.sqrt(2*Math.PI); }
+      // Per-underlying-share BS greeks. Delta is dimensionless (∂price/∂S);
+      // vega is per 1.00 vol (÷100 at display for per-vol-point). Guard the
+      // degenerate T/σ=0 case with the intrinsic delta and zero vega.
+      function bsDelta(S,K,T,r,sigma,isPut){
+        if(T<=0||sigma<=0){ const itm = isPut ? S<K : S>K; return isPut ? (itm?-1:0) : (itm?1:0); }
+        const d1=(Math.log(S/K)+(r+.5*sigma*sigma)*T)/(sigma*Math.sqrt(T));
+        return isPut ? normCDF(d1)-1 : normCDF(d1);
+      }
+      function bsVega(S,K,T,r,sigma){
+        if(T<=0||sigma<=0) return 0;
+        const d1=(Math.log(S/K)+(r+.5*sigma*sigma)*T)/(sigma*Math.sqrt(T));
+        return S*normPDF(d1)*Math.sqrt(T);   // per 1.00 vol
+      }
 
       // Warrant tau is offset from the option: warrant may have more days to expiry.
       function warrantTau(row, tauOpt) {
@@ -2665,6 +2683,9 @@
           depthPanel.style.display = "none";
         }
 
+        // ── Net residual greeks (Δ + Vega) ──────────────────────────────
+        renderGreeks(row);
+
         // ── Comparison table ────────────────────────────────────────────
         const fmt = (v, dec=2) => v == null ? "—" : Number(v).toLocaleString(undefined,{minimumFractionDigits:dec,maximumFractionDigits:dec});
         const fmtPct = (v, dec=2) => v == null ? "—" : (v>=0?"+":"")+fmt(v,dec)+"%";
@@ -2793,6 +2814,79 @@
         renderPcpChart(parseInt(document.getElementById("pcp-dte-slider").value));
       }
 
+      // Net residual greeks of the paired position, at exact and whole-張 sizing.
+      // Everything is in underlying-share space (matches the chart), so per-share
+      // BS greeks × share counts net directly; the warrant's exercise ratio is
+      // baked into warrantShares (lots*1000*ratio).
+      //
+      // The option/synthetic leg greeks are evaluated with the WARRANT's put/call
+      // type at the option strike Ko. For same-type modes (direct/us/twus) that's
+      // just the option itself. For PCP the executable short leg is a synthetic
+      // (option + stock ± bond) that replicates a warrant-type option at Ko, and
+      // its delta = opposite-option delta ± 1 (put-call parity) — i.e. the stock
+      // leg is folded in automatically, so no separate stock term is needed.
+      // Vega is type-independent (put-call vega parity), so it needs no such care.
+      function renderGreeks(row) {
+        const panel = document.getElementById("pcp-greeks-panel");
+        const isPut = row.warrant_type === "Put";
+        const ivW = row.warrant_iv, ivO = row.opt_iv;
+        if (ivW == null || ivO == null) {
+          panel.style.display = "block";
+          panel.innerHTML =
+            `<div style="font-weight:600;text-transform:uppercase;letter-spacing:.3px;font-size:11px;color:var(--muted);margin-bottom:4px">Net residual greeks</div>`
+            + `<span style="color:var(--muted)">IV unavailable on a leg — can't mark greeks.</span>`;
+          return;
+        }
+        const S0 = row.underlying_price;
+        const optSpot = row.adr_underlying ?? S0;
+        const Kw = row.warrant_strike, Ko = row.opt_strike;
+        const tauW = (row.warrant_dte || row.opt_dte) / 365, tauO = row.opt_dte / 365;
+        const dir = row.pcp_diff >= 0 ? 1 : -1;
+        const contractSize = row.opt_contract_size ?? 2000;
+        const optionShares = contractSize;
+        const exactUnits = row.warrants_needed;
+        const ratio = exactUnits > 0 ? contractSize / exactUnits : 1;
+        const wholeLots = Math.max(1, Math.round(exactUnits / 1000));
+        const wsExact = contractSize;
+        const wsWhole = wholeLots * 1000 * ratio;
+
+        // Per-share greeks per leg (option leg uses the warrant's type at Ko).
+        const dW = bsDelta(S0, Kw, tauW, R_FREE, ivW, isPut);
+        const vW = bsVega(S0, Kw, tauW, R_FREE, ivW);
+        const dO = bsDelta(optSpot, Ko, tauO, R_FREE, ivO, isPut);
+        const vO = bsVega(optSpot, Ko, tauO, R_FREE, ivO);
+        // Long warrant / short option (dir flips for the reversed trade), mirroring
+        // the chart's pnlAt sign structure.
+        const netDelta = ws => dir * (ws * dW - optionShares * dO);
+        const netVega  = ws => dir * (ws * vW - optionShares * vO);
+
+        const fmtSigned = (v, dec=0) => (v >= 0 ? "+" : "") + Number(v).toLocaleString(undefined,{maximumFractionDigits:dec, minimumFractionDigits:dec});
+        const row1 = (label, ws, note) => {
+          const nd = netDelta(ws), nv = netVega(ws) / 100;   // vega per vol-point (NT$)
+          const ndPct = optionShares ? nd / optionShares * 100 : 0;
+          const dColor = Math.abs(ndPct) >= 2 ? "var(--call)" : "var(--text)";
+          const vColor = Math.abs(nv) < 1 ? "var(--muted)" : (nv < 0 ? "var(--call)" : "var(--put)");
+          const vTag = Math.abs(nv) < 1 ? "flat" : (nv < 0 ? "net short vol" : "net long vol");
+          return `<tr>
+            <td style="padding:4px 10px 4px 0;color:var(--muted)">${label}</td>
+            <td style="padding:4px 14px;text-align:right;font-variant-numeric:tabular-nums;color:${dColor};font-weight:600">${fmtSigned(nd)} sh</td>
+            <td style="padding:4px 14px;text-align:right;color:var(--muted);font-size:11px">≈${fmtSigned(ndPct,1)}% of hedge</td>
+            <td style="padding:4px 14px;text-align:right;font-variant-numeric:tabular-nums;color:${vColor};font-weight:600">${fmtSigned(nv)} </td>
+            <td style="padding:4px 0;color:${vColor};font-size:11px">${vTag}</td>
+          </tr>`;
+        };
+        // twus has no 張 rounding (both legs contract-matched), so whole == exact.
+        const sameWholeExact = Math.abs(wsWhole - wsExact) < 1e-9;
+        panel.style.display = "block";
+        panel.innerHTML =
+          `<div style="font-weight:600;text-transform:uppercase;letter-spacing:.3px;font-size:11px;color:var(--muted);margin-bottom:6px">Net residual greeks — position (Δ shares, Vega NT$/vol-pt)</div>`
+          + `<table style="border-collapse:collapse;font-size:12.5px"><tbody>`
+          + row1(sameWholeExact ? "Matched" : "Whole 張 (executable)", wsWhole)
+          + (sameWholeExact ? "" : row1("Exact hedge (fractional 張)", wsExact))
+          + `</tbody></table>`
+          + `<div style="color:var(--muted);font-size:11px;margin-top:6px">Δ = leftover directional exposure from strike/DTE mismatch${sameWholeExact ? "" : " + board-lot rounding"}; Vega = vol exposure the hedge doesn't cover (legs carry different IV). Marked at each leg's current spot with the solved per-leg IV.</div>`;
+      }
+
       function renderPcpChart(dte) {
         const row = _pcpRow;
         const contractSize = _contractSize;   // option leg controls exactly this many shares
@@ -2813,9 +2907,9 @@
           const wholeLots = Math.max(1, Math.round(exactUnits / 1000));
           warrantShares = wholeLots * 1000 * ratio;
           const exactLots = exactUnits / 1000;
-          const deltaShares = Math.round(warrantShares - optionShares);
+          const notionGap = Math.round(warrantShares - optionShares);
           hedgeNote = `Whole 張: ${wholeLots} 張 vs ${exactLots.toLocaleString(undefined,{maximumFractionDigits:3})} exact `
-            + `— residual ${deltaShares >= 0 ? "+" : ""}${deltaShares.toLocaleString()} shares of warrant delta`;
+            + `— ${notionGap >= 0 ? "+" : ""}${notionGap.toLocaleString()} shares notional gap (see Net residual greeks above for the true Δ)`;
         } else {
           warrantShares = contractSize;
           hedgeNote = `Exact hedge: ${(exactUnits/1000).toLocaleString(undefined,{maximumFractionDigits:3})} 張 `
