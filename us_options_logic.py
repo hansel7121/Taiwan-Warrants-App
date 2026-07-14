@@ -148,30 +148,38 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
     ends_p = p[k:]
     fx_ratio = F[k:] / F[: n - k]              # F_exit / F_entry for each window
 
-    # ── Premium: center on TODAY, use the UNCONDITIONAL move distribution ──
-    # Take every k-day forward premium *move* in history (not conditioned on the
-    # starting level), apply it to today's premium, and bucket by whether it
-    # carries premium more than ±5% beyond today (bigger drop / reverts) or stays.
-    moves = ends_p - starts_p                    # all k-day forward changes
-    ends_cond = p0 + moves                        # exit premium centered on today
-    fx_cond = fx_ratio                            # paired FX move per window
+    # ── Premium move STRIPPED of FX (exact identity, not a regression) ──
+    # By definition 1+prem = (adr_usd/ratio)·FX / tw_local, so over any window
+    #     Δln(1+prem) = Δln(FX) + [ Δln(adr_usd) − Δln(tw_local) ].
+    # The bracket is the residual "basis" move Δb — the ADR moving in USD vs the
+    # local moving in TWD, i.e. the premium change NOT explained by FX (the
+    # US-only basis risk, e.g. semiconductor sentiment). FX enters premium with
+    # coefficient EXACTLY 1, so subtracting the FX log-move isolates the basis.
+    # The option leg's moneyness is driven by this residual only; FX is priced
+    # as its own separate EV line, so neither risk is double-counted.
+    lp = np.log1p(p)
+    lf = np.log(F)
+    db = (lp[k:] - lp[: n - k]) - (lf[k:] - lf[: n - k])   # residual basis log-move / window
+    # Apply the FX-stripped move to today's premium with FX held flat:
+    #   1 + p_eff = (1 + p0)·exp(Δb)
+    ends_cond = (1.0 + p0) * np.exp(db) - 1.0
     conditional = True
     band = None
 
     def bucket(mask, label):
         prob = float(mask.mean()) if len(mask) else 0.0
         cond = float(ends_cond[mask].mean()) if mask.any() else 0.0
-        # Paired (exit premium, forward FX ratio) for every window in this bucket,
-        # so the frontend averages P&L jointly over premium AND FX (E[PnL|band]).
+        # FX-stripped exit premiums for this bucket. The frontend prices the
+        # option leg's moneyness off these with FX held flat (fxRatio = 1); FX
+        # is handled as its own EV line, so FX is never counted twice.
         return {
             "label": label, "prob": prob, "cond_premium": cond,
             "premiums": [round(float(x), 6) for x in ends_cond[mask].tolist()],
-            "fx_ratios": [round(float(x), 6) for x in fx_cond[mask].tolist()],
         }
 
-    C = PREM_THRESHOLD                            # ±5% band around today
-    lo = moves < -C                               # drops >5% below today
-    hi = moves > C                                # rises >5% above today
+    C = PREM_THRESHOLD                            # ±5% band on the FX-stripped basis move
+    lo = db < -C                                  # basis drops >5% below today
+    hi = db > C                                   # basis rises >5% above today
     mid = ~lo & ~hi                               # stays within ±5% of today
     thr = int(C * 100)
     if p0 < 0:
@@ -185,16 +193,24 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
     else:
         lo_lbl, mid_lbl, hi_lbl = (f"Falls ≥{thr}%", f"Stays (±{thr}%)", f"Rises ≥{thr}%")
 
-    # ── FX orthogonalized against premium (how much FX is NOT explained by it) ──
+    # ── Premium decomposed into FX + residual basis (exact identity) ──
+    # rp = daily premium log-move, rf = daily FX log-move. rb = rp − rf is the
+    # residual basis move: the premium change NOT explained by FX (Δln(adr_usd)
+    # − Δln(tw_local), the US-only basis). "unexplained fraction" = share of
+    # premium variance carried by this basis. corr(rp, rf) is how tightly the
+    # premium tracks FX (the scatter's coupling), reported for the chart only.
     rp = np.diff(np.log1p(p))
     rf = np.diff(np.log(F))
-    if rp.std() > 0 and rf.std() > 0:
-        corr = float(np.corrcoef(rp, rf)[0, 1])
-        beta = float(np.cov(rf, rp)[0, 1] / np.var(rp))
-        resid = rf - (rf.mean() + beta * (rp - rp.mean()))
+    rb = rp - rf                               # residual basis daily move (exact)
+    vp = float(np.var(rp))
+    if vp > 0:
+        unexplained = float(np.var(rb) / vp)   # premium variance from the basis (ex-FX)
+        corr = float(np.corrcoef(rp, rf)[0, 1]) if rf.std() > 0 else 0.0
     else:
-        corr, beta, resid = 0.0, 0.0, rf - rf.mean()
-    r2 = corr ** 2                             # shared variance fraction
+        unexplained, corr = 1.0, 0.0
+    unexplained = max(0.0, min(1.0, unexplained))
+    r2 = corr ** 2                             # premium/FX scatter R² (coupling)
+    resid = rb                                 # basis series for the chart (premium ex-FX)
 
     # ── FX factor: condition on windows that STARTED near today's FX level ──
     starts_f = F[: n - k]
@@ -224,9 +240,10 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
         "down_mean_pct": float((fx_cond2[down].mean() - 1) * 100) if down.any() else 0.0,
         # forward FX % move for every FX-conditioned window (for the modal)
         "ratios_pct": [round(float((x - 1) * 100), 4) for x in fx_cond2.tolist()],
-        "r2_with_premium": round(r2, 4),        # coupling of FX & premium moves
+        "r2_with_premium": round(r2, 4),        # premium/FX scatter R² (coupling)
         "corr_with_premium": round(corr, 4),
-        "unexplained_frac": round(1 - r2, 4),   # FX variance NOT explained by premium
+        "unexplained_frac": round(unexplained, 4),   # premium variance NOT explained by FX (basis)
+        "explained_frac": round(1.0 - unexplained, 4),
     }
 
     return {

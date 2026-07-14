@@ -685,6 +685,12 @@
                   <option value="2412">2412 中華電 (CHT, 1:10)</option>
                 </select>
               </div>
+              <label>Strategy
+                <select id="usStrategy" onchange="onUsStrategyChange()" title="Call-Call/Put-Put: match warrant to same-type US ADR option. Put-Call Parity: price the warrant against the synthetic built from the opposite-type US option + the US ADR + a USD bond (cross-market, financed at the US rate).">
+                  <option value="same_type">Call-Call / Put-Put</option>
+                  <option value="pcp">Put-Call Parity (cross-market)</option>
+                </select>
+              </label>
               <label>Option Type
                 <select id="usOptionType">
                   <option value="All">All</option>
@@ -934,6 +940,13 @@
             <tbody id="pcp-legs-body"></tbody>
             <tfoot id="pcp-legs-foot"></tfoot>
           </table>
+          <!-- Orderbook depth (warrant leg): can the needed board lots actually
+               fill at the quoted price? Best-level resting size from CMoney. -->
+          <div id="pcp-depth-panel" style="display:none;margin-top:12px;border-radius:6px;padding:10px 14px;font-size:12.5px;line-height:1.6"></div>
+          <!-- Net residual greeks of the paired position (Delta = directional bet
+               left by strike/DTE mismatch + board-lot rounding; Vega = uncovered
+               vol exposure). Computed from the per-leg IVs, popup-only. -->
+          <div id="pcp-greeks-panel" style="display:none;margin-top:12px;border-radius:6px;padding:10px 14px;font-size:12.5px;line-height:1.6;background:var(--surface);border:1px solid var(--border)"></div>
         </div>
 
         <!-- Comparison rows -->
@@ -1005,6 +1018,7 @@
               If you enter now — where does the premium land by expiry?</p>
             <p id="us-scenario-caption" style="font-size:12px;color:var(--muted);margin:0 0 10px"></p>
             <table id="us-scenario-table" style="width:100%;border-collapse:collapse;font-size:13px"></table>
+            <div id="us-scenario-breakeven" style="margin-top:10px;font-size:12.5px;font-weight:600"></div>
             <div id="us-scenario-note" style="background:var(--surface);border-radius:6px;padding:12px 14px;margin-top:12px;font-size:12px;color:var(--muted);line-height:1.6"></div>
           </div>
         </div>
@@ -1439,7 +1453,16 @@
           max_dte_diff: parseInt(document.getElementById("usMaxDteDiff").value) ?? 5,
           min_volume: parseInt(document.getElementById("usMinVolume").value) || 0,
           positive_loose: document.getElementById("usPositiveLoose").checked,
+          strategy: document.getElementById("usStrategy").value,
         };
+      }
+
+      // Hint only — loose still applies (to the PCP executable leg) for both.
+      function onUsStrategyChange() {
+        const pcp = document.getElementById("usStrategy").value === "pcp";
+        document.getElementById("us-status").textContent = pcp
+          ? "Cross-market PCP: warrant vs synthetic (opposite-type US option + US ADR + USD bond @ R_US). Executable = long warrant / short synthetic."
+          : "";
       }
 
       async function fetchUsData() {
@@ -1463,16 +1486,21 @@
           return;
         }
         currentUsData = data.rows;
-        document.getElementById("us-status").textContent =
-          `${data.count} matched pairs — prices in TWD/Taiwan-share; 1 US contract = 500 TW shares; FX held constant`;
+        const usPcp = document.getElementById("usStrategy").value === "pcp";
+        document.getElementById("us-status").textContent = usPcp
+          ? `${data.count} cross-market PCP pairs — executable: long warrant / short synthetic (short US opp-type option + short/long ADR + USD bond); non-executable (debug): short warrant. Prices TWD/TW-share; 1 US contract = 500 TW shares; FX held constant`
+          : `${data.count} matched pairs — prices in TWD/Taiwan-share; 1 US contract = 500 TW shares; FX held constant`;
         document.getElementById("usDownloadBtn").style.display = "inline-block";
         renderUsTable(currentUsData);
       }
 
       // IV is no longer computed for arb — hide those columns everywhere.
-      const HIDDEN_COLS = ["warrant_iv", "opt_iv", "iv_diff"];
+      const HIDDEN_COLS = ["warrant_iv", "opt_iv", "iv_diff",
+        // TW/US raw depth fields — surfaced in the popup panel, not the table.
+        "tw_depth_contracts", "tw_fillable", "us_volume", "us_oi"];
       // The US Option Match "us_stock_code" value is actually the TW stock code.
-      const COL_LABELS = { us_stock_code: "tw_stock_code" };
+      const COL_LABELS = { us_stock_code: "tw_stock_code",
+                           warrant_depth_lots: "depth (張)", fillable: "fillable?" };
       const visCols = (row) => Object.keys(row).filter(c => !HIDDEN_COLS.includes(c));
       const colLabel = (c) => COL_LABELS[c] || c;
 
@@ -1533,14 +1561,17 @@
       }
 
       function openUsModal(row) {
-        // Same field mapping as Direct Match; option leg already in TWD/TW-share.
+        // Cross-market PCP rows carry the `executable` flag (opposite-type
+        // option + real synthetic/bond); same-type rows do not.
+        const isPcp = "executable" in row;
         const mapped = {
           warrant_code:     row.warrant_code,
           warrant_name:     row.warrant_name,
           warrant_type:     row.type,
-          opt_type:         row.type,
+          opt_type:         isPcp ? row.opt_type : row.type,  // PCP pairs opposite type
           option_contract:  row.option_contract,
-          underlying_price: row.underlying_price,
+          underlying_price: row.underlying_price,   // warrant LOCAL spot (premium baseline)
+          adr_underlying:   row.adr_underlying,     // ADR-converted spot (synthetic/stock leg)
           warrant_dte:      row.warrant_dte,
           opt_dte:          row.opt_dte,
           dte_diff:         row.dte_diff,
@@ -1549,6 +1580,8 @@
           strike_diff_pct:  row.strike_diff_pct,
           warrants_needed:  row.warrants_needed,
           opt_contract_size:row.opt_contract_size,
+          warrant_depth_lots: row.warrant_depth_lots,
+          fillable:         row.fillable,
           warrant_ask:      row.warrant_ask,
           warrant_bid:      row.warrant_bid,
           opt_bid:          row.opt_bid,
@@ -1557,14 +1590,17 @@
           opt_per_share:    row.opt_per_share,
           pcp_diff:         row.price_diff,
           pcp_diff_pct:     row.price_diff_pct,
-          synthetic_price:  row.opt_per_share,
-          bond_pv:          null,
+          // PCP: real synthetic + USD bond PV from the backend. Same-type:
+          // synthetic = the option price itself, no bond leg.
+          synthetic_price:  isPcp ? row.synthetic_price : row.opt_per_share,
+          bond_pv:          isPcp ? row.bond_pv : null,
+          executable:       isPcp ? row.executable : true,
           warrant_iv:       row.warrant_iv,
           opt_iv:           row.opt_iv,
           us_stock_code:    row.us_stock_code,
           loose:            document.getElementById("usPositiveLoose").checked,
         };
-        openArbModal(mapped, "us");
+        openArbModal(mapped, isPcp ? "uspcp" : "us");
       }
 
       async function downloadUsCSV() {
@@ -1689,6 +1725,10 @@
           opt_contract_size:row.opt_contract_size,
           tw_contracts:     row.tw_contracts,
           us_contracts:     row.us_contracts,
+          tw_depth_contracts: row.tw_depth_contracts,
+          tw_fillable:      row.tw_fillable,
+          us_volume:        row.us_volume,
+          us_oi:            row.us_oi,
           warrant_ask:      row.warrant_ask,
           warrant_bid:      row.warrant_bid,
           opt_bid:          row.opt_bid,
@@ -1723,6 +1763,8 @@
 
       // ── ADR premium risk + Expected Value (US mode) ────────────────────
       //
+      let _premEvNt = 0;   // premium EV (FX-stripped) — set by loadAdrScenario, read by renderFxSection for the total
+      //
       // Both legs are the SAME underlying, so the pair is delta-matched and the
       // dominant residual risk is the ADR *basis* (premium). We hold the
       // underlying at current spot S0 (direction is hedged) and let only the
@@ -1737,6 +1779,17 @@
       //
       // Regimes (spike / around-0 / drop) and their probabilities + conditional
       // mean premia come from the historical premium series (backend).
+      // Strip the FX-driven part out of a premium reading, leaving the FX-flat
+      // "basis" premium. Identity: 1+prem = (1+p0)·fxRatio·exp(Δb), so the
+      // FX-stripped effective premium is (1+prem)/fxRatio − 1. The P&L engines
+      // price option moneyness off this basis premium and translate FX
+      // separately (fxRatio), so FX is never counted twice.
+      const _stripFx = (prem, fxRatio) => (1 + prem) / (fxRatio || 1) - 1;
+
+      // `p` is the FX-STRIPPED (basis) premium: option moneyness = S0·(1+(p−p0))
+      // reflects only the ADR-vs-local divergence, and `fxRatio` translates the
+      // USD option leg to TWD. Callers holding an actual (FX-laden) premium must
+      // pass _stripFx(premium, fxRatio) here.
       function _evPnlAtPremium(row, p, p0, fxRatio, opts) {
         const fx = (fxRatio == null) ? 1 : fxRatio;   // F_exit / F_today on the US leg
         const isCall = row.warrant_type === "Call";
@@ -1790,10 +1843,12 @@
           oVal -= ho;   // exit: buy back the option at its bid
         }
 
-        // The US (opt) leg's P&L is in USD; it converts to TWD at the exit FX
-        // rate, so scale it by fxRatio = F_exit/F_today. The TW (warrant) leg is
-        // already TWD and unaffected.
-        const perShare = dir * ((wVal - wEntry) + fx * (oEntry - oVal));
+        // Short-option TWD P&L = premium received at entry FX − buyback at exit
+        // FX = oEntry − fxRatio·oVal (oEntry/oVal are entry-FX TWD/share; only
+        // the exit leg re-translates). NOT fx·(oEntry−oVal): the entry premium
+        // is already fixed in TWD, so scaling it by FX would double-count. The
+        // TW (warrant) leg is already TWD and unaffected.
+        const perShare = dir * ((wVal - wEntry) + (oEntry - fx * oVal));
         return perShare * shares;
       }
 
@@ -1884,6 +1939,7 @@
         const cap = document.getElementById("us-scenario-caption");
         const note = document.getElementById("us-scenario-note");
         tbl.innerHTML = ""; note.innerHTML = ""; cap.textContent = "loading…";
+        document.getElementById("us-scenario-breakeven").innerHTML = "";
         document.getElementById("us-fx-section").style.display = "none";
 
         // Trade closes at the first (nearest) expiry.
@@ -1917,13 +1973,13 @@
         </tr></thead><tbody>`;
         s.regimes.forEach(r => {
           // E[PnL | band] = average P&L over EACH conditioned window in this band,
-          // using BOTH its forward premium (US-put moneyness) AND its forward FX
-          // ratio (US-leg conversion) — jointly, so premium/FX correlation is
-          // captured. Nonlinear P&L => average the P&L, not P&L at the means.
+          // pricing the option leg's moneyness off the window's FX-STRIPPED
+          // (basis) premium with FX held flat. FX is priced separately below as
+          // its own EV line, so the two risks never double-count. Nonlinear P&L
+          // => average the P&L, not P&L at the band mean.
           const prem = r.premiums && r.premiums.length ? r.premiums : null;
-          const fxr = r.fx_ratios && r.fx_ratios.length ? r.fx_ratios : null;
           const pnl = prem
-            ? prem.reduce((sum, p, i) => sum + _evPnlAtPremium(row, p, p0, fxr ? fxr[i] : 1), 0) / prem.length
+            ? prem.reduce((sum, pp) => sum + _evPnlAtPremium(row, pp, p0, 1), 0) / prem.length
             : _evPnlAtPremium(row, r.cond_premium, p0, 1);
           const contrib = r.prob * pnl;
           ev += contrib;
@@ -1938,14 +1994,38 @@
         });
         const evCol = ev >= 0 ? "var(--put)" : "var(--call)";
         body += `</tbody><tfoot><tr>
-          <td colspan="4" style="${td};font-weight:700;text-transform:uppercase;font-size:11px;letter-spacing:.4px;color:var(--muted)">Conditional Expected Value (NT$)</td>
+          <td colspan="4" style="${td};font-weight:700;text-transform:uppercase;font-size:11px;letter-spacing:.4px;color:var(--muted)">Premium EV — FX-stripped basis (NT$)</td>
           <td style="${tdr};font-weight:700;font-size:14px;color:${evCol}">${ev>=0?"+":""}${Math.round(ev).toLocaleString()}</td>
         </tr></tfoot>`;
         tbl.innerHTML = body;
+        _premEvNt = ev;   // hand the premium EV to the FX section for the total
+
+        // Break-even exit premium (FX held flat): scan for the exit premium at
+        // which trade P&L crosses zero. Single interpretable threshold next to the
+        // regime table — "the trade needs the premium to stay above/below X%".
+        const pnlAtP = (pp) => _evPnlAtPremium(row, pp, p0, 1);
+        const loP = p0 - 0.6, hiP = p0 + 0.6, steps = 240;
+        let be = null, prev = pnlAtP(loP), prevP = loP;
+        for (let i = 1; i <= steps; i++) {
+          const pp = loP + (hiP - loP) * i / steps, cur = pnlAtP(pp);
+          if ((prev <= 0 && cur >= 0) || (prev >= 0 && cur <= 0)) {
+            const t = (0 - prev) / ((cur - prev) || 1);
+            be = prevP + (pp - prevP) * t; break;
+          }
+          prev = cur; prevP = pp;
+        }
+        const pnlNow = pnlAtP(p0);
+        const beTxt = be == null
+          ? `P&L (FX flat) does not cross zero within ±60% premium of today — it is ${pnlNow >= 0 ? "positive" : "negative"} across that range.`
+          : `Break-even exit premium (FX flat): <b>${(be*100>=0?"+":"")}${(be*100).toFixed(2)}%</b> `
+            + `(today ${(p0*100>=0?"+":"")}${(p0*100).toFixed(2)}%). Trade is profitable while the premium stays ${pnlNow >= 0 ? (be < p0 ? "above" : "below") : (be < p0 ? "below" : "above")} it.`;
+        const beCol = pnlNow >= 0 ? "var(--put)" : "var(--call)";
+        document.getElementById("us-scenario-breakeven").innerHTML =
+          `<span style="color:${beCol}">${beTxt}</span>`;
 
         note.innerHTML =
-          `EV = Σ <code>P(band | start)</code> · <code>E[PnL | band, start]</code>, averaged jointly over each conditioned window's <b>forward premium AND forward FX</b> (so premium/FX correlation is baked in), not P&L at the band means. `
-          + `Probabilities are the <b>unconditional</b> distribution of ${row.warrant_dte < row.opt_dte ? row.warrant_dte : row.opt_dte} trading-day premium moves, centered on today's premium (not conditioned on the starting level). `
+          `Premium EV = Σ <code>P(band)</code> · <code>E[PnL | band]</code> over each window's <b>FX-stripped basis premium</b> (the premium move NOT explained by FX), with FX held flat. FX is priced separately as its own EV line in the panel below, so the two risks add without double-counting. `
+          + `Basis moves are the <b>unconditional</b> distribution of ${row.warrant_dte < row.opt_dte ? row.warrant_dte : row.opt_dte} trading-day premium-ex-FX moves, centered on today's premium. `
           + `"Exit premium" is the band mean, reference only. Horizon = min(TW ${row.warrant_dte}d, US ${row.opt_dte}d).`;
 
         renderFxSection(row, s, p0);
@@ -1966,34 +2046,34 @@
         fxBadge.style.background = up30 ? "rgba(74,222,128,0.15)" : "rgba(248,113,113,0.15)";
         fxBadge.style.color = up30 ? "var(--put)" : "var(--call)";
         document.getElementById("us-fx-caption").innerHTML =
-          `The US leg settles in USD and converts to TWD at exit, so FX is a second basis. Line below = FX <b>isolated from the premium</b> (compounded residual moves, index=100) — the FX drift the ADR premium can't explain.`;
+          `The US leg settles in USD and converts to TWD at exit — that FX risk is the table below (its own EV line). The line below-left is the ADR premium <b>with FX stripped out</b> (compounded basis moves, index=100): the premium drift NOT explained by FX (${(fx.unexplained_frac*100).toFixed(0)}% of premium variance) — the US-only basis risk you carry on top of FX.`;
 
-        // FX path ISOLATED from the premium: compound the residual daily moves
-        // (FX with the premium-explained component removed) into an index=100.
-        // resid_pct[i] corresponds to dates[i+1].
+        // ADR premium with FX stripped out: compound the residual daily basis
+        // moves (Δln(1+prem) − Δln(FX)) into an index=100. This is the premium
+        // risk that survives after FX; resid_pct[i] corresponds to dates[i+1].
         const isoDates = ser.dates.slice(1);
         const iso = []; let lvl = 100;
         (ser.resid_pct || []).forEach(r => { lvl *= (1 + r / 100); iso.push(lvl); });
         Plotly.react("us-fx-chart", [
           { x: isoDates, y: iso, mode: "lines", line: { color: "#a78bfa", width: 1.3 },
-            hovertemplate: "%{x}<br>isolated FX index %{y:.2f}<extra></extra>" },
+            hovertemplate: "%{x}<br>premium ex-FX index %{y:.2f}<extra></extra>" },
         ], {
           paper_bgcolor: "#13161f", plot_bgcolor: "#0d0f16",
           font: { color: "#8b90a0", family: "Inter,system-ui,sans-serif", size: 11 },
           xaxis: { gridcolor: "#252836", zerolinecolor: "#252836" },
-          yaxis: { title: "FX isolated (index=100)", gridcolor: "#252836", zerolinecolor: "#252836" },
+          yaxis: { title: "premium ex-FX (index=100)", gridcolor: "#252836", zerolinecolor: "#252836" },
           margin: { l: 55, r: 10, t: 8, b: 30 }, showlegend: false,
         }, { responsive: true });
 
-        // Residual daily FX moves (isolated from premium)
+        // Daily premium moves with FX stripped out (the US-only basis residual)
         Plotly.react("us-fx-hist", [
           { x: ser.resid_pct, type: "histogram", nbinsx: 60,
             marker: { color: "rgba(167,139,250,0.5)", line: { color: "rgba(167,139,250,0.9)", width: 0.5 } },
-            hovertemplate: "resid FX %{x:.2f}%<br>count %{y}<extra></extra>" },
+            hovertemplate: "premium ex-FX %{x:.2f}%<br>count %{y}<extra></extra>" },
         ], {
           paper_bgcolor: "#13161f", plot_bgcolor: "#0d0f16",
           font: { color: "#8b90a0", family: "Inter,system-ui,sans-serif", size: 11 },
-          xaxis: { title: "daily FX move not explained by premium (%)", gridcolor: "#252836", zerolinecolor: "#252836", ticksuffix: "%" },
+          xaxis: { title: "daily premium move not explained by FX (%)", gridcolor: "#252836", zerolinecolor: "#252836", ticksuffix: "%" },
           yaxis: { title: "days", gridcolor: "#252836", zerolinecolor: "#252836" },
           margin: { l: 55, r: 10, t: 10, b: 38 }, showlegend: false, bargap: 0.02,
         }, { responsive: true });
@@ -2045,6 +2125,14 @@
             <td style="${tdr};color:${col}">${dPnl>=0?"+":""}${Math.round(dPnl).toLocaleString()}</td>
           </tr>`;
         };
+        // FX EV = Σ P(regime)·(ΔP&L vs flat FX): the standalone FX contribution,
+        // moneyness held flat so it does not overlap the premium EV. Total EV =
+        // Premium EV (basis) + FX EV — two clean, non-overlapping numbers.
+        const fxEv = [[fx.stay_prob, 0], [fx.up_prob, fx.up_mean_pct], [fx.down_prob, fx.down_mean_pct]]
+          .reduce((sum, [prob, mv]) => sum + (prob || 0) * (_evPnlAtPremium(row, p0, p0, 1 + mv / 100) - base), 0);
+        const totalEv = _premEvNt + fxEv;
+        const fxCol = fxEv >= 0 ? "var(--put)" : "var(--call)";
+        const totCol = totalEv >= 0 ? "var(--put)" : "var(--call)";
         document.getElementById("us-fx-table").innerHTML = `
           <thead><tr>
             <th style="${th};text-align:left">FX by expiry (from ${fx.current_fx.toFixed(3)})</th>
@@ -2055,12 +2143,17 @@
             ${rowFx("Stays (±0.5%)", fx.stay_prob, 0, null)}
             ${rowFx("TWD weakens (FX up)", fx.up_prob, fx.up_mean_pct, "up")}
             ${rowFx("TWD strengthens (FX down)", fx.down_prob, fx.down_mean_pct, "down")}
-          </tbody>`;
+          </tbody><tfoot>
+            <tr><td colspan="3" style="${td};font-weight:700;text-transform:uppercase;font-size:11px;letter-spacing:.4px;color:var(--muted)">FX EV (NT$)</td>
+                <td style="${tdr};font-weight:700;color:${fxCol}">${fxEv>=0?"+":""}${Math.round(fxEv).toLocaleString()}</td></tr>
+            <tr><td colspan="3" style="${td};font-weight:700;text-transform:uppercase;font-size:11px;letter-spacing:.4px;color:var(--muted)">Total EV = Premium + FX (NT$)</td>
+                <td style="${tdr};font-weight:700;font-size:14px;color:${totCol}">${totalEv>=0?"+":""}${Math.round(totalEv).toLocaleString()}</td></tr>
+          </tfoot>`;
 
         document.getElementById("us-fx-note").innerHTML =
-          `FX is isolated from the premium by regressing daily ΔFX on Δpremium; the histogram above is the <b>residual</b> (FX moves the premium can't explain — ${(fx.unexplained_frac*100).toFixed(0)}% of FX variance here). `
-          + `Probabilities condition on FX starting within ±${fx.cond_band_pct}% of today's rate, ${s.horizon_trading} trading days out (${fx.n} windows). `
-          + `The main EV table already folds FX in per-path; this panel isolates the standalone FX risk and flags the move that hurts you.`;
+          `Premium ex-FX uses the exact identity Δln(1+prem) = Δln(FX) + Δbasis (FX enters premium with coefficient 1), so the histogram above is the <b>basis residual</b> — the premium move FX can't explain (${(fx.unexplained_frac*100).toFixed(0)}% of premium variance; corr(premium, FX) = ${fx.corr_with_premium.toFixed(2)}). `
+          + `FX-EV probabilities condition on FX starting within ±${fx.cond_band_pct}% of today's rate, ${s.horizon_trading} trading days out (${fx.n} windows). `
+          + `Total EV = Premium EV (basis, FX flat) + FX EV (moneyness flat), so neither risk is double-counted.`;
       }
 
       // ── Options Scanner ────────────────────────────────────────────────
@@ -2229,11 +2322,10 @@
         };
       }
 
-      // In PCP mode the loose-price toggle is meaningless (synthetic is priced
-      // off bid/ask directly), so hide it to avoid confusion.
+      // Loose applies to both strategies: same-type positive leg, and (PCP) the
+      // executable long-warrant/short-synthetic leg. Keep it visible everywhere.
       function onArbStrategyChange() {
-        const pcp = document.getElementById("arbStrategy").value === "pcp";
-        document.getElementById("arbPositiveLoose").closest("label").style.display = pcp ? "none" : "";
+        document.getElementById("arbPositiveLoose").closest("label").style.display = "";
       }
 
       async function fetchArbData() {
@@ -2285,6 +2377,16 @@
             let val = row[c] === null ? "—" : row[c];
             if (c === "type") {
               val = `<span class="${typeCls}">${val}</span>`;
+            } else if (c === "fillable") {
+              // Enough resting size at the quoted price to fill board_lots?
+              val = row[c]
+                ? `<span class="put" style="font-weight:600">✓</span>`
+                : `<span class="call" style="font-weight:600">✗</span>`;
+            } else if (c === "board_lots") {
+              // Red when the needed size exceeds the best-level depth.
+              val = row.fillable === false
+                ? `<span class="call" style="font-weight:600">${val}</span>`
+                : val;
             } else if (c === "executable") {
               val = row[c]
                 ? `<span class="put" style="font-weight:600">exec</span>`
@@ -2347,6 +2449,8 @@
           strike_diff_pct:  row.strike_diff_pct,
           warrants_needed:  row.warrants_needed,
           opt_contract_size:row.opt_contract_size,
+          warrant_depth_lots: row.warrant_depth_lots,
+          fillable:         row.fillable,
           warrant_ask:      row.warrant_ask,
           warrant_bid:      row.warrant_bid,
           opt_bid:          row.opt_bid,
@@ -2391,6 +2495,20 @@
         if(T<=0) return Math.max(0,K-S);
         const d1=(Math.log(S/K)+(r+.5*sigma*sigma)*T)/(sigma*Math.sqrt(T));
         return K*Math.exp(-r*T)*normCDF(-(d1-sigma*Math.sqrt(T)))-S*normCDF(-d1);
+      }
+      function normPDF(x){ return Math.exp(-x*x/2)/Math.sqrt(2*Math.PI); }
+      // Per-underlying-share BS greeks. Delta is dimensionless (∂price/∂S);
+      // vega is per 1.00 vol (÷100 at display for per-vol-point). Guard the
+      // degenerate T/σ=0 case with the intrinsic delta and zero vega.
+      function bsDelta(S,K,T,r,sigma,isPut){
+        if(T<=0||sigma<=0){ const itm = isPut ? S<K : S>K; return isPut ? (itm?-1:0) : (itm?1:0); }
+        const d1=(Math.log(S/K)+(r+.5*sigma*sigma)*T)/(sigma*Math.sqrt(T));
+        return isPut ? normCDF(d1)-1 : normCDF(d1);
+      }
+      function bsVega(S,K,T,r,sigma){
+        if(T<=0||sigma<=0) return 0;
+        const d1=(Math.log(S/K)+(r+.5*sigma*sigma)*T)/(sigma*Math.sqrt(T));
+        return S*normPDF(d1)*Math.sqrt(T);   // per 1.00 vol
       }
 
       // Warrant tau is offset from the option: warrant may have more days to expiry.
@@ -2437,16 +2555,35 @@
         const contractSize = row.opt_contract_size ?? 2000;
         _contractSize = contractSize;
 
-        const modeLabel = mode === "twus" ? "TW Opt / US Opt" : mode === "us" ? "US Option Match" : mode === "direct" ? "Direct Match" : "PCP Arb";
+        const isPcpMode = mode === "pcp" || mode === "uspcp";
+        const modeLabel = mode === "twus" ? "TW Opt / US Opt" : mode === "us" ? "US Option Match"
+          : mode === "direct" ? "Direct Match" : mode === "uspcp" ? "US PCP (cross-market)" : "PCP Arb";
         document.getElementById("pcp-modal-title").textContent =
           `${row.warrant_name} (${row.warrant_type}) ↔ ${row.option_contract} (${row.opt_type})  —  ${modeLabel}`;
-        const pcpNonExec = mode === "pcp" && row.executable === false;
+        const pcpNonExec = isPcpMode && row.executable === false;
+        // American early-assignment risk (uspcp only): the executable trade SHORTS
+        // the US option (opposite type to the warrant). US ADR options are
+        // American, so a short leg deep ITM can be assigned early — collapsing the
+        // hedge before the long warrant expires. Measure the short leg's moneyness
+        // off the ADR spot. (Non-executable rows short the warrant, not the option.)
+        let usPcpAssign = "";
+        if (mode === "uspcp" && row.executable !== false) {
+          const adr = row.adr_underlying ?? S0;
+          const shortIsPut = row.opt_type === "Put";
+          const itmFrac = shortIsPut ? (Ko - adr) / Ko : (adr - Ko) / Ko;  // >0 = ITM
+          if (itmFrac > 0.0) {
+            usPcpAssign = `<br><span class="call" style="font-weight:700">⚠ Short US ${row.opt_type.toLowerCase()} is ITM by ${(itmFrac*100).toFixed(1)}% (ADR ${adr.toFixed(2)} vs strike ${Ko.toFixed(2)}) — American, real early-assignment risk; dividends / high USD rates raise it.</span>`;
+          } else if (itmFrac > -0.03) {
+            usPcpAssign = `<br><span style="font-weight:600;color:#fbbf24">Short US ${row.opt_type.toLowerCase()} is near-the-money (${(itmFrac*100).toFixed(1)}%) — American; watch for early assignment if it moves ITM.</span>`;
+          }
+        }
         document.getElementById("pcp-legs-caption").innerHTML =
           (mode === "twus"
             ? `Trade Legs (matched ${contractSize.toLocaleString()} TW shares = ${row.tw_contracts} TW contract × 2,000 = ${row.us_contracts} US contracts × 500)`
-            : `Trade Legs (per 1 options contract = ${contractSize.toLocaleString()} ${mode === "us" ? "TW shares" : "shares"})`)
+            : `Trade Legs (per 1 options contract = ${contractSize.toLocaleString()} ${(mode === "us" || mode === "uspcp") ? "TW shares" : "shares"})`)
           + (pcpNonExec ? ` <span class="call" style="font-weight:700">— NON-EXECUTABLE (warrants can't be shorted; debug only)</span>` : "")
-          + (mode === "pcp" ? `<br><span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted)">European PCP, dividends ignored — a pair whose expiry crosses an ex-dividend date is mispriced (synthetic call biased high / put low).</span>` : "");
+          + (isPcpMode ? `<br><span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted)">European PCP, dividends ignored — a pair whose expiry crosses an ex-dividend date is mispriced (synthetic call biased high / put low).${mode === "uspcp" ? ` The short US leg is <b>American</b>.` : ""}</span>` : "")
+          + usPcpAssign;
 
         // ── Trade legs ──────────────────────────────────────────────────
         let legs;
@@ -2498,36 +2635,48 @@
           // Warrant priced per unit (ask when buying, bid when shorting); option
           // uses opt_per_share (bid for exec, ask for non-exec, set by backend).
           const executable = row.executable !== false;
+          // Loose applies only to the executable (tradable) side. Loose buys the
+          // warrant at its BID (favorable); tight buys at ASK. opt_per_share
+          // already carries the loose/tight option side from the backend.
+          const pcpLoose = executable && !!document.getElementById("arbPositiveLoose").checked;
           const pcpBondPv = row.bond_pv ?? bondPv;
-          const wPrice = executable ? row.warrant_ask : (row.warrant_bid ?? row.warrant_ask);
+          const wPrice = executable
+            ? (pcpLoose ? (row.warrant_bid ?? row.warrant_ask) : row.warrant_ask)
+            : (row.warrant_bid ?? row.warrant_ask);
           const optPrice = row.opt_per_share;
           const cs = contractSize;
+          // Cross-market (uspcp): the stock/synthetic leg is the US ADR (converted
+          // to TWD/TW-share), which differs from the warrant's local spot by the
+          // ADR premium. Single-market pcp: both are the same underlying.
+          const stockSpot = row.adr_underlying ?? S0;
+          const isUsPcp = mode === "uspcp";
           const wLabel = `${(n/1000).toLocaleString(undefined,{maximumFractionDigits:3})} 張 (${n.toLocaleString()} units) × ${row.warrant_code} (${row.warrant_type.toLowerCase()} warrant)`;
-          const stockLabel = `${cs.toLocaleString()} shares ${row.warrant_name || row.warrant_code}`;
+          const stockLabel = `${cs.toLocaleString()} ${isUsPcp ? "TW-equiv shares via US ADR" : "shares"} ${row.warrant_name || row.warrant_code}`;
           const optLabel = `${row.option_contract} ${row.opt_type.toLowerCase()} option (×${cs.toLocaleString()} shares)`;
-          const lendLabel = `Bond (lend ${pcpBondPv.toFixed(2)} → receive ${Ko.toFixed(0)} × ${cs.toLocaleString()} at expiry)`;
-          const borrowLabel = `Bond (borrow ${pcpBondPv.toFixed(2)} → repay ${Ko.toFixed(0)} × ${cs.toLocaleString()} at expiry)`;
+          const bondCcy = isUsPcp ? "USD" : "";
+          const lendLabel = `Bond${bondCcy?" "+bondCcy:""} (lend ${pcpBondPv.toFixed(2)} → receive ${Ko.toFixed(0)} × ${cs.toLocaleString()} at expiry)`;
+          const borrowLabel = `Bond${bondCcy?" "+bondCcy:""} (borrow ${pcpBondPv.toFixed(2)} → repay ${Ko.toFixed(0)} × ${cs.toLocaleString()} at expiry)`;
           if (executable) {
             legs = isCall ? [
               { action:"BUY",   instrument:wLabel,     qty:n,   price:wPrice,     cf:-(n*wPrice) },
-              { action:"SHORT", instrument:stockLabel, qty:-cs, price:S0,         cf: cs*S0 },
+              { action:"SHORT", instrument:stockLabel, qty:-cs, price:stockSpot,  cf: cs*stockSpot },
               { action:"LEND",  instrument:lendLabel,  qty:cs,  price:pcpBondPv,  cf:-(cs*pcpBondPv) },
               { action:"SELL",  instrument:optLabel,   qty:cs,  price:optPrice,   cf: cs*optPrice },
             ] : [
               { action:"BUY",   instrument:wLabel,      qty:n,  price:wPrice,     cf:-(n*wPrice) },
-              { action:"BUY",   instrument:stockLabel,  qty:cs, price:S0,         cf:-cs*S0 },
+              { action:"BUY",   instrument:stockLabel,  qty:cs, price:stockSpot,  cf:-cs*stockSpot },
               { action:"BORROW",instrument:borrowLabel, qty:cs, price:pcpBondPv,  cf: cs*pcpBondPv },
               { action:"SELL",  instrument:optLabel,    qty:cs, price:optPrice,   cf: cs*optPrice },
             ];
           } else {
             legs = isCall ? [
               { action:"SHORT", instrument:wLabel,      qty:-n, price:wPrice,     cf: n*wPrice },
-              { action:"BUY",   instrument:stockLabel,  qty:cs, price:S0,         cf:-cs*S0 },
+              { action:"BUY",   instrument:stockLabel,  qty:cs, price:stockSpot,  cf:-cs*stockSpot },
               { action:"BORROW",instrument:borrowLabel, qty:cs, price:pcpBondPv,  cf: cs*pcpBondPv },
               { action:"BUY",   instrument:optLabel,    qty:cs, price:optPrice,   cf:-cs*optPrice },
             ] : [
               { action:"SHORT", instrument:wLabel,     qty:-n,  price:wPrice,     cf: n*wPrice },
-              { action:"SHORT", instrument:stockLabel, qty:-cs, price:S0,         cf: cs*S0 },
+              { action:"SHORT", instrument:stockLabel, qty:-cs, price:stockSpot,  cf: cs*stockSpot },
               { action:"LEND",  instrument:lendLabel,  qty:cs,  price:pcpBondPv,  cf:-(cs*pcpBondPv) },
               { action:"BUY",   instrument:optLabel,   qty:cs,  price:optPrice,   cf:-cs*optPrice },
             ];
@@ -2554,6 +2703,66 @@
             <td style="padding:8px 10px;font-weight:700;font-size:14px;color:${netCf>=0?"var(--put)":"var(--call)"};text-align:right;font-variant-numeric:tabular-nums">${netCf>=0?"+":""}${Math.round(netCf).toLocaleString()} NT$</td>
           </tr>`;
 
+        // ── Orderbook depth (warrant leg) ───────────────────────────────
+        // Only Direct Match + PCP carry warrant depth (best-level resting size
+        // from CMoney). Show whether the needed board lots fill at the quote.
+        const depthPanel = document.getElementById("pcp-depth-panel");
+        // Direct/US same-type + PCP/US-PCP all trade a warrant leg (CMoney depth);
+        // twus is option-vs-option and is handled by its own two-leg panel below.
+        const warrantModeDepth = ["direct", "pcp", "us", "uspcp"].includes(mode);
+        if (row.warrant_depth_lots != null && warrantModeDepth) {
+          const depth = row.warrant_depth_lots;                 // 張 resting at best level
+          const lotsNeeded = row.warrants_needed / 1000;        // 張 needed (fractional)
+          // Executable PCP + cheap-warrant same-type both BUY the warrant (ask side);
+          // the warrant-rich same-type direction SELLS it (bid side).
+          const buyWarrant = (mode === "pcp" || mode === "uspcp") ? (row.executable !== false) : (row.pcp_diff >= 0);
+          const side = buyWarrant ? "best ask (resting sells)" : "best bid (resting buys)";
+          const ok = !!row.fillable;
+          const fillPct = depth > 0 ? Math.min(100, depth / lotsNeeded * 100) : 0;
+          depthPanel.style.display = "block";
+          depthPanel.style.background = ok ? "rgba(34,197,94,.08)" : "rgba(239,68,68,.08)";
+          depthPanel.style.border = `1px solid ${ok ? "rgba(34,197,94,.35)" : "rgba(239,68,68,.35)"}`;
+          depthPanel.innerHTML =
+            `<div style="font-weight:600;text-transform:uppercase;letter-spacing:.3px;font-size:11px;color:var(--muted);margin-bottom:4px">Orderbook depth — warrant leg</div>`
+            + `<b style="color:${ok ? "var(--put)" : "var(--call)"}">${ok ? "✓ Fillable at quote" : "✗ NOT fillable at quote"}</b> · `
+            + `<b>${depth.toLocaleString()} 張</b> resting at ${side}, need <b>${lotsNeeded.toLocaleString(undefined,{maximumFractionDigits:3})} 張</b>`
+            + (ok ? "" : ` — only ${fillPct.toFixed(0)}% covers at the quote; rest must walk the book (worse price, edge shrinks) or split the order over time.`)
+            + `<div style="color:var(--muted);font-size:11px;margin-top:4px">Best-level size only (五檔 level 1); size can vanish before you fill — a gate, not a guarantee.</div>`;
+        } else if (mode === "twus") {
+          // Two option legs, no warrant. TW leg has real best-level size (口) from
+          // TAIFEX MIS; US leg (yfinance) has no size — volume + OI stand in as a
+          // liquidity proxy only.
+          const longTw = row.pcp_diff >= 0;                 // Long TW / Short US
+          const twSide = longTw ? "buy @ ask" : "sell @ bid";
+          const twDepth = row.tw_depth_contracts;           // 口 resting, TW side
+          const twNeed  = row.tw_contracts;
+          const usNeed  = row.us_contracts;
+          const twOk = !!row.tw_fillable;
+          const twKnown = twDepth != null;
+          const usVol = row.us_volume ?? 0, usOi = row.us_oi ?? 0;
+          // US proxy verdict: OI/volume comfortably above contracts needed = likely ok.
+          const usThin = Math.max(usVol, usOi) < usNeed;
+          const overallOk = twKnown && twOk;                // only the TW leg is a hard gate
+          depthPanel.style.display = "block";
+          depthPanel.style.background = overallOk ? "rgba(34,197,94,.08)" : "rgba(239,68,68,.08)";
+          depthPanel.style.border = `1px solid ${overallOk ? "rgba(34,197,94,.35)" : "rgba(239,68,68,.35)"}`;
+          const twVerdict = !twKnown
+            ? `<span style="color:var(--muted)">size —  (off-hours / no MIS quote)</span>`
+            : `<b style="color:${twOk?"var(--put)":"var(--call)"}">${twOk?"✓":"✗"} ${twDepth.toLocaleString()} 口</b> resting (${twSide}), need <b>${twNeed} 口</b>`;
+          depthPanel.innerHTML =
+            `<div style="font-weight:600;text-transform:uppercase;letter-spacing:.3px;font-size:11px;color:var(--muted);margin-bottom:4px">Orderbook depth — both option legs</div>`
+            + `<div><b>TW leg:</b> ${twVerdict}</div>`
+            + `<div style="margin-top:2px"><b>US leg:</b> need <b>${usNeed} contract${usNeed>1?"s":""}</b> · `
+            + `<span style="color:${usThin?"var(--call)":"var(--muted)"}">vol ${usVol.toLocaleString()}, OI ${usOi.toLocaleString()}</span> `
+            + `<span style="color:var(--muted)">(proxy — yfinance gives no bid/ask size)</span></div>`
+            + `<div style="color:var(--muted);font-size:11px;margin-top:4px">TW size = TAIFEX MIS best level (口, ~20 min delayed). US leg has no true depth; treat vol/OI as a rough liquidity read, not resting size.</div>`;
+        } else {
+          depthPanel.style.display = "none";
+        }
+
+        // ── Net residual greeks (Δ + Vega) ──────────────────────────────
+        renderGreeks(row);
+
         // ── Comparison table ────────────────────────────────────────────
         const fmt = (v, dec=2) => v == null ? "—" : Number(v).toLocaleString(undefined,{minimumFractionDigits:dec,maximumFractionDigits:dec});
         const fmtPct = (v, dec=2) => v == null ? "—" : (v>=0?"+":"")+fmt(v,dec)+"%";
@@ -2566,7 +2775,6 @@
         const wPrice    = row.warrant_per_share; // warrant price per share
         const synthPrice= row.synthetic_price;   // option converted to same type as warrant via PCP
         const pcpDiff   = row.pcp_diff;          // synthPrice − wPrice
-        const ivDiff    = row.opt_iv != null && row.warrant_iv != null ? row.opt_iv - row.warrant_iv : null;
         const strikeDiff= row.opt_strike - row.warrant_strike;
         const dteDiffV  = row.opt_dte - row.warrant_dte;
 
@@ -2585,7 +2793,6 @@
             <th style="${thS};text-align:left">Type</th>
             <th style="${thS};text-align:right">Strike</th>
             <th style="${thS};text-align:right">DTE</th>
-            <th style="${thS};text-align:right">IV</th>
             <th style="${thS};text-align:right">Exercise Ratio</th>
             <th style="${thS};text-align:right">Price / share</th>
             <th style="${thS};text-align:right">Contract cost (×${contractSize.toLocaleString()})</th>
@@ -2596,7 +2803,6 @@
               <td style="${tdL}"><span class="${row.opt_type==='Call'?'call':'put'}">${row.opt_type}</span></td>
               <td style="${tdR}">${Number(row.opt_strike).toLocaleString()}</td>
               <td style="${tdR}">${row.opt_dte}d</td>
-              <td style="${tdR}">${row.opt_iv!=null?(row.opt_iv*100).toFixed(2)+"%" : "—"}</td>
               <td style="${tdR}">${contractSize.toLocaleString()} shares/contract</td>
               <td style="${tdR}">${fmt(optPrice,4)}</td>
               <td style="${tdR}">${Math.round(optPrice*contractSize).toLocaleString()}</td>
@@ -2606,7 +2812,6 @@
               <td style="${tdL}"><span class="${row.warrant_type==='Call'?'call':'put'}">${row.warrant_type}</span></td>
               <td style="${tdR}">${Number(row.warrant_strike).toLocaleString()}</td>
               <td style="${tdR}">${row.warrant_dte}d</td>
-              <td style="${tdR}">${row.warrant_iv!=null?(row.warrant_iv*100).toFixed(2)+"%" : "—"}</td>
               <td style="${tdR}">${wRatio!=null?wRatio.toFixed(4)+" shares/warrant":"—"}</td>
               <td style="${tdR}">${fmt(wPrice,4)}</td>
               <td style="${tdR}">${Math.round(wPrice*contractSize).toLocaleString()}</td>
@@ -2616,7 +2821,6 @@
               <td style="${tdRm}">—</td>
               <td style="${tdR};color:${diffColor(strikeDiff)}">${strikeDiff>=0?"+":""}${Number(strikeDiff).toLocaleString()}</td>
               <td style="${tdR};color:${diffColor(dteDiffV)}">${dteDiffV>=0?"+":""}${dteDiffV}d</td>
-              <td style="${tdR};color:${diffColor(ivDiff)}">${ivDiff!=null?fmtPct(ivDiff*100):"—"}</td>
               <td style="${tdRm}">—</td>
               <td style="${tdR};color:${diffColor(pcpDiff)};font-weight:600">${fmt(pcpDiff,4)} <span style="font-size:10px;opacity:.7">(${fmtPct(row.pcp_diff_pct)})</span></td>
               <td style="${tdR};color:${diffColor(pcpDiff)};font-weight:600">${Math.round(pcpDiff*contractSize)>=0?"+":""}${Math.round(pcpDiff*contractSize).toLocaleString()}</td>
@@ -2635,7 +2839,7 @@
         // TW/US mode also shows the conditional "enter now" scenario EDA.
         const premSection = document.getElementById("us-premium-section");
         const scenSection = document.getElementById("us-scenario-section");
-        if ((mode === "us" || mode === "twus") && row.us_stock_code) {
+        if ((mode === "us" || mode === "twus" || mode === "uspcp") && row.us_stock_code) {
           premSection.style.display = "block";
           scenSection.style.display = "block";
           loadAdrPremium(row);
@@ -2687,6 +2891,79 @@
         renderPcpChart(parseInt(document.getElementById("pcp-dte-slider").value));
       }
 
+      // Net residual greeks of the paired position, at exact and whole-張 sizing.
+      // Everything is in underlying-share space (matches the chart), so per-share
+      // BS greeks × share counts net directly; the warrant's exercise ratio is
+      // baked into warrantShares (lots*1000*ratio).
+      //
+      // The option/synthetic leg greeks are evaluated with the WARRANT's put/call
+      // type at the option strike Ko. For same-type modes (direct/us/twus) that's
+      // just the option itself. For PCP the executable short leg is a synthetic
+      // (option + stock ± bond) that replicates a warrant-type option at Ko, and
+      // its delta = opposite-option delta ± 1 (put-call parity) — i.e. the stock
+      // leg is folded in automatically, so no separate stock term is needed.
+      // Vega is type-independent (put-call vega parity), so it needs no such care.
+      function renderGreeks(row) {
+        const panel = document.getElementById("pcp-greeks-panel");
+        const isPut = row.warrant_type === "Put";
+        const ivW = row.warrant_iv, ivO = row.opt_iv;
+        if (ivW == null || ivO == null) {
+          panel.style.display = "block";
+          panel.innerHTML =
+            `<div style="font-weight:600;text-transform:uppercase;letter-spacing:.3px;font-size:11px;color:var(--muted);margin-bottom:4px">Net residual greeks</div>`
+            + `<span style="color:var(--muted)">IV unavailable on a leg — can't mark greeks.</span>`;
+          return;
+        }
+        const S0 = row.underlying_price;
+        const optSpot = row.adr_underlying ?? S0;
+        const Kw = row.warrant_strike, Ko = row.opt_strike;
+        const tauW = (row.warrant_dte || row.opt_dte) / 365, tauO = row.opt_dte / 365;
+        const dir = row.pcp_diff >= 0 ? 1 : -1;
+        const contractSize = row.opt_contract_size ?? 2000;
+        const optionShares = contractSize;
+        const exactUnits = row.warrants_needed;
+        const ratio = exactUnits > 0 ? contractSize / exactUnits : 1;
+        const wholeLots = Math.max(1, Math.round(exactUnits / 1000));
+        const wsExact = contractSize;
+        const wsWhole = wholeLots * 1000 * ratio;
+
+        // Per-share greeks per leg (option leg uses the warrant's type at Ko).
+        const dW = bsDelta(S0, Kw, tauW, R_FREE, ivW, isPut);
+        const vW = bsVega(S0, Kw, tauW, R_FREE, ivW);
+        const dO = bsDelta(optSpot, Ko, tauO, R_FREE, ivO, isPut);
+        const vO = bsVega(optSpot, Ko, tauO, R_FREE, ivO);
+        // Long warrant / short option (dir flips for the reversed trade), mirroring
+        // the chart's pnlAt sign structure.
+        const netDelta = ws => dir * (ws * dW - optionShares * dO);
+        const netVega  = ws => dir * (ws * vW - optionShares * vO);
+
+        const fmtSigned = (v, dec=0) => (v >= 0 ? "+" : "") + Number(v).toLocaleString(undefined,{maximumFractionDigits:dec, minimumFractionDigits:dec});
+        const row1 = (label, ws, note) => {
+          const nd = netDelta(ws), nv = netVega(ws) / 100;   // vega per vol-point (NT$)
+          const ndPct = optionShares ? nd / optionShares * 100 : 0;
+          const dColor = Math.abs(ndPct) >= 2 ? "var(--call)" : "var(--text)";
+          const vColor = Math.abs(nv) < 1 ? "var(--muted)" : (nv < 0 ? "var(--call)" : "var(--put)");
+          const vTag = Math.abs(nv) < 1 ? "flat" : (nv < 0 ? "net short vol" : "net long vol");
+          return `<tr>
+            <td style="padding:4px 10px 4px 0;color:var(--muted)">${label}</td>
+            <td style="padding:4px 14px;text-align:right;font-variant-numeric:tabular-nums;color:${dColor};font-weight:600">${fmtSigned(nd)} sh</td>
+            <td style="padding:4px 14px;text-align:right;color:var(--muted);font-size:11px">≈${fmtSigned(ndPct,1)}% of hedge</td>
+            <td style="padding:4px 14px;text-align:right;font-variant-numeric:tabular-nums;color:${vColor};font-weight:600">${fmtSigned(nv)} </td>
+            <td style="padding:4px 0;color:${vColor};font-size:11px">${vTag}</td>
+          </tr>`;
+        };
+        // twus has no 張 rounding (both legs contract-matched), so whole == exact.
+        const sameWholeExact = Math.abs(wsWhole - wsExact) < 1e-9;
+        panel.style.display = "block";
+        panel.innerHTML =
+          `<div style="font-weight:600;text-transform:uppercase;letter-spacing:.3px;font-size:11px;color:var(--muted);margin-bottom:6px">Net residual greeks — position (Δ shares, Vega NT$/vol-pt)</div>`
+          + `<table style="border-collapse:collapse;font-size:12.5px"><tbody>`
+          + row1(sameWholeExact ? "Matched" : "Whole 張 (executable)", wsWhole)
+          + (sameWholeExact ? "" : row1("Exact hedge (fractional 張)", wsExact))
+          + `</tbody></table>`
+          + `<div style="color:var(--muted);font-size:11px;margin-top:6px">Δ = leftover directional exposure from strike/DTE mismatch${sameWholeExact ? "" : " + board-lot rounding"}; Vega = vol exposure the hedge doesn't cover (legs carry different IV). Marked at each leg's current spot with the solved per-leg IV.</div>`;
+      }
+
       function renderPcpChart(dte) {
         const row = _pcpRow;
         const contractSize = _contractSize;   // option leg controls exactly this many shares
@@ -2707,9 +2984,9 @@
           const wholeLots = Math.max(1, Math.round(exactUnits / 1000));
           warrantShares = wholeLots * 1000 * ratio;
           const exactLots = exactUnits / 1000;
-          const deltaShares = Math.round(warrantShares - optionShares);
+          const notionGap = Math.round(warrantShares - optionShares);
           hedgeNote = `Whole 張: ${wholeLots} 張 vs ${exactLots.toLocaleString(undefined,{maximumFractionDigits:3})} exact `
-            + `— residual ${deltaShares >= 0 ? "+" : ""}${deltaShares.toLocaleString()} shares of warrant delta`;
+            + `— ${notionGap >= 0 ? "+" : ""}${notionGap.toLocaleString()} shares notional gap (see Net residual greeks above for the true Δ)`;
         } else {
           warrantShares = contractSize;
           hedgeNote = `Exact hedge: ${(exactUnits/1000).toLocaleString(undefined,{maximumFractionDigits:3})} 張 `
@@ -2819,7 +3096,7 @@
       let _basisCache = {};
       async function refreshBasis() {
         const codes = [...new Set(portfolioData
-          .filter(t => !t.closed && (t.mode === "us" || t.mode === "twus") && t.us_stock_code)
+          .filter(t => !t.closed && (t.mode === "us" || t.mode === "twus" || t.mode === "uspcp") && t.us_stock_code)
           .map(t => t.us_stock_code))];
         await Promise.all(codes.map(async code => {
           try {
@@ -2843,13 +3120,14 @@
         if (t.closed) return t.closed.realized_pnl;
         const mult = t.mult || 1;
         const p0 = t.entry_premium ?? 0, fx0 = t.entry_fx ?? 1;
-        if ((t.mode === "us" || t.mode === "twus") && t.us_stock_code) {
+        if ((t.mode === "us" || t.mode === "twus" || t.mode === "uspcp") && t.us_stock_code) {
           const b = _basisCache[t.us_stock_code];
           if (!b || b.p == null || b.fx == null) return null;   // basis pending/unavailable
           // Intrinsic-only floor: both legs valued at intrinsic at the current
           // spot. The surviving (long) leg's time value is ignored, so this is a
           // conservative lower bound on P&L. Matches the popup's bottom line.
-          return _payoffAtSpot(r, r.underlying_price, b.p, p0, (fx0 && b.fx) ? b.fx / fx0 : 1, mult);
+          const rN = (fx0 && b.fx) ? b.fx / fx0 : 1;
+          return _payoffAtSpot(r, r.underlying_price, _stripFx(b.p, rN), p0, rN, mult);
         }
         // Direct / no ADR basis: at-expiry payoff at entry basis, current spot.
         return _payoffAtSpot(r, r.underlying_price, p0, p0, 1, mult);
@@ -2867,8 +3145,12 @@
         const dir = row.pcp_diff >= 0 ? 1 : -1;
         const wEntry = row.warrant_per_share, oEntry = row.synthetic_price;
         const Kw = row.warrant_strike, Ko = row.opt_strike;
+        // `p` is the FX-STRIPPED basis premium (moneyness), fxRatio translates
+        // the USD leg. Short-option TWD P&L = oEntry − fxRatio·oExit (entry
+        // premium fixed in TWD; only the exit leg re-translates) — matches
+        // _evPnlAtPremium and avoids double-counting FX.
         const optSpot = S * (1 + (p - p0));
-        const perShare = dir * ((intr(S, Kw) - wEntry) + fxRatio * (oEntry - intr(optSpot, Ko)));
+        const perShare = dir * ((intr(S, Kw) - wEntry) + (oEntry - fxRatio * intr(optSpot, Ko)));
         return perShare * shares * (mult || 1);
       }
 
@@ -2894,7 +3176,7 @@
           const S = lo + (hi - lo) * i / n;
           spots.push(parseFloat(S.toFixed(2)));
           entry.push(Math.round(_payoffAtSpot(r, S, p0, p0, 1, mult)));
-          if (haveNow) now.push(Math.round(_payoffAtSpot(r, S, curP, p0, fxRatioNow, mult)));
+          if (haveNow) now.push(Math.round(_payoffAtSpot(r, S, _stripFx(curP, fxRatioNow), p0, fxRatioNow, mult)));
         }
         const traces = [{ x: [lo, hi], y: [0, 0], mode: "lines",
           line: { color: "rgba(255,255,255,0.15)", dash: "dash", width: 1 }, showlegend: false, hoverinfo: "skip" }];
@@ -2904,7 +3186,7 @@
         if (haveNow) traces.push({ x: spots, y: now, mode: "lines", name: "Now (current ADR & FX)",
           line: { color: "#4ade80", width: 2.5 },
           hovertemplate: "Spot %{x:,.0f}<br>now: %{y:+,.0f} NT$<extra></extra>" });
-        const markPnl = Math.round(_payoffAtSpot(r, S0, haveNow ? curP : p0, p0, haveNow ? fxRatioNow : 1, mult));
+        const markPnl = Math.round(_payoffAtSpot(r, S0, haveNow ? _stripFx(curP, fxRatioNow) : p0, p0, haveNow ? fxRatioNow : 1, mult));
         traces.push({ x: [S0], y: [markPnl], mode: "markers", name: "Current spot",
           marker: { color: "white", size: 7 },
           hovertemplate: "Current spot %{x:,.0f}<br>P&L: %{y:+,.0f} NT$<extra></extra>" });
@@ -2971,8 +3253,9 @@
           }
 
           const opts = { survivor, survivorSell };
-          const realized = _evPnlAtPremium(r, pClose, p0, fxRatio, opts) * (t.mult || 1);
-          const method = _survivorExitMethod(r, survivor, shortDte, pClose, p0, survivorSell);
+          const basisClose = _stripFx(pClose, fxRatio);   // FX-stripped premium for moneyness; FX translates via fxRatio
+          const realized = _evPnlAtPremium(r, basisClose, p0, fxRatio, opts) * (t.mult || 1);
+          const method = _survivorExitMethod(r, survivor, shortDte, basisClose, p0, survivorSell);
 
           t.closed = {
             close_date: new Date(_shortExpiryMs(t)).toISOString(),
@@ -3098,7 +3381,7 @@
         }
         const nClosed = portfolioData.filter(t => t.closed).length;
         status.textContent = `${portfolioData.length} trade${portfolioData.length>1?"s":""} · ${nClosed} closed`;
-        const modeLabel = { direct: "Direct", us: "US Opt", twus: "TW/US Opt", pcp: "PCP" };
+        const modeLabel = { direct: "Direct", us: "US Opt", twus: "TW/US Opt", pcp: "PCP", uspcp: "US PCP" };
         let html = "<table><thead><tr>"
           + ["Entered","Type","×","Trade","Net premium (NT$)","P&L at expiry now (NT$)","Status","Realized P&L (NT$)",""].map(h=>`<th>${h}</th>`).join("")
           + "</tr></thead><tbody>";
@@ -3133,7 +3416,7 @@
             <td>${dstr}</td>
             <td>${modeLabel[t.mode] || t.mode}</td>
             <td style="text-align:center;color:var(--muted)">${(t.mult||1)>1?"×"+(t.mult||1):""}</td>
-            <td style="max-width:300px">${legsSummary(t.legs)}</td>
+            <td style="max-width:320px;white-space:normal;word-break:break-word;line-height:1.4" title="${legsSummary(t.legs).replace(/"/g,'&quot;')}">${legsSummary(t.legs)}</td>
             <td class="${netCol}">${t.net_cf>=0?"+":""}${Math.round(t.net_cf).toLocaleString()}</td>
             <td style="text-align:right;font-variant-numeric:tabular-nums">${nowCell}</td>
             <td>${statusCell}</td>
@@ -3244,11 +3527,12 @@
         // and this popup use the identical _payoffAtSpot valuation.
         const mult = t.mult || 1;
         const S0 = row.underlying_price;
-        const pnlNow = _payoffAtSpot(row, S0, curP, p0, fxRatio, mult);
-        const pnlPremOnly = _payoffAtSpot(row, S0, curP, p0, 1, mult);
+        const basisNow = _stripFx(curP, fxRatio);   // premium with FX stripped out (moneyness)
+        const pnlNow = _payoffAtSpot(row, S0, basisNow, p0, fxRatio, mult);
+        const pnlPremOnly = _payoffAtSpot(row, S0, basisNow, p0, 1, mult);   // basis moved, FX flat
         const pnlEntry = _payoffAtSpot(row, S0, p0, p0, 1, mult);
-        const fxEffect = pnlNow - pnlPremOnly;
-        const premEffect = pnlPremOnly - pnlEntry;
+        const fxEffect = pnlNow - pnlPremOnly;      // pure FX translation
+        const premEffect = pnlPremOnly - pnlEntry;  // pure basis (premium ex-FX)
 
         const fmtSigned = (v, suf) => (v>=0?"+":"") + v.toFixed(2) + (suf||"");
         const remDte = Math.max(0, horizon - Math.round((Date.now()-new Date(t.ts))/86400000));
@@ -3266,7 +3550,7 @@
           <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:20px 0 8px">P&L at expiry, at current basis</p>
           <table style="width:100%;border-collapse:collapse;font-size:13px"><tbody>
             <tr><td style="${td}">Entry baseline (premium & FX at entry)</td><td style="${tdr}">${money(pnlEntry)}</td></tr>
-            <tr><td style="${td}">+ premium move effect</td><td style="${tdr}">${money(premEffect)}</td></tr>
+            <tr><td style="${td}">+ premium move (ex-FX basis)</td><td style="${tdr}">${money(premEffect)}</td></tr>
             <tr><td style="${td}">+ FX move effect</td><td style="${tdr}">${money(fxEffect)}</td></tr>
             <tr><td style="${td};font-weight:700;text-transform:uppercase;font-size:11px;letter-spacing:.4px;color:var(--muted)">P&L at expiry now</td><td style="${tdr};font-weight:700;font-size:14px">${money(pnlNow)}</td></tr>
           </tbody></table>

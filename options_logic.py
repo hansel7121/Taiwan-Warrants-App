@@ -408,11 +408,15 @@ def fetch_options_mis(code, compute_iv=True):
         if dte <= 0:
             continue
         bid = _mis_num(q.get("CBestBidPrice"))
+        bid_size = _mis_num(q.get("CBestBidSize"))
         if pd.isna(bid):
             bid = _mis_num(q.get("CBidPrice1"))
+            bid_size = _mis_num(q.get("CBidSize1"))
         ask = _mis_num(q.get("CBestAskPrice"))
+        ask_size = _mis_num(q.get("CBestAskSize"))
         if pd.isna(ask):
             ask = _mis_num(q.get("CAskPrice1"))
+            ask_size = _mis_num(q.get("CAskSize1"))
         last = _mis_num(q.get("CLastPrice"))
         settle = _mis_num(q.get("SettlementPrice"))
         is_live = bool(pd.notna(bid) and pd.notna(ask))
@@ -452,6 +456,10 @@ def fetch_options_mis(code, compute_iv=True):
             "underlying_price": round(spot, 4), "ask": round(ask, 4),
             "bid": round(bid, 4) if pd.notna(bid) else None,
             "days_to_expiry": dte, "strike": K, "exercise_ratio": ratio,
+            # Best-level orderbook size (口/contracts) from TAIFEX MIS, so the
+            # arb finder can check whether the needed contracts fill at the quote.
+            "bid_size": int(bid_size) if pd.notna(bid_size) else None,
+            "ask_size": int(ask_size) if pd.notna(ask_size) else None,
             "volume": int(_mis_num(q.get("CTotalVolume")) or 0) if pd.notna(_mis_num(q.get("CTotalVolume"))) else 0,
             "oi": int(_mis_num(q.get("OpenInterest")) or 0) if pd.notna(_mis_num(q.get("OpenInterest"))) else 0,
             "time_value_am": time_value_am,
