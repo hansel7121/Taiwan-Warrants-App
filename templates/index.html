@@ -1006,6 +1006,7 @@
             (how far the US ADR trades from the local share). Enter when it sits near 0; a spike/drop is where the trade goes sideways.
           </p>
           <div id="us-prem-chart" style="width:100%;height:240px"></div>
+          <div id="us-prem-adf" style="margin-top:10px;font-size:12px;line-height:1.6"></div>
 
           <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:18px 0 6px">Distribution of daily ADR premiums</p>
           <div id="us-prem-hist" style="width:100%;height:230px"></div>
@@ -1829,6 +1830,7 @@
         const setTxt = (id, t) => { document.getElementById(id).textContent = t; };
         setTxt("us-latest-prem", "…");
         document.getElementById("us-prem-flag").textContent = "";
+        document.getElementById("us-prem-adf").innerHTML = "";
         Plotly.purge("us-prem-chart");
         Plotly.purge("us-prem-hist");
 
@@ -1873,6 +1875,33 @@
           yaxis: { title: "premium %", gridcolor: "#252836", zerolinecolor: "#252836", ticksuffix: "%" },
           margin: { l: 55, r: 10, t: 10, b: 30 }, showlegend: false,
         }, { responsive: true });
+
+        // ADF unit-root test: proves (or disproves) the premium is mean-reverting.
+        // Null = unit root (random walk); p < 0.05 rejects it => mean-reverting,
+        // which is the trade's whole thesis. Half-life = days to revert halfway.
+        const adfEl = document.getElementById("us-prem-adf");
+        const a = s.adf;
+        if (!a || a.pvalue == null) {
+          adfEl.innerHTML = `<span style="color:var(--muted)">ADF test: not enough data.</span>`;
+        } else {
+          const ok = a.stationary;
+          const col = ok ? "var(--put)" : "var(--call)";
+          const bg = ok ? "rgba(74,222,128,0.15)" : "rgba(248,113,113,0.15)";
+          const verdict = ok ? "MEAN-REVERTING ✓" : "UNIT ROOT — not mean-reverting ✗";
+          const pStr = a.pvalue < 0.001 ? "&lt;0.001" : a.pvalue.toFixed(4);
+          const hl = a.half_life != null
+            ? ` Half-life ≈ <b>${a.half_life < 1 ? a.half_life.toFixed(1) : Math.round(a.half_life)}</b> trading days.`
+            : "";
+          const c5 = a.crit && a.crit["5%"] != null ? a.crit["5%"].toFixed(2) : "—";
+          adfEl.innerHTML =
+            `<span style="font-weight:700;font-size:11px;letter-spacing:.3px;padding:2px 8px;border-radius:10px;color:${col};background:${bg}">ADF: ${verdict}</span>`
+            + `<span style="color:var(--muted);margin-left:10px">p = <b style="color:var(--text)">${pStr}</b>`
+            + ` · stat ${a.stat.toFixed(2)} vs 5% crit ${c5}`
+            + ` · n=${a.nobs}.${hl}</span>`
+            + `<div style="color:var(--muted);margin-top:5px">ADF null = random walk (no reversion). ${ok
+                ? `p &lt; 0.05 rejects it: the premium pulls back to its mean, so a dislocation is expected to revert — the basis edge is real.`
+                : `p ≥ 0.05 can't reject a random walk: no statistical mean-reversion, so don't count on the premium snapping back.`}</div>`;
+        }
 
         // Distribution (histogram) of daily premiums, with ±threshold lines
         // and their historical tail probabilities.
