@@ -1432,9 +1432,21 @@ def arb_finder_csv():
     )
 
 
+# RENDER_GIT_* are injected by Render into the running service; absent locally.
+_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "dev")[:7]
+_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "dev"
+
+
 @app.route("/healthz")
 def healthz():
-    return jsonify({"status": "ok"})
+    return jsonify(
+        {
+            "status": "ok",
+            "commit": _COMMIT,
+            "branch": _BRANCH,
+            "scheduler": os.environ.get("ENABLE_SCHEDULER") == "1",
+        }
+    )
 
 
 @app.route("/refresh", methods=["POST"])
