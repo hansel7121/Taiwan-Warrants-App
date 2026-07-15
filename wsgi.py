@@ -5,8 +5,11 @@ refresh jobs live in process memory and would diverge across workers.
 """
 import os
 
+import memlog
 import scheduler
 from app import app
+
+memlog.log_baseline("boot")
 
 # gunicorn never executes app.py's __main__ block, so the background refresh
 # scheduler would normally start here. It is now OPT-IN via ENABLE_SCHEDULER

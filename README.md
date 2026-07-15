@@ -74,7 +74,7 @@ templates/
 ```
 
 **Data sources:**
-- **Warrants** — CMoney private API (`mainpage.ashx`), requires a session `cmkey` token extracted at startup via a headless Playwright/Chromium browser
+- **Warrants** — CMoney private API (`mainpage.ashx`), requires a `cmkey` token scraped from the warrantsquery page HTML (plain HTTP, no browser)
 - **Options** — TAIFEX public CSV download (`optDataDown`)
 - **Spot prices** — TWSE MIS API, Yahoo Finance fallback, yfinance fallback
 
@@ -92,7 +92,6 @@ templates/
 # Requires Python 3.11+ (conda env: warrants)
 conda activate warrants
 pip install -r requirements.txt
-playwright install chromium   # first time only
 
 # Dev server
 python app.py                 # http://127.0.0.1:5001
@@ -109,7 +108,7 @@ Exactly **1 gunicorn worker**: market-data caches live in process memory and wou
 
 ## Deploy (Render)
 
-The repo ships a `render.yaml` blueprint. In the Render dashboard, create a new **Blueprint** from this repo — it provisions a native Python web service that installs Playwright Chromium at build time and runs gunicorn with a single worker.
+The repo ships a `render.yaml` blueprint. In the Render dashboard, create a new **Blueprint** from this repo — it provisions a native Python web service that runs gunicorn with a single worker.
 
 After the service is created, set these three secrets in the Render dashboard (they are marked `sync: false`, so Render prompts for them — never commit real values):
 
@@ -117,7 +116,7 @@ After the service is created, set these three secrets in the Render dashboard (t
 - `SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`
 
-The blueprint uses the **starter** plan; the free tier tends to OOM because Chromium is memory-hungry.
+The blueprint uses the **starter** plan; the free tier's 512 MB is tight for the pandas/numpy/scipy working set.
 
 **Post-deploy:** add the live Render URL (e.g. `https://<service>.onrender.com`) to your Supabase project's **Auth → URL Configuration → Redirect URLs**, or magic-link sign-in will fail.
 

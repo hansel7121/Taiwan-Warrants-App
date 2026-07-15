@@ -2,9 +2,9 @@ services:
   - type: web
     name: warrant-scanner
     runtime: python
-    # Chromium (Playwright) is memory-hungry; the free tier reliably OOMs at boot.
+    # The free tier's 512 MB is tight for the pandas/numpy/scipy working set.
     plan: starter
-    buildCommand: pip install -r requirements.txt && playwright install chromium
+    buildCommand: pip install -r requirements.txt
     # Exactly 1 worker: market-data caches live in process memory + APScheduler.
     startCommand: gunicorn -w 1 --threads 8 --timeout 180 -b 0.0.0.0:$PORT wsgi:app
     healthCheckPath: /healthz
@@ -15,9 +15,6 @@ services:
       # balloon RSS. Harmless on non-glibc platforms.
       - key: MALLOC_ARENA_MAX
         value: "2"
-      # Land the Chromium download inside the project dir so it survives build→runtime.
-      - key: PLAYWRIGHT_BROWSERS_PATH
-        value: /opt/render/project/.playwright
       # Paste these in the Render dashboard — never commit real values.
       - key: SUPABASE_URL
         sync: false

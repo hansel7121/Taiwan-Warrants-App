@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 
+import memlog
 import warrant_logic
 import options_logic
 import us_options_logic
@@ -56,7 +57,8 @@ def _job(name, fn):
     """Run one refresh job with logging; never let an exception kill the scheduler."""
     t0 = time.time()
     try:
-        fn()
+        with memlog.measure(name):
+            fn()
         _last_run[name] = time.time()
         print(f"SCHED: {name} ok in {time.time() - t0:.1f}s", flush=True)
     except Exception as e:
@@ -118,20 +120,18 @@ def start():
     with _start_lock:
         if _scheduler is not None:
             return _scheduler
-        # Single-threaded executor: with max_workers=1 no two jobs can ever
-        # overlap, so the memory-hungry Chromium scrape (refresh_cmkey) is
-        # structurally guaranteed never to run concurrently with a pandas-heavy
-        # refresh job. This is what keeps the process under Render's 512 MB cap.
+        # Single-threaded executor: with max_workers=1 no two pandas-heavy
+        # refresh jobs can overlap, which is what keeps the process under
+        # Render's 512 MB cap.
         sched = BackgroundScheduler(
             daemon=True,
             executors={"default": ThreadPoolExecutor(max_workers=1)},
             job_defaults={"max_instances": 1, "coalesce": True},
         )
         now = datetime.now()
-        # Boot order: cmkey scrape first (Chromium opens AND fully closes)
-        # before any refresh job starts. The single-worker executor serialises
-        # everything, so these staggered next_run_time offsets only decide the
-        # order jobs are queued at boot; they can never actually overlap.
+        # Boot order: cmkey scrape first, since every warrant fetch needs it.
+        # The single-worker executor serialises everything, so these staggered
+        # next_run_time offsets only decide the order jobs are queued at boot.
         sched.add_job(refresh_cmkey, "interval", minutes=CMKEY_MINUTES,
                       next_run_time=now + timedelta(seconds=1))
         sched.add_job(refresh_warrants, "interval", minutes=REFRESH_MINUTES,

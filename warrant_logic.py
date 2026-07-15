@@ -8,16 +8,20 @@ from scipy.stats import norm
 from scipy.optimize import brentq
 import json
 import re
-import asyncio
 import threading
 import time
 import os
-from playwright.async_api import async_playwright
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import memlog
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 CMONEY_URL = "https://www.cmoney.tw/finance/ashx/mainpage.ashx"
+CMONEY_KEY_PAGE = "https://www.cmoney.tw/finance/warrantsquery.aspx?warrant=051666"
+# The page carries one cmkey per warrant sub-page; anchor to the warrantsquery
+# link so we take the key that mainpage.ashx?action=GetWarrantData accepts.
+CMONEY_KEY_RE = re.compile(r"warrantsquery\.aspx'[^>]*cmkey='([^']+)'")
 CMONEY_HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Referer": "https://www.cmoney.tw/finance/warrantsquery.aspx",
@@ -54,12 +58,7 @@ COL_ORDER = [
 ]
 
 _cmoney_key = None
-_cmoney_key_event = threading.Event()
-# Guards against two Chromium scrapes running at once (a memory spike): when the
-# scheduler is off, the first warrant requests each call get_cmoney_key and would
-# otherwise each launch a browser. Only one fetch is allowed in flight.
 _cmoney_key_fetch_lock = threading.Lock()
-_cmoney_key_fetching = False
 
 
 def bs_price(S, K, T, r, sigma, ratio, is_put=False):
@@ -105,109 +104,56 @@ def implied_vol(price, S, K, T, r, ratio, is_put=False):
         return np.nan
 
 
-async def _fetch_cmoney_key_async():
-    print("PW: launching chromium", flush=True)
-    async with async_playwright() as p:
-        # Memory-lean flags: keeps Chromium's RSS small enough to fit under
-        # Render's 512 MB cap. --disable-dev-shm-usage matters where /dev/shm
-        # is tiny; --no-sandbox is required in unprivileged containers.
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-extensions",
-                "--no-zygote",
-                "--renderer-process-limit=1",
-                "--js-flags=--max-old-space-size=128",
-            ],
-        )
-        print("PW: browser launched", flush=True)
-        try:
-            context = await browser.new_context()
-            page = await context.new_page()
-            cmkey = None
+def _fetch_cmoney_key_http():
+    """Scrape the cmkey token out of the warrantsquery page HTML.
 
-            def handle_request(request):
-                nonlocal cmkey
-                if "mainpage.ashx" in request.url and "cmkey" in request.url:
-                    match = re.search(r"cmkey=([^&]+)", request.url)
-                    if match:
-                        import urllib.parse
-
-                        cmkey = urllib.parse.unquote(match.group(1))
-
-            page.on("request", handle_request)
-            await page.goto(
-                "https://www.cmoney.tw/finance/warrantsquery.aspx?warrant=051666"
-            )
-            print("PW: page loaded, waiting for key", flush=True)
-            for _ in range(100):
-                if cmkey:
-                    break
-                await asyncio.sleep(0.1)
-
-            print(f"PW: done, key={'found' if cmkey else 'NOT found'}", flush=True)
-            return cmkey
-        finally:
-            # Always release Chromium's RSS, even if goto/parsing raised.
-            await browser.close()
+    The key is rendered server-side into the nav links, so no JS execution is
+    needed. It is not hardcoded because CMoney can rotate it; an Error:-3 from
+    mainpage.ashx is the invalidation signal.
+    """
+    with memlog.measure("cmkey_http"):
+        r = requests.get(CMONEY_KEY_PAGE, headers=CMONEY_HEADERS, verify=False,
+                         timeout=10)
+        r.raise_for_status()
+        match = CMONEY_KEY_RE.search(r.text)
+        if not match:
+            raise RuntimeError("cmkey not found in warrantsquery page HTML")
+        return match.group(1)
 
 
-def _background_fetch_key():
-    global _cmoney_key, _cmoney_key_fetching
-    with _cmoney_key_fetch_lock:
-        _cmoney_key_fetching = True
-    print("BG: starting key fetch", flush=True)
+def _fetch_key_locked():
+    """Fetch and store the key. Caller must hold _cmoney_key_fetch_lock."""
+    global _cmoney_key
+    print("KEY: fetching cmkey", flush=True)
     try:
-        _cmoney_key = asyncio.run(_fetch_cmoney_key_async())
-        print("BG: key fetched successfully", flush=True)
+        _cmoney_key = _fetch_cmoney_key_http()
+        print("KEY: cmkey fetched", flush=True)
     except Exception as e:
-        print(f"BG: key fetch failed: {e}", flush=True)
+        print(f"KEY: cmkey fetch failed: {e}", flush=True)
         _cmoney_key = None
-    finally:
-        _cmoney_key_event.set()
-        with _cmoney_key_fetch_lock:
-            _cmoney_key_fetching = False
+    return _cmoney_key
 
 
 def prefetch_cmoney_key():
-    t = threading.Thread(target=_background_fetch_key, daemon=True)
-    t.start()
-
-
-def _ensure_key_fetch():
-    """Kick off a background key fetch if none is running and no key yet.
-
-    This is the on-demand trigger that replaces the scheduler's boot-time
-    prefetch: with the scheduler off, the first warrant /fetch reaches
-    get_cmoney_key with no key and nothing having launched Chromium, so we
-    start the fetch here. The in-flight guard ensures concurrent first
-    requests share a single browser launch instead of each spawning one.
-    """
-    global _cmoney_key_fetching
     with _cmoney_key_fetch_lock:
-        if _cmoney_key is not None or _cmoney_key_fetching:
-            return
-        _cmoney_key_fetching = True
-    threading.Thread(target=_background_fetch_key, daemon=True).start()
+        return _fetch_key_locked()
 
 
 def get_cmoney_key():
-    global _cmoney_key
     if _cmoney_key is None:
-        _ensure_key_fetch()
-        _cmoney_key_event.wait(timeout=30)
+        # Double-checked: concurrent first requests share one fetch instead of
+        # each hitting CMoney.
+        with _cmoney_key_fetch_lock:
+            if _cmoney_key is None:
+                _fetch_key_locked()
     return _cmoney_key
 
 
 def refresh_cmoney_key():
     global _cmoney_key
-    _cmoney_key_event.clear()
-    _cmoney_key = None
-    _background_fetch_key()
-    return _cmoney_key
+    with _cmoney_key_fetch_lock:
+        _cmoney_key = None
+        return _fetch_key_locked()
 
 
 # Thread-local pooled sessions: reusing keep-alive connections avoids a fresh
@@ -459,16 +405,17 @@ def get_warrant_results(stock_codes, force=False):
             or now - _warrant_cache[sc][0] >= WARRANT_CACHE_TTL
         ]
     if need:
-        code_map = _warrant_codes_for(need)
-        all_codes = sorted({c for cs in code_map.values() for c in cs})
-        fetched = get_cmoney_prices(all_codes) if all_codes else {}
-        ts = time.time()
-        with _warrant_cache_lock:
-            for sc in need:
-                _warrant_cache[sc] = (
-                    ts,
-                    {c: fetched[c] for c in code_map.get(sc, []) if c in fetched},
-                )
+        with memlog.measure("warrants_fetch"):
+            code_map = _warrant_codes_for(need)
+            all_codes = sorted({c for cs in code_map.values() for c in cs})
+            fetched = get_cmoney_prices(all_codes) if all_codes else {}
+            ts = time.time()
+            with _warrant_cache_lock:
+                for sc in need:
+                    _warrant_cache[sc] = (
+                        ts,
+                        {c: fetched[c] for c in code_map.get(sc, []) if c in fetched},
+                    )
     merged, as_of = {}, None
     with _warrant_cache_lock:
         for sc in stock_codes:

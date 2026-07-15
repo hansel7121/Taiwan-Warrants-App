@@ -2,7 +2,7 @@ flask==3.1.2
 numpy==2.3.2
 pandas==2.3.2
 scipy==1.16.1
-playwright==1.60.0
+psutil==7.2.2
 requests==2.33.1
 twstock==1.5.1
 certifi==2026.5.20
