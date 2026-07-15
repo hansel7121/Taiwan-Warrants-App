@@ -1,4 +1,5 @@
 import twstock
+from twstock.codes.fetch import fetch_data, TWSE_EQUITIES_URL, TPEX_EQUITIES_URL
 import requests
 import pandas as pd
 import urllib3
@@ -353,6 +354,93 @@ _warrant_cache_lock = threading.Lock()
 WARRANT_CACHE_TTL = 1800  # safety margin over the 15-min scheduled refresh
 
 
+# ── Listed-security universe ─────────────────────────────────────────────────
+# twstock.codes is a snapshot bundled into the installed package at release
+# time — months stale in practice, and it carries no expiry field, so it both
+# misses new warrants and keeps long-expired ones. The ISIN listing it was
+# scraped from enumerates *currently listed* securities, so re-scraping it live
+# fixes both halves at once. Held in memory only: __update_codes() would rewrite
+# CSVs inside site-packages, which is ephemeral on Render anyway.
+_universe_codes: dict = {}  # code -> twstock fetch.ROW
+_universe_ts = 0.0
+_universe_fetching = False
+_universe_fetch_started = 0.0
+_universe_lock = threading.Lock()
+UNIVERSE_TTL = 86400
+# The ISIN scrape is slow and highly variable (2-6 min per market observed) and
+# twstock's fetch_data passes no timeout, so a stalled socket could pin the
+# in-flight flag forever. Age it out instead of blocking refreshes for good.
+UNIVERSE_FETCH_STALL = 1800
+
+
+def refresh_warrant_universe():
+    """Scheduler hook: re-scrape the ISIN listing and swap it into the cache."""
+    global _universe_codes, _universe_ts, _universe_fetching, _universe_fetch_started
+    with _universe_lock:
+        if _universe_fetching and time.time() - _universe_fetch_started < UNIVERSE_FETCH_STALL:
+            print("WARR: universe fetch already in flight", flush=True)
+            return
+        _universe_fetching = True
+        _universe_fetch_started = time.time()
+    try:
+        # Sequential, not parallel: two lxml trees over ~31k rows at once is the
+        # largest memory spike in the process and the host caps at 512 MB.
+        print("WARR: universe fetch starting (slow, several minutes)", flush=True)
+        t0 = time.time()
+        with memlog.measure("warrant_universe"):
+            merged = {}
+            for market, url in (("twse", TWSE_EQUITIES_URL), ("tpex", TPEX_EQUITIES_URL)):
+                rows = fetch_data(url)
+                print(f"WARR: universe {market} {len(rows)} rows", flush=True)
+                for row in rows:
+                    merged[row.code] = row
+        if not merged:
+            print("WARR: universe fetch returned nothing — keeping fallback", flush=True)
+            return
+        fresh_w = sum(1 for v in merged.values() if "權證" in v.type)
+        bundled_w = sum(1 for v in twstock.codes.values() if "權證" in v.type)
+        with _universe_lock:
+            _universe_codes = merged
+            _universe_ts = time.time()
+        print(
+            f"WARR: universe fetched {len(merged)} codes, {fresh_w} warrants "
+            f"(bundled: {bundled_w}) in {time.time() - t0:.1f}s",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"WARR: universe fetch failed: {e} — using bundled codes", flush=True)
+    finally:
+        with _universe_lock:
+            _universe_fetching = False
+
+
+def _ensure_universe_fetch():
+    """Kick a background scrape if the universe is stale and none is running.
+
+    Never blocks: the scheduler is opt-in (ENABLE_SCHEDULER) and off in
+    production, so this is what actually gets the fresh universe loaded there.
+    Requests keep being served off the bundled fallback until it lands.
+    """
+    now = time.time()
+    with _universe_lock:
+        if _universe_codes and now - _universe_ts < UNIVERSE_TTL:
+            return
+        if _universe_fetching and now - _universe_fetch_started < UNIVERSE_FETCH_STALL:
+            return
+    threading.Thread(target=refresh_warrant_universe, daemon=True).start()
+
+
+def _universe():
+    """Fresh ISIN listing if we have one, else the bundled twstock snapshot.
+
+    A TWSE outage must degrade to today's behaviour, never to an empty universe.
+    """
+    with _universe_lock:
+        if _universe_codes and time.time() - _universe_ts < UNIVERSE_TTL:
+            return _universe_codes
+    return twstock.codes
+
+
 def _warrant_codes_for(stock_codes):
     """Resolve each underlying to its full warrant-code universe (all types).
 
@@ -363,8 +451,10 @@ def _warrant_codes_for(stock_codes):
     prefixes the warrant name. This replaces a hand-maintained issuer-char
     whitelist that silently dropped every warrant of any issuer not listed.
     """
+    _ensure_universe_fetch()
+    codes = _universe()
     today = datetime.today()
-    real_names = [v.name for v in twstock.codes.values() if "權證" not in v.type]
+    real_names = [v.name for v in codes.values() if "權證" not in v.type]
 
     def _make_matcher(name):
         # Longer real-security names that would also claim this warrant name.
@@ -379,7 +469,7 @@ def _warrant_codes_for(stock_codes):
 
     code_map = {}
     for stock_code in stock_codes:
-        stock_info = twstock.codes.get(stock_code, None)
+        stock_info = codes.get(stock_code, None)
         if stock_info is None:
             code_map[stock_code] = []
             continue
@@ -391,7 +481,7 @@ def _warrant_codes_for(stock_codes):
         aliases = WARRANT_NAME_ALIASES.get(stock_code, [])
         code_map[stock_code] = [
             k
-            for k, v in twstock.codes.items()
+            for k, v in codes.items()
             if "權證" in v.type
             and (name_matches(v.name)
                  or v.name.startswith(stock_code)

@@ -28,6 +28,7 @@ US_OPTION_CODES = list(us_options_logic.US_ADR_MAP)
 
 REFRESH_MINUTES = 15
 CMKEY_MINUTES = 45
+UNIVERSE_HOURS = 24
 FORCE_DEBOUNCE_SECONDS = 60
 
 _scheduler = None
@@ -70,6 +71,10 @@ def refresh_cmkey():
     _job("cmkey", warrant_logic.refresh_cmoney_key)
 
 
+def refresh_universe():
+    _job("universe", warrant_logic.refresh_warrant_universe)
+
+
 def refresh_warrants():
     _job("warrants", lambda: warrant_logic.refresh_warrant_cache(warrant_universe()))
 
@@ -82,6 +87,9 @@ def refresh_us_options():
     _job("us_options", lambda: us_options_logic.refresh_cache(US_OPTION_CODES))
 
 
+# No "universe" entry: /refresh is a refresh-prices-now action, and force_refresh
+# ("all") would fire a multi-minute ISIN scrape on every click. The daily job and
+# warrant_logic._ensure_universe_fetch already keep it current.
 _FORCE_MAP = {
     "warrants": refresh_warrants,
     "tw_options": refresh_tw_options,
@@ -134,6 +142,12 @@ def start():
         # next_run_time offsets only decide the order jobs are queued at boot.
         sched.add_job(refresh_cmkey, "interval", minutes=CMKEY_MINUTES,
                       next_run_time=now + timedelta(seconds=1))
+        # Universe before warrants: the single-worker executor serialises them, so
+        # the first warrant refresh resolves against the fresh ISIN listing rather
+        # than the stale bundled snapshot (it waits on the multi-minute scrape;
+        # requests meanwhile fetch-on-miss off the fallback).
+        sched.add_job(refresh_universe, "interval", hours=UNIVERSE_HOURS,
+                      next_run_time=now + timedelta(seconds=5))
         sched.add_job(refresh_warrants, "interval", minutes=REFRESH_MINUTES,
                       next_run_time=now + timedelta(seconds=90))
         sched.add_job(refresh_tw_options, "interval", minutes=REFRESH_MINUTES,
