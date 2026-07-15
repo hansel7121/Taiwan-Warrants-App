@@ -400,8 +400,27 @@ def refresh_warrant_universe():
         fresh_w = sum(1 for v in merged.values() if "權證" in v.type)
         bundled_w = sum(1 for v in twstock.codes.values() if "權證" in v.type)
         with _universe_lock:
+            # The results cached so far were resolved against whatever universe
+            # was in effect — the bundled fallback on the first request after
+            # boot. Replacing it silently would leave them stale for a full
+            # WARRANT_CACHE_TTL, so decide here whether they must be dropped.
+            in_effect = (
+                _universe_codes
+                if _universe_codes and time.time() - _universe_ts < UNIVERSE_TTL
+                else twstock.codes
+            )
+            changed = merged.keys() != in_effect.keys()
             _universe_codes = merged
             _universe_ts = time.time()
+        # Cleared outside _universe_lock: these two locks are never nested
+        # anywhere else, and nesting them here would be the only place that
+        # could order them against the request path.
+        if changed:
+            with _warrant_cache_lock:
+                dropped = len(_warrant_cache)
+                _warrant_cache.clear()
+            applog.log("WARR", f"universe changed, warrant cache "
+                               f"invalidated ({dropped} entries dropped)")
         print(
             f"WARR: universe fetched {len(merged)} codes, {fresh_w} warrants "
             f"(bundled: {bundled_w}) in {time.time() - t0:.1f}s",
