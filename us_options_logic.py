@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+import applog
 from warrant_logic import implied_vol, bs_delta, calc_real_leverage
 
 # One US option contract covers 100 ADRs. The number of ordinary (Taiwan)
@@ -394,12 +395,18 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
     cache_key = (stock_code, compute_iv)
     hit = _cache.get(cache_key)
     if hit and time.time() - hit[0] < _CACHE_TTL:
+        applog.log(
+            "USOPT",
+            f"{stock_code} {cfg['adr_ticker']} cache hit (age {int(time.time() - hit[0])}s)",
+        )
         return _filter_chain(hit[1], option_type, min_days, max_days)
 
+    t0 = time.time()
     adr_ratio = cfg["adr_ratio"]             # ordinary shares per ADR
     adr = _last_price(cfg["adr_ticker"])     # USD per ADR
     fx = _last_price(cfg["fx_ticker"])       # TWD per USD
     if adr <= 0 or fx <= 0:
+        applog.log("USOPT", f"{stock_code} bad ADR price ({adr}) or FX ({fx})")
         raise RuntimeError("bad ADR price or FX")
 
     # Underlying value expressed per Taiwan share, in TWD — the same basis the
@@ -409,10 +416,20 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
     tk = yf.Ticker(cfg["adr_ticker"])
     expiries = tk.options
     if not expiries:
+        applog.log("USOPT", f"{stock_code} {cfg['adr_ticker']} no option expiries")
         raise RuntimeError(f"{cfg['adr_ticker']}: no option expiries")
+
+    # One yfinance round-trip per expiry, so this walk is the slow part; logging
+    # before it starts makes a hang attributable to this stage.
+    applog.log(
+        "USOPT",
+        f"{stock_code} {cfg['adr_ticker']} walking {len(expiries)} expiries "
+        f"(adr={adr} fx={fx})",
+    )
 
     today = pd.Timestamp.now().normalize()
     rows = []
+    failed_exp = 0
     for exp in expiries:
         exp_ts = pd.Timestamp(exp)
         dte = int((exp_ts - today).days)
@@ -421,6 +438,7 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
         try:
             chain = tk.option_chain(exp)
         except Exception:
+            failed_exp += 1
             continue
 
         for is_put, leg in ((False, chain.calls), (True, chain.puts)):
@@ -493,8 +511,19 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
                 })
 
     if not rows:
+        applog.log(
+            "USOPT",
+            f"{stock_code} {cfg['adr_ticker']} -> 0 contracts from "
+            f"{len(expiries)} expiries in {time.time() - t0:.1f}s",
+        )
         raise RuntimeError("no US options in range")
 
+    applog.log(
+        "USOPT",
+        f"{stock_code} {cfg['adr_ticker']} fetched {len(rows)} contracts from "
+        f"{len(expiries)} expiries in {time.time() - t0:.1f}s"
+        + (f" ({failed_exp} expiries failed)" if failed_exp else ""),
+    )
     df = pd.DataFrame(rows).sort_values(["days_to_expiry", "strike"]).reset_index(drop=True)
     _cache[cache_key] = (time.time(), df.copy())
     return _filter_chain(df, option_type, min_days, max_days)

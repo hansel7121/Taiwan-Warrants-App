@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, jsonify, Response, g
+import applog
 import warrant_logic
 import options_logic
 import us_options_logic
@@ -36,6 +37,79 @@ app.json.sort_keys = False
 # plain browser reload — no server restart needed. (Python edits still need one.)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 app.jinja_env.auto_reload = True
+
+# Render pings /healthz constantly; static assets are noise too. Neither says
+# anything about what the app is doing, so they stay out of the log.
+_LOG_SKIP_PATHS = {"/healthz", "/favicon.ico"}
+# Params worth a completion line's worth of context, in the order they read best.
+_LOG_PARAMS = ("stock_codes", "option_type", "strategy", "kind", "period")
+
+
+def _log_skip():
+    p = request.path
+    return p in _LOG_SKIP_PATHS or p.startswith("/static/")
+
+
+def _param_summary():
+    """Short 'key=value' digest of the request payload — never the whole body."""
+    try:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return ""
+        parts = []
+        for key in _LOG_PARAMS:
+            if key not in data:
+                continue
+            val = data[key]
+            if isinstance(val, list):
+                val = ",".join(str(v) for v in val[:6]) + ("+" if len(val) > 6 else "")
+            parts.append(f"{key.replace('stock_codes', 'codes')}={val}")
+        return " " + " ".join(parts) if parts else ""
+    except Exception:
+        return ""
+
+
+@app.before_request
+def _log_request_start():
+    if _log_skip():
+        return
+    g.log_id = applog.new_id()
+    g.log_t0 = time.time()
+    applog.log("REQ", f"{request.method} {request.path} start{_param_summary()}")
+
+
+def _log_request_end(status):
+    if getattr(g, "log_done", False) or not hasattr(g, "log_id"):
+        return
+    g.log_done = True
+    extra = ""
+    # g.user is set by require_auth inside the view, so the user is only known
+    # by the time the request completes — not at before_request.
+    user = getattr(g, "user", None)
+    if user and user.get("email"):
+        extra += f" user={user['email']}"
+    if hasattr(g, "log_rows"):
+        extra += f" rows={g.log_rows}"
+    applog.log(
+        "REQ",
+        f"{request.method} {request.path} {status} "
+        f"in {time.time() - getattr(g, 'log_t0', time.time()):.1f}s{extra}",
+    )
+
+
+@app.after_request
+def _log_request_ok(response):
+    _log_request_end(response.status_code)
+    return response
+
+
+@app.teardown_request
+def _log_request_teardown(exc):
+    # after_request is skipped when a view raises; this is the only hook that
+    # always runs, so an unhandled error still gets its completion line.
+    if exc is not None:
+        _log_request_end(f"EXC {type(exc).__name__}: {exc}")
+
 
 @app.route("/")
 def index():
@@ -195,7 +269,9 @@ def fetch():
         min_volume,
     )
     if error and df.empty:
+        applog.set_rows(0)
         return jsonify({"rows": [], "count": 0, "error": error, **meta})
+    applog.set_rows(len(df))
     return jsonify({"rows": df.to_dict(orient="records"), "count": len(df), **meta})
 
 
@@ -246,8 +322,10 @@ def fetch_options():
         )
         # Use pandas JSON serialisation so NaN → null (browser JSON.parse rejects bare NaN)
         rows = json.loads(df.to_json(orient="records"))
+        applog.set_rows(len(df))
         return jsonify({"rows": rows, "count": len(df), "as_of": _epoch_iso(options_logic.data_as_of(stock_codes))})
     except Exception as e:
+        applog.log("OPT", f"fetch_options failed: {e}")
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
@@ -298,8 +376,10 @@ def us_options():
             (t for t in (us_options_logic.data_as_of(c) for c in stock_codes) if t),
             default=None,
         )
+        applog.set_rows(len(df))
         return jsonify({"rows": rows, "count": len(df), "as_of": _epoch_iso(as_of)})
     except Exception as e:
+        applog.log("USOPT", f"scan failed: {e}")
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
@@ -774,9 +854,11 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
     all_rows = []
     errors = []
 
-    for code in stock_codes:
+    for i, code in enumerate(stock_codes, 1):
+        pos = f"({i}/{len(stock_codes)})"
         if code not in options_logic.COMMODITY_MAP:
             errors.append(f"{code}: no options data available")
+            applog.log("ARB", f"{code} {pos} skipped: no options data available")
             continue
 
         cfg = options_logic.COMMODITY_MAP[code]
@@ -790,6 +872,7 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
         )
         if warrant_df.empty:
             errors.append(f"{code}: {err or 'no warrants'}")
+            applog.log("ARB", f"{code} {pos} skipped: {err or 'no warrants'}")
             continue
 
         try:
@@ -802,10 +885,12 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
                 opt_df = opt_df[opt_df["volume"] >= min_volume]
         except Exception as e:
             errors.append(f"{code}: {e}")
+            applog.log("ARB", f"{code} {pos} option fetch failed: {e}")
             continue
 
         if opt_df.empty:
             errors.append(f"{code}: no live options")
+            applog.log("ARB", f"{code} {pos} skipped: no live options")
             continue
 
         if strategy == "pcp":
@@ -818,6 +903,11 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
                 warrant_df, opt_df, opt_contract_size, max_strike_diff_pct, max_dte_diff,
                 positive_loose=positive_loose,
             )
+        applog.log(
+            "ARB",
+            f"{code} {pos} warrants={len(warrant_df)} options={len(opt_df)} "
+            f"matched={len(rows)} strategy={strategy}",
+        )
         all_rows.extend(rows)
 
     if not all_rows:
@@ -857,9 +947,11 @@ def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
     all_rows = []
     errors = []
 
-    for code in stock_codes:
+    for i, code in enumerate(stock_codes, 1):
+        pos = f"({i}/{len(stock_codes)})"
         if code not in us_options_logic.US_ADR_MAP:
             errors.append(f"{code}: no US ADR mapping")
+            applog.log("ARB", f"{code} {pos} skipped: no US ADR mapping")
             continue
 
         contract_size = us_options_logic.contract_tw_shares(code)  # TW shares/contract
@@ -870,6 +962,7 @@ def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
         )
         if warrant_df.empty:
             errors.append(f"{code}: {err or 'no warrants'}")
+            applog.log("ARB", f"{code} {pos} skipped: {err or 'no warrants'}")
             continue
 
         try:
@@ -882,10 +975,12 @@ def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
                 opt_df = opt_df[opt_df["volume"] >= min_volume]
         except Exception as e:
             errors.append(f"{code}: {e}")
+            applog.log("ARB", f"{code} {pos} US option fetch failed: {e}")
             continue
 
         if opt_df.empty:
             errors.append(f"{code}: no live US options")
+            applog.log("ARB", f"{code} {pos} skipped: no live US options")
             continue
 
         if strategy == "pcp":
@@ -899,6 +994,11 @@ def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
                 warrant_df, opt_df, contract_size, max_strike_diff_pct, max_dte_diff,
                 positive_loose=positive_loose,
             )
+        applog.log(
+            "ARB",
+            f"{code} {pos} warrants={len(warrant_df)} us_options={len(opt_df)} "
+            f"matched={len(rows)} strategy={strategy}",
+        )
         for r in rows:
             r["us_stock_code"] = code  # so the modal can pull ADR-premium history
         all_rows.extend(rows)
@@ -1087,12 +1187,15 @@ def _build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct, max_dt
     all_rows = []
     errors = []
 
-    for code in stock_codes:
+    for i, code in enumerate(stock_codes, 1):
+        pos = f"({i}/{len(stock_codes)})"
         if code not in options_logic.COMMODITY_MAP:
             errors.append(f"{code}: no Taiwan options")
+            applog.log("ARB", f"{code} {pos} skipped: no Taiwan options")
             continue
         if code not in us_options_logic.US_ADR_MAP:
             errors.append(f"{code}: no US ADR options")
+            applog.log("ARB", f"{code} {pos} skipped: no US ADR options")
             continue
 
         tw_contract_shares = options_logic.COMMODITY_MAP[code]["exercise_ratio"]  # 2000
@@ -1108,6 +1211,7 @@ def _build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct, max_dt
                 tw_df = tw_df[tw_df["volume"] >= min_volume]
         except Exception as e:
             errors.append(f"{code}: TW options {e}")
+            applog.log("ARB", f"{code} {pos} TW option fetch failed: {e}")
             continue
 
         try:
@@ -1117,15 +1221,22 @@ def _build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct, max_dt
                 us_df = us_df[us_df["volume"] >= min_volume]
         except Exception as e:
             errors.append(f"{code}: US options {e}")
+            applog.log("ARB", f"{code} {pos} US option fetch failed: {e}")
             continue
 
         if tw_df.empty or us_df.empty:
             errors.append(f"{code}: no live options on one leg")
+            applog.log("ARB", f"{code} {pos} skipped: no live options on one leg")
             continue
 
         rows = _match_option_legs(
             tw_df, us_df, tw_contract_shares, us_contract_shares,
             max_strike_diff_pct, max_dte_diff, positive_loose=positive_loose,
+        )
+        applog.log(
+            "ARB",
+            f"{code} {pos} tw_options={len(tw_df)} us_options={len(us_df)} "
+            f"matched={len(rows)}",
         )
         for r in rows:
             r["us_stock_code"] = code
@@ -1184,8 +1295,10 @@ def us_option_match():
                                 max_dte_diff, positive_loose=positive_loose,
                                 min_volume=min_volume, strategy=strategy)
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
+        applog.set_rows(len(rows))
         return jsonify({"rows": rows, "count": len(rows)})
     except Exception as e:
+        applog.log("ARB", f"us_option_match failed: {e}")
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
@@ -1231,8 +1344,10 @@ def tw_us_option_match():
                                     max_dte_diff, positive_loose=positive_loose,
                                     min_volume=min_volume)
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
+        applog.set_rows(len(rows))
         return jsonify({"rows": rows, "count": len(rows)})
     except Exception as e:
+        applog.log("ARB", f"tw_us_option_match failed: {e}")
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
@@ -1283,8 +1398,10 @@ def arb_finder():
                          options_logic.data_as_of(stock_codes)) if t),
             default=None,
         )
+        applog.set_rows(len(rows))
         return jsonify({"rows": rows, "count": len(rows), "as_of": _epoch_iso(as_of)})
     except Exception as e:
+        applog.log("ARB", f"arb_finder failed: {e}")
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 

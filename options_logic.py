@@ -5,6 +5,7 @@ import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import applog
 from warrant_logic import implied_vol, bs_delta, calc_real_leverage
 
 R = 0.01875  # Taiwan CBC benchmark rate
@@ -80,8 +81,11 @@ def _fetch_taifex(commodity_ids: list[str]) -> pd.DataFrame:
     if cache_key in _taifex_cache:
         ts, cached_df = _taifex_cache[cache_key]
         if now - ts < _CACHE_TTL:
+            applog.log("OPT", f"EOD {cache_key} cache hit (age {int(now - ts)}s)")
             return cached_df
 
+    applog.log("OPT", f"EOD {cache_key} fetching TAIFEX download")
+    t0 = time.time()
     today = pd.Timestamp.today()
     start = (today - pd.Timedelta(days=7)).strftime("%Y/%m/%d")
     end = today.strftime("%Y/%m/%d")
@@ -121,6 +125,10 @@ def _fetch_taifex(commodity_ids: list[str]) -> pd.DataFrame:
     else:
         df = df.drop(columns=["_settle_num"], errors="ignore")
 
+    applog.log(
+        "OPT",
+        f"EOD {cache_key} fetched {len(df)} rows in {time.time() - t0:.1f}s",
+    )
     _taifex_cache[cache_key] = (now, df)
     return df
 
@@ -346,7 +354,10 @@ def _fetch_mis_quotes(cid, kind):
     key = (cid, kind)
     now = time.time()
     if key in _mis_cache and now - _mis_cache[key][0] < _MIS_TTL:
+        applog.log("OPT", f"MIS {cid} cache hit (age {int(now - _mis_cache[key][0])}s)")
         return _mis_cache[key][1]
+    applog.log("OPT", f"MIS {cid} fetching quotes")
+    t0 = time.time()
     headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0",
                "Referer": "https://mis.taifex.com.tw/futures/"}
     rows = []
@@ -365,6 +376,10 @@ def _fetch_mis_quotes(cid, kind):
         if len(rows) >= total or not ql:
             break
         page += 1
+    applog.log(
+        "OPT",
+        f"MIS {cid} fetched {len(rows)} quotes in {time.time() - t0:.1f}s",
+    )
     _mis_cache[key] = (now, rows)
     return rows
 
@@ -489,28 +504,36 @@ def fetch_options(
     for code in stock_codes:
         if code not in COMMODITY_MAP:
             errors.append(f"{code}: not supported")
+            applog.log("OPT", f"{code} not supported")
             continue
         cfg = COMMODITY_MAP[code]
         df = None
         # Primary: MIS intraday quotes. Fallback: EOD data-download file.
         try:
             df = fetch_options_mis(code, compute_iv=compute_iv)
+            applog.log("OPT", f"{code} source=MIS {len(df)} contracts")
         except Exception as e:
             errors.append(f"{code}: MIS {e}")
+            # MIS is the primary intraday source; falling back to EOD means the
+            # data is up to a day stale, so the fallback itself is the signal.
+            applog.log("OPT", f"{code} MIS failed ({e}) — falling back to TAIFEX EOD")
             df = None
         if df is None or df.empty:
             try:
                 S = _get_spot(cfg["ticker"])
                 raw = _fetch_taifex(cfg["commodity_ids"])
                 df = _parse_and_compute(raw, S, cfg["exercise_ratio"], compute_iv=compute_iv)
+                applog.log("OPT", f"{code} source=EOD {len(df)} contracts spot={S}")
             except Exception as e:
                 errors.append(f"{code}: EOD {e}")
+                applog.log("OPT", f"{code} EOD failed: {e}")
                 df = None
         if df is not None and not df.empty:
             dfs.append(df)
 
     if not dfs:
         err_msg = "; ".join(errors) if errors else "No data returned"
+        applog.log("OPT", f"{','.join(stock_codes)} -> no data: {err_msg}")
         raise RuntimeError(err_msg)
 
     result = pd.concat(dfs, ignore_index=True)
@@ -525,4 +548,9 @@ def fetch_options(
     if option_type != "All":
         result = result[result["type"] == option_type]
 
+    applog.log(
+        "OPT",
+        f"{','.join(stock_codes)} -> {len(result)} rows type={option_type} "
+        f"days={min_days}-{max_days}",
+    )
     return result.sort_values(["days_to_expiry", "strike"]).reset_index(drop=True)

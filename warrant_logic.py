@@ -13,6 +13,7 @@ import time
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import applog
 import memlog
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -127,7 +128,9 @@ def _fetch_key_locked():
     print("KEY: fetching cmkey", flush=True)
     try:
         _cmoney_key = _fetch_cmoney_key_http()
-        print("KEY: cmkey fetched", flush=True)
+        # Truncated: the key is a credential, but its prefix identifies which key
+        # is live across a rotation.
+        print(f"KEY: cmkey fetched ({applog.redact(_cmoney_key)})", flush=True)
     except Exception as e:
         print(f"KEY: cmkey fetch failed: {e}", flush=True)
         _cmoney_key = None
@@ -216,6 +219,7 @@ def get_cmoney_prices(codes):
                 results[code] = data
 
     if key_expired:
+        applog.log("WARR", f"cmkey expired (Error -3) — refreshing key, retrying {len(codes)} codes")
         cmkey = refresh_cmoney_key()
         results = {}
         with ThreadPoolExecutor(max_workers=100) as executor:
@@ -227,6 +231,13 @@ def get_cmoney_prices(codes):
                 if data and data != "KEY_EXPIRED":
                     results[code] = data
 
+    # Aggregate only: fetch_one_cmoney fans out over 100 threads, so a per-code
+    # failure line would be thousands of lines for one request.
+    applog.log(
+        "WARR",
+        f"cmoney {len(codes)} requested, {len(results)} ok, "
+        f"{len(codes) - len(results)} failed",
+    )
     return results
 
 
@@ -404,11 +415,29 @@ def get_warrant_results(stock_codes, force=False):
             if force or sc not in _warrant_cache
             or now - _warrant_cache[sc][0] >= WARRANT_CACHE_TTL
         ]
+        hits = [
+            (sc, int(now - _warrant_cache[sc][0]))
+            for sc in stock_codes
+            if sc not in need and sc in _warrant_cache
+        ]
+    for sc, age in hits:
+        applog.log("WARR", f"{sc} cache hit (age {age}s)")
     if need:
         with memlog.measure("warrants_fetch"):
             code_map = _warrant_codes_for(need)
             all_codes = sorted({c for cs in code_map.values() for c in cs})
+            applog.log(
+                "WARR",
+                f"{','.join(need)} fetching {len(all_codes)} codes"
+                f"{' (forced)' if force else ''}",
+            )
+            t0 = time.time()
             fetched = get_cmoney_prices(all_codes) if all_codes else {}
+            applog.log(
+                "WARR",
+                f"{','.join(need)} fetched {len(fetched)}/{len(all_codes)} codes "
+                f"in {time.time() - t0:.1f}s",
+            )
             ts = time.time()
             with _warrant_cache_lock:
                 for sc in need:
@@ -458,14 +487,21 @@ def fetch_warrants(
         "cached": cached,
     }
 
+    codes_s = ",".join(stock_codes)
     if not cmoney_results:
+        applog.log("WARR", f"{codes_s} -> 0 rows (no warrants found)")
         return pd.DataFrame(), "No warrants found", meta
 
     df = build_warrant_df(cmoney_results, compute_iv=compute_iv)
 
     if df.empty:
+        applog.log(
+            "WARR",
+            f"{codes_s} -> 0 rows (none of {len(cmoney_results)} results survived build)",
+        )
         return pd.DataFrame(), "No warrants passed filters", meta
 
+    built = len(df)
     df = df[COL_ORDER]
     # Verify the true underlying: the name prefilter is intentionally permissive
     # (so no issuer is ever dropped), and abbreviated warrant names can point at
@@ -473,6 +509,10 @@ def fetch_warrants(
     wanted = {str(c) for c in stock_codes}
     df = df[df["underlying_code"].astype(str).isin(wanted)]
     if df.empty:
+        applog.log(
+            "WARR",
+            f"{codes_s} -> 0 rows ({built} built, none matched the requested underlying)",
+        )
         return pd.DataFrame(), "No warrants for requested underlying", meta
     df = df[(df["days_to_expiry"] >= min_days) & (df["days_to_expiry"] <= max_days)]
     # leverage_calc is NaN when compute_iv=False; only filter when a real
@@ -484,6 +524,11 @@ def fetch_warrants(
     if option_type != "All":
         df = df[df["type"] == option_type]
 
+    applog.log(
+        "WARR",
+        f"{codes_s} -> {len(df)} rows ({len(cmoney_results)} results, {built} built) "
+        f"type={option_type} cached={cached}",
+    )
     return df, None, meta
 
 
