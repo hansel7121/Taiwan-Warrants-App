@@ -1399,7 +1399,12 @@ def _resolve_port(preferred, span=20):
 
 if __name__ == "__main__":
     # Local dev entry point. Production runs via wsgi.py + gunicorn.
-    scheduler.start()
+    # Scheduler is opt-in (default OFF); see wsgi.py. With it off the CMoney
+    # key is fetched lazily on the first warrant request instead of prefetched.
+    if os.environ.get("ENABLE_SCHEDULER") == "1":
+        scheduler.start()
+    else:
+        print("SCHED: disabled (set ENABLE_SCHEDULER=1 to enable)", flush=True)
     print("Step 1: resolving port", flush=True)
     port = _resolve_port(int(os.environ.get("PORT", 5001)))
     print(f"Step 2: starting browser timer (port {port})", flush=True)

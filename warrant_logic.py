@@ -55,6 +55,11 @@ COL_ORDER = [
 
 _cmoney_key = None
 _cmoney_key_event = threading.Event()
+# Guards against two Chromium scrapes running at once (a memory spike): when the
+# scheduler is off, the first warrant requests each call get_cmoney_key and would
+# otherwise each launch a browser. Only one fetch is allowed in flight.
+_cmoney_key_fetch_lock = threading.Lock()
+_cmoney_key_fetching = False
 
 
 def bs_price(S, K, T, r, sigma, ratio, is_put=False):
@@ -151,7 +156,9 @@ async def _fetch_cmoney_key_async():
 
 
 def _background_fetch_key():
-    global _cmoney_key
+    global _cmoney_key, _cmoney_key_fetching
+    with _cmoney_key_fetch_lock:
+        _cmoney_key_fetching = True
     print("BG: starting key fetch", flush=True)
     try:
         _cmoney_key = asyncio.run(_fetch_cmoney_key_async())
@@ -161,6 +168,8 @@ def _background_fetch_key():
         _cmoney_key = None
     finally:
         _cmoney_key_event.set()
+        with _cmoney_key_fetch_lock:
+            _cmoney_key_fetching = False
 
 
 def prefetch_cmoney_key():
@@ -168,9 +177,27 @@ def prefetch_cmoney_key():
     t.start()
 
 
+def _ensure_key_fetch():
+    """Kick off a background key fetch if none is running and no key yet.
+
+    This is the on-demand trigger that replaces the scheduler's boot-time
+    prefetch: with the scheduler off, the first warrant /fetch reaches
+    get_cmoney_key with no key and nothing having launched Chromium, so we
+    start the fetch here. The in-flight guard ensures concurrent first
+    requests share a single browser launch instead of each spawning one.
+    """
+    global _cmoney_key_fetching
+    with _cmoney_key_fetch_lock:
+        if _cmoney_key is not None or _cmoney_key_fetching:
+            return
+        _cmoney_key_fetching = True
+    threading.Thread(target=_background_fetch_key, daemon=True).start()
+
+
 def get_cmoney_key():
     global _cmoney_key
     if _cmoney_key is None:
+        _ensure_key_fetch()
         _cmoney_key_event.wait(timeout=30)
     return _cmoney_key
 
