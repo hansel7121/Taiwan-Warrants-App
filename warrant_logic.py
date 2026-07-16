@@ -165,6 +165,10 @@ def _background_fetch_key():
 def prefetch_cmoney_key():
     t = threading.Thread(target=_background_fetch_key, daemon=True)
     t.start()
+    # Warm the live warrant universe at startup too, so the ~1-min ISIN scrape
+    # is already done before the user's first scan (which would otherwise race
+    # it and fall back to the stale bundled twstock snapshot).
+    _ensure_universe_fetch()
 
 
 def get_cmoney_key():
