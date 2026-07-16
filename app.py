@@ -6,6 +6,7 @@ import us_options_logic
 import scheduler
 import auth
 import db
+import store
 from auth import require_auth
 import os
 import io
@@ -165,13 +166,13 @@ def check_email():
 @app.route("/get_portfolio")
 @require_auth
 def get_portfolio():
-    return jsonify(db.get_portfolio(g.user["id"]))
+    return jsonify(store.get_portfolio(g.user["id"]))
 
 
 @app.route("/save_portfolio", methods=["POST"])
 @require_auth
 def save_portfolio():
-    db.save_portfolio(g.user["id"], request.json or [])
+    store.save_portfolio(g.user["id"], request.json or [])
     return jsonify({"ok": True})
 
 

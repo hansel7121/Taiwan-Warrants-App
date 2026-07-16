@@ -23,11 +23,22 @@ _allow_cache = {}  # email -> (expiry_epoch, bool)
 _ALLOW_TTL = 60
 
 
+def local_mode():
+    """True on a local redundancy instance that acts as a fixed user with no login.
+
+    Enabled only when LOCAL_USER_ID is set AND we are not on Render. Computed at
+    call time (not import) so tests can toggle env. On Render, RENDER is set so
+    this is always False and production auth is untouched.
+    """
+    return bool(os.environ.get("LOCAL_USER_ID")) and not os.environ.get("RENDER")
+
+
 def public_config():
     """Values injected into templates for the browser-side Supabase client."""
     return {
         "supabase_url": os.environ.get("SUPABASE_URL", ""),
         "supabase_anon_key": os.environ.get("SUPABASE_ANON_KEY", ""),
+        "local_mode": local_mode(),
     }
 
 
@@ -76,6 +87,15 @@ def _is_allowed(email):
 def require_auth(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
+        if local_mode():
+            # Local redundancy instance: act as the fixed LOCAL_USER_ID, skipping
+            # token verification and the allowlist entirely. Guarded by RENDER so
+            # this branch is dead on production.
+            g.user = {
+                "id": os.environ["LOCAL_USER_ID"],
+                "email": os.environ.get("LOCAL_USER_EMAIL", "local@localhost"),
+            }
+            return fn(*args, **kwargs)
         if not os.environ.get("SUPABASE_URL"):
             return jsonify({"error": "auth not configured"}), 503
         header = request.headers.get("Authorization", "")
