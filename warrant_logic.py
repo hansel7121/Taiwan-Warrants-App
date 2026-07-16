@@ -369,12 +369,17 @@ def build_warrant_df(cmoney_results, compute_iv=True):
 # MISSES newly issued warrants and KEEPS long-expired ones. The ISIN listing it
 # was scraped from enumerates *currently listed* securities, so re-scraping it
 # live fixes both halves at once. Held in memory only (no site-packages writes).
-# The scrape runs in a background thread; the warrant search falls back to the
-# bundled twstock snapshot until the first live scrape lands, so it never blocks.
+# The scrape runs in a background thread kicked at startup; the warrant search
+# REQUIRES the live universe and refuses to serve until it lands (the frontend
+# shows a "Building Warrant Universe" progress bar). The bundled twstock snapshot
+# is kept only as a dormant emergency fallback (see _universe()) and is NOT used
+# on the normal fetch path.
 _universe_codes: dict = {}   # code -> twstock fetch.ROW (same shape as twstock.codes values)
 _universe_ts = 0.0
 _universe_fetching = False
 _universe_fetch_started = 0.0
+_universe_progress = 0        # 0-100, drives the frontend progress bar
+_universe_error = None        # last scrape error message, or None
 _universe_lock = threading.Lock()
 UNIVERSE_TTL = 86400          # re-scrape at most once a day
 UNIVERSE_FETCH_STALL = 1800   # age out a stuck in-flight scrape after 30 min
@@ -436,30 +441,42 @@ def _stream_isin(url):
 def refresh_warrant_universe():
     """Re-scrape the TWSE + TPEX ISIN listings and swap them into the universe."""
     global _universe_codes, _universe_ts, _universe_fetching, _universe_fetch_started
+    global _universe_progress, _universe_error
     with _universe_lock:
         if _universe_fetching and time.time() - _universe_fetch_started < UNIVERSE_FETCH_STALL:
             return
         _universe_fetching = True
         _universe_fetch_started = time.time()
+        _universe_progress = 4
+        _universe_error = None
     try:
         t0 = time.time()
         merged = {}
         # Sequential, not parallel: two lxml trees at once is the biggest memory
-        # spike in the process.
-        for _market, url in (("twse", TWSE_EQUITIES_URL), ("tpex", TPEX_EQUITIES_URL)):
+        # spike in the process. Each market bumps the progress bar as it lands.
+        for _market, url, pct in (("twse", TWSE_EQUITIES_URL, 55),
+                                  ("tpex", TPEX_EQUITIES_URL, 92)):
             for row in _stream_isin(url):
                 merged[row.code] = row
+            with _universe_lock:
+                _universe_progress = pct
         _malloc_trim()
         if not merged:
+            with _universe_lock:
+                _universe_error = "ISIN listing returned no rows"
+            print("WARR: universe scrape returned nothing", flush=True)
             return
         with _universe_lock:
             _universe_codes = merged
             _universe_ts = time.time()
+            _universe_progress = 100
         fresh_w = sum(1 for v in merged.values() if "權證" in v.type)
         print(f"WARR: universe scraped {len(merged)} codes, {fresh_w} warrants "
               f"in {time.time() - t0:.1f}s", flush=True)
     except Exception as e:
-        print(f"WARR: universe scrape failed: {e} — using bundled twstock codes", flush=True)
+        with _universe_lock:
+            _universe_error = str(e)
+        print(f"WARR: universe scrape failed: {e}", flush=True)
     finally:
         with _universe_lock:
             _universe_fetching = False
@@ -468,8 +485,8 @@ def refresh_warrant_universe():
 def _ensure_universe_fetch():
     """Kick a background scrape if the universe is stale and none is running.
 
-    Never blocks: the warrant search keeps being served off the bundled twstock
-    fallback until the fresh universe lands.
+    Non-blocking. Also acts as the retry hook: after a failed scrape (fetching
+    flag cleared, no fresh data) the next call restarts it.
     """
     now = time.time()
     with _universe_lock:
@@ -480,10 +497,33 @@ def _ensure_universe_fetch():
     threading.Thread(target=refresh_warrant_universe, daemon=True).start()
 
 
-def _universe():
-    """Fresh ISIN listing if we have one, else the bundled twstock snapshot.
+def _universe_ready():
+    """True once a fresh live ISIN scrape is loaded."""
+    with _universe_lock:
+        return bool(_universe_codes) and time.time() - _universe_ts < UNIVERSE_TTL
 
-    A TWSE outage degrades to today's behaviour, never to an empty universe.
+
+def universe_status():
+    """Progress-bar payload for the frontend: ready / building / progress / error."""
+    with _universe_lock:
+        ready = bool(_universe_codes) and time.time() - _universe_ts < UNIVERSE_TTL
+        return {
+            "ready": ready,
+            "building": _universe_fetching and not ready,
+            "progress": 100 if ready else _universe_progress,
+            "codes": len(_universe_codes),
+            "warrants": sum(1 for v in _universe_codes.values() if "權證" in v.type),
+            "error": _universe_error,
+        }
+
+
+def _universe():
+    """EMERGENCY fallback only — the bundled twstock snapshot.
+
+    Kept in the codebase so a manual/emergency path can still resolve codes if
+    the live listing is unreachable, but the normal fetch_warrants path no longer
+    calls this: it requires the fresh scrape (_universe_ready) and makes the user
+    wait rather than silently serving stale, expiry-less bundled data.
     """
     now = time.time()
     with _universe_lock:
@@ -503,10 +543,14 @@ def fetch_warrants(
     compute_iv=True,
 ):
     today = datetime.today()
-    # Resolve the warrant universe live (falls back to bundled twstock until the
-    # first background scrape lands) so newly issued warrants are never missed.
+    # Require the live ISIN universe — never serve the stale bundled snapshot.
+    # If the startup scrape hasn't landed yet, refuse and let the caller wait
+    # (the frontend shows a "Building Warrant Universe" progress bar).
     _ensure_universe_fetch()
-    codes = _universe()
+    if not _universe_ready():
+        return pd.DataFrame(), "Building warrant universe… please wait"
+    with _universe_lock:
+        codes = _universe_codes
 
     if option_type == "Call":
         name_filter = "購"

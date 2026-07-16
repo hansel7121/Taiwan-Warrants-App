@@ -1128,6 +1128,14 @@ def _build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct, max_dt
     return result
 
 
+@app.route("/universe_status")
+def universe_status():
+    # Kick/keep-alive the live ISIN scrape (also retries after a failed build),
+    # then report progress for the "Building Warrant Universe" bar.
+    warrant_logic._ensure_universe_fetch()
+    return jsonify(warrant_logic.universe_status())
+
+
 @app.route("/adr_premium", methods=["POST"])
 def adr_premium():
     data = request.json
