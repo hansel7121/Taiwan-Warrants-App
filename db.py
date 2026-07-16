@@ -4,6 +4,7 @@ The client is created lazily so the module imports fine without any env vars
 (local no-auth dev, sanity checks). A tiny .env loader runs at import so
 SUPABASE_* vars in a local .env are visible to this module and auth.py.
 """
+import json
 import os
 from datetime import datetime, timezone
 
@@ -49,27 +50,97 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _payload_key(payload):
+    """Stable, order-independent serialization for comparing two payload dicts."""
+    return json.dumps(payload, sort_keys=True, default=str)
+
+
 def get_portfolio(user_id):
-    r = client().table("portfolio").select("payload").eq("user_id", user_id).execute()
+    """Payloads of this user's LIVE rows only (deleted_at is null)."""
+    r = (
+        client()
+        .table("portfolio")
+        .select("payload")
+        .eq("user_id", user_id)
+        .is_("deleted_at", "null")
+        .execute()
+    )
     return [row["payload"] for row in (r.data or [])]
 
 
 def save_portfolio(user_id, entries):
-    """Diff-upsert: upsert every posted entry, then delete rows no longer present."""
+    """Sync-safe diff + tombstone (never hard-delete, so a concurrent writer's
+    rows survive). Upsert only entries that are new, changed, or resurrected;
+    tombstone live rows no longer present in the posted array. A live row whose
+    payload is unchanged is left untouched so updated_at (the sync cursor) is not
+    bumped, otherwise reconcile pulls would loop forever.
+    """
     c = client()
-    ids, rows = [], []
     now = _now()
+
+    existing = (
+        c.table("portfolio")
+        .select("id, payload, deleted_at")
+        .eq("user_id", user_id)
+        .execute()
+    )
+    by_id = {str(row["id"]): row for row in (existing.data or [])}
+
+    rows = []
+    posted_ids = set()
     for e in entries or []:
         eid = str(e.get("id"))
-        ids.append(eid)
-        rows.append({"user_id": user_id, "id": eid, "payload": e, "updated_at": now})
+        posted_ids.add(eid)
+        cur = by_id.get(eid)
+        if (
+            cur is None
+            or cur.get("deleted_at") is not None
+            or _payload_key(cur.get("payload")) != _payload_key(e)
+        ):
+            rows.append(
+                {
+                    "user_id": user_id,
+                    "id": eid,
+                    "payload": e,
+                    "deleted_at": None,
+                    "updated_at": now,
+                }
+            )
+        # else: identical live row -> do NOT upsert (must not bump updated_at).
+
+    # Tombstone live rows that are no longer posted. Already-tombstoned rows are
+    # left as-is so their cursor is not needlessly bumped.
+    for eid, row in by_id.items():
+        if eid not in posted_ids and row.get("deleted_at") is None:
+            rows.append(
+                {
+                    "user_id": user_id,
+                    "id": eid,
+                    "payload": row.get("payload"),
+                    "deleted_at": now,
+                    "updated_at": now,
+                }
+            )
+
     if rows:
         c.table("portfolio").upsert(rows).execute()
-    q = c.table("portfolio").delete().eq("user_id", user_id)
-    if ids:
-        q = q.not_.in_("id", ids)
-    q.execute()
     return True
+
+
+def changed_rows_since(user_id, since_iso=None):
+    """Raw rows (id, payload, deleted_at, updated_at) for this user, newest first,
+    INCLUDING tombstones. If since_iso is given, only rows with updated_at greater
+    than it; otherwise all rows. Used by the sync/reconcile layer as its cursor."""
+    q = (
+        client()
+        .table("portfolio")
+        .select("id, payload, deleted_at, updated_at")
+        .eq("user_id", user_id)
+    )
+    if since_iso is not None:
+        q = q.gt("updated_at", since_iso)
+    r = q.order("updated_at", desc=True).execute()
+    return r.data or []
 
 
 def get_custom_stocks(user_id):
