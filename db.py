@@ -46,6 +46,30 @@ def client():
     return _client
 
 
+def _reset_client():
+    """Drop the cached client so the next call() builds a fresh connection pool."""
+    global _client
+    _client = None
+
+
+def _run(build):
+    """Execute build(client) and retry once on a transport-level failure.
+
+    The client is a long-lived singleton, so its pooled HTTP/2 keep-alive
+    connection can be closed by Supabase after idling; the next reuse then raises
+    httpx.RemoteProtocolError ("Server disconnected") or a similar transport
+    error. That is transient: discard the stale client and rebuild the query
+    against a fresh connection. A second failure is real and propagates.
+    """
+    import httpx
+    try:
+        return build(client())
+    except httpx.TransportError as e:
+        print(f"DB: transport error ({type(e).__name__}: {e}); resetting client and retrying once", flush=True)
+        _reset_client()
+        return build(client())
+
+
 def _now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -57,9 +81,8 @@ def _payload_key(payload):
 
 def get_portfolio(user_id):
     """Payloads of this user's LIVE rows only (deleted_at is null)."""
-    r = (
-        client()
-        .table("portfolio")
+    r = _run(
+        lambda c: c.table("portfolio")
         .select("payload")
         .eq("user_id", user_id)
         .is_("deleted_at", "null")
@@ -75,11 +98,10 @@ def save_portfolio(user_id, entries):
     payload is unchanged is left untouched so updated_at (the sync cursor) is not
     bumped, otherwise reconcile pulls would loop forever.
     """
-    c = client()
     now = _now()
 
-    existing = (
-        c.table("portfolio")
+    existing = _run(
+        lambda c: c.table("portfolio")
         .select("id, payload, deleted_at")
         .eq("user_id", user_id)
         .execute()
@@ -123,7 +145,7 @@ def save_portfolio(user_id, entries):
             )
 
     if rows:
-        c.table("portfolio").upsert(rows).execute()
+        _run(lambda c: c.table("portfolio").upsert(rows).execute())
     return True
 
 
@@ -131,29 +153,35 @@ def changed_rows_since(user_id, since_iso=None):
     """Raw rows (id, payload, deleted_at, updated_at) for this user, newest first,
     INCLUDING tombstones. If since_iso is given, only rows with updated_at greater
     than it; otherwise all rows. Used by the sync/reconcile layer as its cursor."""
-    q = (
-        client()
-        .table("portfolio")
-        .select("id, payload, deleted_at, updated_at")
-        .eq("user_id", user_id)
-    )
-    if since_iso is not None:
-        q = q.gt("updated_at", since_iso)
-    r = q.order("updated_at", desc=True).execute()
+    def build(c):
+        q = (
+            c.table("portfolio")
+            .select("id, payload, deleted_at, updated_at")
+            .eq("user_id", user_id)
+        )
+        if since_iso is not None:
+            q = q.gt("updated_at", since_iso)
+        return q.order("updated_at", desc=True).execute()
+
+    r = _run(build)
     return r.data or []
 
 
 def get_custom_stocks(user_id):
-    r = client().table("custom_stocks").select("stocks").eq("user_id", user_id).execute()
+    r = _run(
+        lambda c: c.table("custom_stocks").select("stocks").eq("user_id", user_id).execute()
+    )
     if r.data:
         return r.data[0].get("stocks") or []
     return []
 
 
 def save_custom_stocks(user_id, stocks):
-    client().table("custom_stocks").upsert(
-        {"user_id": user_id, "stocks": stocks or [], "updated_at": _now()}
-    ).execute()
+    _run(
+        lambda c: c.table("custom_stocks")
+        .upsert({"user_id": user_id, "stocks": stocks or [], "updated_at": _now()})
+        .execute()
+    )
     return True
 
 
