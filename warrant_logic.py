@@ -1,6 +1,14 @@
 import twstock
-from twstock.codes.fetch import fetch_data, TWSE_EQUITIES_URL, TPEX_EQUITIES_URL
+from twstock.codes.fetch import (
+    make_row_tuple,
+    TWSE_EQUITIES_URL,
+    TPEX_EQUITIES_URL,
+)
 import requests
+import ctypes
+import ctypes.util
+from io import BytesIO
+from lxml import etree
 import pandas as pd
 import urllib3
 from datetime import datetime
@@ -373,6 +381,61 @@ UNIVERSE_TTL = 86400
 UNIVERSE_FETCH_STALL = 1800
 
 
+def _malloc_trim():
+    # glibc keeps freed lxml arenas out of the OS's hands; nudge it to release
+    # them so the ~110MB parse transient doesn't become a permanent RSS floor.
+    # Linux/glibc only — absent on macOS, where this is a harmless no-op.
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=False)
+        if hasattr(libc, "malloc_trim"):
+            libc.malloc_trim(0)
+    except Exception:
+        pass
+
+
+def _stream_isin(url):
+    """Stream-parse an ISIN listing into twstock ROW tuples without a full DOM.
+
+    twstock's fetch_data builds one lxml tree over the ~7.7MB page; that single
+    etree.HTML() call peaks ~110MB and, under glibc, never returns the freed
+    arena to the OS — a permanent RSS floor. iterparse over <tr>, clearing each
+    row as it closes, holds only one row at a time. Output is the identical ROW
+    list fetch_data returns (same make_row_tuple, same header/type handling), so
+    nothing downstream changes.
+    """
+    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"},
+                     verify=False, timeout=60)
+    r.raise_for_status()
+    rows = []
+    typ = ""
+    first = True
+    # encoding must be pinned: with html=True, lxml otherwise re-sniffs the
+    # page's meta charset, mis-decodes the Chinese to latin-1, and yields zero
+    # usable rows. This is the #1 failure mode of a naive iterparse here.
+    context = etree.iterparse(BytesIO(r.content), html=True,
+                              encoding="utf-8", tag="tr")
+    for _event, elem in context:
+        if first:
+            # The column-header <tr> (labels like 有價證券代號及名稱): fetch_data
+            # drops it with xpath('//tr')[1:]; its cell has no 　 to split on.
+            first = False
+        else:
+            cells = [x.text for x in elem.iter()]
+            if len(cells) == 4:
+                # Section header carrying the security type for the rows below.
+                typ = cells[2].strip(" ")
+            else:
+                rows.append(make_row_tuple(typ, cells))
+        # Clear the finished subtree and drop already-seen siblings so the tree
+        # the parser retains stays empty — this is what keeps the peak flat.
+        elem.clear()
+        parent = elem.getparent()
+        if parent is not None:
+            while elem.getprevious() is not None:
+                del parent[0]
+    return rows
+
+
 def refresh_warrant_universe():
     """Scheduler hook: re-scrape the ISIN listing and swap it into the cache."""
     global _universe_codes, _universe_ts, _universe_fetching, _universe_fetch_started
@@ -390,10 +453,13 @@ def refresh_warrant_universe():
         with memlog.measure("warrant_universe"):
             merged = {}
             for market, url in (("twse", TWSE_EQUITIES_URL), ("tpex", TPEX_EQUITIES_URL)):
-                rows = fetch_data(url)
+                rows = _stream_isin(url)
                 print(f"WARR: universe {market} {len(rows)} rows", flush=True)
                 for row in rows:
                     merged[row.code] = row
+            # Hand the freed lxml arenas back to the OS while still inside the
+            # measured block, so MEM: rss_after reflects the trimmed floor.
+            _malloc_trim()
         if not merged:
             print("WARR: universe fetch returned nothing — keeping fallback", flush=True)
             return
