@@ -9,6 +9,8 @@ id is simply omitted when there is no request.
 Like memlog, every helper swallows its own errors — a logging fault must never
 break the work being logged.
 """
+import threading
+import time
 import uuid
 
 from flask import g, has_request_context
@@ -33,6 +35,39 @@ def log(prefix, msg):
         print(f"{prefix}: [{rid}] {msg}" if rid else f"{prefix}: {msg}", flush=True)
     except Exception:
         pass
+
+
+_once_lock = threading.Lock()
+_once_seen: dict = {}  # key -> epoch of the last line logged under it
+ONCE_TTL = 300
+
+
+def log_once(prefix, msg, key):
+    """log(), but at most once per request under `key`.
+
+    For facts about process-wide state (which universe is in effect) that hold
+    for every call in a request: the hot paths ask repeatedly, and the same
+    line thirty times is noise, not information. Off the request path there is
+    no request to scope to, so those callers are rate-limited to ONCE_TTL.
+    """
+    try:
+        if has_request_context():
+            seen = getattr(g, "log_once_seen", None)
+            if seen is None:
+                seen = set()
+                g.log_once_seen = seen
+            if key in seen:
+                return
+            seen.add(key)
+        else:
+            now = time.time()
+            with _once_lock:
+                if now - _once_seen.get(key, 0) < ONCE_TTL:
+                    return
+                _once_seen[key] = now
+    except Exception:
+        pass  # fail open: a broken guard must not swallow the line
+    log(prefix, msg)
 
 
 def redact(secret, keep=6):

@@ -43,11 +43,37 @@ app.jinja_env.auto_reload = True
 _LOG_SKIP_PATHS = {"/healthz", "/favicon.ico"}
 # Params worth a completion line's worth of context, in the order they read best.
 _LOG_PARAMS = ("stock_codes", "option_type", "strategy", "kind", "period")
+# The paths are historical and say nothing about the work behind them (/fetch is
+# warrants, /us_options is the US chain scan). Only the routes that do real data
+# work are named here; anything else logs its bare path, as before.
+_ROUTE_LABELS = {
+    "/fetch": "warrants",
+    "/download": "warrants csv",
+    "/fetch_options": "tw options",
+    "/download_options": "tw options csv",
+    "/us_options": "us options",
+    "/iv_surface": "iv surface",
+    "/iv_surface_options": "iv surface (options)",
+    "/adr_premium": "adr premium",
+    "/adr_premium_scenario": "adr premium scenario",
+    "/us_option_match": "us/tw match",
+    "/us_option_match_csv": "us/tw match csv",
+    "/tw_us_option_match": "tw/us match",
+    "/tw_us_option_match_csv": "tw/us match csv",
+    "/arb_finder": "arb scan",
+    "/arb_finder_csv": "arb scan csv",
+}
 
 
 def _log_skip():
     p = request.path
     return p in _LOG_SKIP_PATHS or p.startswith("/static/")
+
+
+def _route_label():
+    """' (warrants)' for a named route, '' for anything else."""
+    label = _ROUTE_LABELS.get(request.path)
+    return f" ({label})" if label else ""
 
 
 def _param_summary():
@@ -75,7 +101,10 @@ def _log_request_start():
         return
     g.log_id = applog.new_id()
     g.log_t0 = time.time()
-    applog.log("REQ", f"{request.method} {request.path} start{_param_summary()}")
+    applog.log(
+        "REQ",
+        f"{request.method} {request.path}{_route_label()} start{_param_summary()}",
+    )
 
 
 def _log_request_end(status):
@@ -92,7 +121,7 @@ def _log_request_end(status):
         extra += f" rows={g.log_rows}"
     applog.log(
         "REQ",
-        f"{request.method} {request.path} {status} "
+        f"{request.method} {request.path}{_route_label()} {status} "
         f"in {time.time() - getattr(g, 'log_t0', time.time()):.1f}s{extra}",
     )
 

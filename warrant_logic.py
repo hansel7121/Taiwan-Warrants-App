@@ -385,7 +385,7 @@ def refresh_warrant_universe():
     try:
         # Sequential, not parallel: two lxml trees over ~31k rows at once is the
         # largest memory spike in the process and the host caps at 512 MB.
-        print("WARR: universe fetch starting (slow, several minutes)", flush=True)
+        print("WARR: universe fetch starting (~1 min)", flush=True)
         t0 = time.time()
         with memlog.measure("warrant_universe"):
             merged = {}
@@ -453,10 +453,29 @@ def _universe():
     """Fresh ISIN listing if we have one, else the bundled twstock snapshot.
 
     A TWSE outage must degrade to today's behaviour, never to an empty universe.
+
+    Falling back is otherwise invisible: the only trace is a code count nobody
+    can read as stale unless they already know both numbers, so say it outright.
+    The happy path stays silent — 'fetching N codes' already covers it.
     """
+    now = time.time()
     with _universe_lock:
-        if _universe_codes and time.time() - _universe_ts < UNIVERSE_TTL:
+        if _universe_codes and now - _universe_ts < UNIVERSE_TTL:
             return _universe_codes
+        if _universe_fetching and now - _universe_fetch_started < UNIVERSE_FETCH_STALL:
+            why = "scrape in flight"
+        elif not _universe_fetch_started:
+            why = "no scrape yet"
+        elif _universe_ts:
+            why = "last scrape expired"
+        else:
+            why = "last scrape failed"
+    applog.log_once(
+        "WARR",
+        f"universe stale ({why}) — using bundled twstock snapshot "
+        f"({len(twstock.codes)} codes)",
+        "universe_fallback",
+    )
     return twstock.codes
 
 
