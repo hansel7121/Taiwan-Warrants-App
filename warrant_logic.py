@@ -5,6 +5,7 @@ from twstock.codes.fetch import (
     TPEX_EQUITIES_URL,
 )
 import requests
+import codecs
 import ctypes
 import ctypes.util
 from io import BytesIO
@@ -409,11 +410,23 @@ def _stream_isin(url):
     rows = []
     typ = ""
     first = True
-    # encoding must be pinned: with html=True, lxml otherwise re-sniffs the
-    # page's meta charset, mis-decodes the Chinese to latin-1, and yields zero
-    # usable rows. This is the #1 failure mode of a naive iterparse here.
+    # The ISIN listing is served as Big5/MS950 (its Content-Type charset) with
+    # no <meta> charset. fetch_data decodes it through requests' r.text, which
+    # honours the header charset (r.encoding) and only falls back to a chardet
+    # sniff (r.apparent_encoding) when the header omits it — so mirror that
+    # resolution exactly. A pinned "utf-8" mangles the ideographic space in each
+    # "code　name" cell into U+FFFD, so make_row_tuple's split("　") returns
+    # a single field and unpacking raises "not enough values to unpack (expected
+    # 2, got 1)" on the very first data row. libxml2 needs an encoding name it
+    # recognises, so normalise via the Python codec registry (MS950 -> cp950,
+    # which it accepts); anything it can't resolve degrades to utf-8.
+    enc = r.encoding or r.apparent_encoding
+    try:
+        enc = codecs.lookup(enc).name
+    except (LookupError, TypeError):
+        enc = "utf-8"
     context = etree.iterparse(BytesIO(r.content), html=True,
-                              encoding="utf-8", tag="tr")
+                              encoding=enc, tag="tr")
     for _event, elem in context:
         if first:
             # The column-header <tr> (labels like 有價證券代號及名稱): fetch_data
