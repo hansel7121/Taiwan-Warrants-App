@@ -397,30 +397,51 @@ def _malloc_trim():
         pass
 
 
-def _stream_isin(url):
+def _stream_isin(url, prog_band=None):
     """Stream-parse an ISIN listing into twstock ROW tuples without a full DOM.
 
     iterparse over <tr>, clearing each row as it closes, holds only one row at a
     time (twstock's fetch_data builds one large lxml tree instead). Output is the
     identical ROW list fetch_data returns (same make_row_tuple, same header/type
     handling), so nothing downstream changes.
+
+    The body is downloaded in chunks so the progress bar climbs smoothly with
+    bytes received (the download dominates the wall time). ``prog_band`` is
+    ``(lo, hi, expected_bytes)``: progress sweeps lo→hi as the download lands
+    (using Content-Length when the server sends it, else expected_bytes), then
+    pins at hi once parsed.
     """
+    global _universe_progress
     r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"},
-                     verify=False, timeout=60)
+                     verify=False, timeout=60, stream=True)
     r.raise_for_status()
-    rows = []
-    typ = ""
-    first = True
-    # The ISIN listing is Big5/MS950 with no <meta> charset. Mirror requests'
-    # resolution (header charset, else a chardet sniff) and normalise through the
-    # Python codec registry to a name libxml2 accepts (MS950 -> cp950); a pinned
-    # utf-8 would mangle the ideographic space separating "code　name".
-    enc = r.encoding or r.apparent_encoding
+    # The ISIN listing is Big5/MS950. In stream mode r.apparent_encoding would
+    # force-load the body (defeating streaming), so take the header charset and
+    # fall back to cp950 (what these pages always are). Normalise through the
+    # codec registry to a name libxml2 accepts; a pinned utf-8 would mangle the
+    # ideographic space separating "code　name".
+    enc = r.encoding or "cp950"
     try:
         enc = codecs.lookup(enc).name
     except (LookupError, TypeError):
-        enc = "utf-8"
-    context = etree.iterparse(BytesIO(r.content), html=True, encoding=enc, tag="tr")
+        enc = "cp950"
+    lo, hi, exp = prog_band or (None, None, None)
+    total = int(r.headers.get("Content-Length") or 0) or (exp or 0)
+    buf = BytesIO()
+    got = 0
+    for chunk in r.iter_content(65536):
+        if not chunk:
+            continue
+        buf.write(chunk)
+        if prog_band:
+            got += len(chunk)
+            frac = min(1.0, got / total) if total else 0.0
+            with _universe_lock:
+                _universe_progress = int(lo + (hi - lo) * frac)
+    rows = []
+    typ = ""
+    first = True
+    context = etree.iterparse(BytesIO(buf.getvalue()), html=True, encoding=enc, tag="tr")
     for _event, elem in context:
         if first:
             first = False           # skip the column-header <tr>
@@ -435,6 +456,9 @@ def _stream_isin(url):
         if parent is not None:
             while elem.getprevious() is not None:
                 del parent[0]
+    if prog_band:
+        with _universe_lock:
+            _universe_progress = hi
     return rows
 
 
@@ -453,13 +477,15 @@ def refresh_warrant_universe():
         t0 = time.time()
         merged = {}
         # Sequential, not parallel: two lxml trees at once is the biggest memory
-        # spike in the process. Each market bumps the progress bar as it lands.
-        for _market, url, pct in (("twse", TWSE_EQUITIES_URL, 55),
-                                  ("tpex", TPEX_EQUITIES_URL, 92)):
-            for row in _stream_isin(url):
+        # spike in the process. Each market owns a progress band and sweeps it
+        # smoothly by bytes downloaded (expected sizes are the no-Content-Length
+        # fallback: TWSE ~7.7MB, TPEX ~2.6MB).
+        for _market, url, lo, hi, exp in (
+            ("twse", TWSE_EQUITIES_URL, 4, 64, 7_700_000),
+            ("tpex", TPEX_EQUITIES_URL, 64, 98, 2_600_000),
+        ):
+            for row in _stream_isin(url, prog_band=(lo, hi, exp)):
                 merged[row.code] = row
-            with _universe_lock:
-                _universe_progress = pct
         _malloc_trim()
         if not merged:
             with _universe_lock:
