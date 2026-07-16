@@ -1,5 +1,15 @@
 import twstock
+from twstock.codes.fetch import (
+    make_row_tuple,
+    TWSE_EQUITIES_URL,
+    TPEX_EQUITIES_URL,
+)
 import requests
+import codecs
+import ctypes
+import ctypes.util
+from io import BytesIO
+from lxml import etree
 import pandas as pd
 import urllib3
 from datetime import datetime
@@ -10,6 +20,7 @@ import json
 import re
 import asyncio
 import threading
+import time
 import os
 import sys
 
@@ -348,6 +359,135 @@ def build_warrant_df(cmoney_results, compute_iv=True):
     return pd.DataFrame(rows)[COL_ORDER]
 
 
+# ── Listed-security universe (live ISIN re-scrape) ───────────────────────────
+# twstock.codes is a snapshot bundled into the installed package at release
+# time — months stale in practice, and it carries no expiry field, so it both
+# MISSES newly issued warrants and KEEPS long-expired ones. The ISIN listing it
+# was scraped from enumerates *currently listed* securities, so re-scraping it
+# live fixes both halves at once. Held in memory only (no site-packages writes).
+# The scrape runs in a background thread; the warrant search falls back to the
+# bundled twstock snapshot until the first live scrape lands, so it never blocks.
+_universe_codes: dict = {}   # code -> twstock fetch.ROW (same shape as twstock.codes values)
+_universe_ts = 0.0
+_universe_fetching = False
+_universe_fetch_started = 0.0
+_universe_lock = threading.Lock()
+UNIVERSE_TTL = 86400          # re-scrape at most once a day
+UNIVERSE_FETCH_STALL = 1800   # age out a stuck in-flight scrape after 30 min
+
+
+def _malloc_trim():
+    # glibc keeps freed lxml arenas out of the OS's hands; nudge it to release
+    # them so the parse transient doesn't become a permanent RSS floor. Linux/
+    # glibc only — a harmless no-op on macOS.
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=False)
+        if hasattr(libc, "malloc_trim"):
+            libc.malloc_trim(0)
+    except Exception:
+        pass
+
+
+def _stream_isin(url):
+    """Stream-parse an ISIN listing into twstock ROW tuples without a full DOM.
+
+    iterparse over <tr>, clearing each row as it closes, holds only one row at a
+    time (twstock's fetch_data builds one large lxml tree instead). Output is the
+    identical ROW list fetch_data returns (same make_row_tuple, same header/type
+    handling), so nothing downstream changes.
+    """
+    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"},
+                     verify=False, timeout=60)
+    r.raise_for_status()
+    rows = []
+    typ = ""
+    first = True
+    # The ISIN listing is Big5/MS950 with no <meta> charset. Mirror requests'
+    # resolution (header charset, else a chardet sniff) and normalise through the
+    # Python codec registry to a name libxml2 accepts (MS950 -> cp950); a pinned
+    # utf-8 would mangle the ideographic space separating "code　name".
+    enc = r.encoding or r.apparent_encoding
+    try:
+        enc = codecs.lookup(enc).name
+    except (LookupError, TypeError):
+        enc = "utf-8"
+    context = etree.iterparse(BytesIO(r.content), html=True, encoding=enc, tag="tr")
+    for _event, elem in context:
+        if first:
+            first = False           # skip the column-header <tr>
+        else:
+            cells = [x.text for x in elem.iter()]
+            if len(cells) == 4:
+                typ = cells[2].strip(" ")   # section header carrying the security type
+            else:
+                rows.append(make_row_tuple(typ, cells))
+        elem.clear()
+        parent = elem.getparent()
+        if parent is not None:
+            while elem.getprevious() is not None:
+                del parent[0]
+    return rows
+
+
+def refresh_warrant_universe():
+    """Re-scrape the TWSE + TPEX ISIN listings and swap them into the universe."""
+    global _universe_codes, _universe_ts, _universe_fetching, _universe_fetch_started
+    with _universe_lock:
+        if _universe_fetching and time.time() - _universe_fetch_started < UNIVERSE_FETCH_STALL:
+            return
+        _universe_fetching = True
+        _universe_fetch_started = time.time()
+    try:
+        t0 = time.time()
+        merged = {}
+        # Sequential, not parallel: two lxml trees at once is the biggest memory
+        # spike in the process.
+        for _market, url in (("twse", TWSE_EQUITIES_URL), ("tpex", TPEX_EQUITIES_URL)):
+            for row in _stream_isin(url):
+                merged[row.code] = row
+        _malloc_trim()
+        if not merged:
+            return
+        with _universe_lock:
+            _universe_codes = merged
+            _universe_ts = time.time()
+        fresh_w = sum(1 for v in merged.values() if "權證" in v.type)
+        print(f"WARR: universe scraped {len(merged)} codes, {fresh_w} warrants "
+              f"in {time.time() - t0:.1f}s", flush=True)
+    except Exception as e:
+        print(f"WARR: universe scrape failed: {e} — using bundled twstock codes", flush=True)
+    finally:
+        with _universe_lock:
+            _universe_fetching = False
+
+
+def _ensure_universe_fetch():
+    """Kick a background scrape if the universe is stale and none is running.
+
+    Never blocks: the warrant search keeps being served off the bundled twstock
+    fallback until the fresh universe lands.
+    """
+    now = time.time()
+    with _universe_lock:
+        if _universe_codes and now - _universe_ts < UNIVERSE_TTL:
+            return
+        if _universe_fetching and now - _universe_fetch_started < UNIVERSE_FETCH_STALL:
+            return
+    threading.Thread(target=refresh_warrant_universe, daemon=True).start()
+
+
+def _universe():
+    """Fresh ISIN listing if we have one, else the bundled twstock snapshot.
+
+    A TWSE outage degrades to today's behaviour, never to an empty universe.
+    """
+    now = time.time()
+    with _universe_lock:
+        if _universe_codes and now - _universe_ts < UNIVERSE_TTL:
+            return _universe_codes
+    return twstock.codes
+
+
 def fetch_warrants(
     stock_codes,
     option_type="All",
@@ -359,6 +499,10 @@ def fetch_warrants(
     compute_iv=True,
 ):
     today = datetime.today()
+    # Resolve the warrant universe live (falls back to bundled twstock until the
+    # first background scrape lands) so newly issued warrants are never missed.
+    _ensure_universe_fetch()
+    codes = _universe()
 
     if option_type == "Call":
         name_filter = "購"
@@ -376,7 +520,7 @@ def fetch_warrants(
     # underlying only if no *longer* real-security name (e.g. 長榮鋼, 長榮航) also
     # prefixes the warrant name. This replaces a hand-maintained issuer-char
     # whitelist that silently dropped every warrant of any issuer not listed.
-    real_names = [v.name for v in twstock.codes.values() if "權證" not in v.type]
+    real_names = [v.name for v in codes.values() if "權證" not in v.type]
 
     def _make_matcher(name):
         # Longer real-security names that would also claim this warrant name.
@@ -391,7 +535,7 @@ def fetch_warrants(
 
     all_codes = []
     for stock_code in stock_codes:
-        stock_info = twstock.codes.get(stock_code, None)
+        stock_info = codes.get(stock_code, None)
         if stock_info is None:
             continue
         name = stock_info.name
@@ -401,9 +545,9 @@ def fetch_warrants(
         # authoritative CommKey check below drops any wrong-underlying strays, so
         # the alias here only needs to be permissive enough to fetch them.
         aliases = WARRANT_NAME_ALIASES.get(stock_code, [])
-        codes = [
+        matched = [
             k
-            for k, v in twstock.codes.items()
+            for k, v in codes.items()
             if "權證" in v.type
             and (name_matches(v.name)
                  or v.name.startswith(stock_code)
@@ -411,7 +555,7 @@ def fetch_warrants(
             and (name_filter is None or name_filter in v.name)
             and datetime.strptime(v.start, "%Y/%m/%d") <= today
         ]
-        all_codes.extend(codes)
+        all_codes.extend(matched)
 
     all_codes = list(set(all_codes))
 
