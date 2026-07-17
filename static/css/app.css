@@ -1,0 +1,328 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #0d0f16;
+  --panel:    #13161f;
+  --surface:  #1a1d2a;
+  --border:   #252836;
+  --accent:   #4f8ef7;
+  --accent2:  #3a6fd8;
+  --success:  #22c55e;
+  --danger:   #ef4444;
+  --text:     #e2e8f0;
+  --muted:    #8b90a0;
+  --call:     #f87171;
+  --put:      #4ade80;
+  --radius:   8px;
+}
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  padding: 0;
+  font-size: 13px;
+}
+
+/* ── Header ── */
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 24px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--text);
+}
+header .badge {
+  font-size: 11px;
+  background: var(--accent);
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+}
+
+/* ── Tabs ── */
+.tab-bar {
+  display: flex;
+  gap: 2px;
+  padding: 12px 24px 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.tab-bar button {
+  padding: 8px 18px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  font-weight: 500;
+  transition: color 0.15s, border-color 0.15s;
+}
+.tab-bar button:hover { color: var(--text); }
+.tab-bar button.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* ── Portfolio sub-tabs ── */
+.pfsub-btn {
+  background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--muted); font-family: inherit; font-size: 13px; font-weight: 600;
+  padding: 8px 14px; cursor: pointer; margin-bottom: -1px;
+}
+.pfsub-btn:hover { color: var(--text); }
+.pfsub-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* ── Main layout ── */
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+main { padding: 20px 24px; }
+
+/* ── Filter panel ── */
+.filters {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  display: flex;
+  gap: 20px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+.filters input,
+.filters select {
+  padding: 7px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s;
+  min-width: 90px;
+}
+.filters input:focus,
+.filters select:focus { border-color: var(--accent); }
+
+/* ── Stock multi-select ── */
+.stock-select {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.stock-select > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+.stock-select select {
+  height: 150px;
+  min-width: 210px;
+  padding: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+.stock-select select:focus { border-color: var(--accent); }
+
+.btn-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+/* ── Buttons ── */
+button.sm {
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+button.sm:hover { background: var(--border); }
+
+button.primary {
+  padding: 8px 18px;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  font-weight: 500;
+  background: var(--accent);
+  color: #fff;
+  transition: background 0.15s;
+}
+button.primary:hover { background: var(--accent2); }
+
+button.success {
+  padding: 8px 18px;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  font-weight: 500;
+  background: var(--success);
+  color: #fff;
+  transition: opacity 0.15s;
+}
+button.success:hover { opacity: 0.85; }
+
+/* ── Add-stock form ── */
+#addStockForm {
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 4px;
+}
+#addStockForm input {
+  padding: 5px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+}
+#addStockForm input:focus { border-color: var(--accent); }
+
+/* ── Sort buttons ── */
+.sort-btns {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.sort-btns button {
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.sort-btns button:hover { color: var(--text); border-color: var(--accent); }
+
+/* ── Status ── */
+#arb-status,
+#opt-status,
+#status, #iv-status {
+  margin: 8px 0;
+  color: var(--muted);
+  font-size: 12px;
+  min-height: 18px;
+}
+
+/* ── Table ── */
+#arb-tableContainer,
+#opt-tableContainer,
+#tableContainer {
+  max-height: calc(100vh - 310px);
+  overflow-y: auto;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+#tableContainer::-webkit-scrollbar { width: 6px; height: 6px; }
+#tableContainer::-webkit-scrollbar-track { background: var(--bg); }
+#tableContainer::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+}
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--surface);
+  color: var(--muted);
+  padding: 9px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  transition: color 0.15s;
+}
+thead th:first-child,
+thead th:nth-child(2),
+thead th:nth-child(3) { text-align: left; }
+thead th:hover { color: var(--text); }
+
+td {
+  padding: 7px 10px;
+  font-size: 12.5px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  white-space: nowrap;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+td:first-child, td:nth-child(2), td:nth-child(3) { text-align: left; }
+tbody tr:hover { background: var(--surface); }
+tbody tr[onclick]:hover { background: #1e2535; }
+tbody tr:last-child td { border-bottom: none; }
+
+.call { color: var(--call); font-weight: 600; }
+.put  { color: var(--put);  font-weight: 600; }
+
+/* ── IV plot ── */
+#iv-plot {
+  width: 100%;
+  height: 680px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+/* ── Action buttons group ── */
+.action-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
