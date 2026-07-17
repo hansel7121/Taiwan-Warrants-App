@@ -378,7 +378,7 @@ def _live_premium_fx(stock_code):
 
 
 def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
-                     compute_iv=True):
+                     compute_iv=True, keep_noniv=False):
     """Return a DataFrame of UMC options priced in TWD per Taiwan share.
 
     Columns mirror options_logic.fetch_options so the same matching code can
@@ -392,7 +392,7 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
     # The cache holds the FULL chain (all types, all expiries); the requested
     # option_type/day-range are filter views applied on the way out, so a
     # background warm-up serves every filter combination.
-    cache_key = (stock_code, compute_iv)
+    cache_key = (stock_code, compute_iv, keep_noniv)
     hit = _cache.get(cache_key)
     if hit and time.time() - hit[0] < _CACHE_TTL:
         applog.log(
@@ -473,9 +473,13 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
                     if np.isnan(iv_ask) and not np.isnan(iv_bid):
                         iv_ask = iv_bid
                     if np.isnan(iv_ask):
-                        continue
-
-                    delta = bs_delta(adr, K_usd, T, R_US, iv_ask, 1.0, is_put)
+                        # keep_noniv (superset-with-IV mode): keep the row with
+                        # all IV-derived metrics NaN instead of dropping it.
+                        if not keep_noniv:
+                            continue
+                        iv_ask = iv_bid = delta = np.nan
+                    else:
+                        delta = bs_delta(adr, K_usd, T, R_US, iv_ask, 1.0, is_put)
                 else:
                     # Arb finder does not use IV/delta — skip the solve so an
                     # option is never dropped just because IV wouldn't converge.

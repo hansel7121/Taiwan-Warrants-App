@@ -150,7 +150,8 @@ def _clean_num(series, fill=np.nan):
     )
 
 
-def _parse_and_compute(raw_df, underlying_price, exercise_ratio, compute_iv=True):
+def _parse_and_compute(raw_df, underlying_price, exercise_ratio, compute_iv=True,
+                       keep_noniv=False):
     df = raw_df.copy()
     df.columns = df.columns.str.strip()
 
@@ -249,10 +250,15 @@ def _parse_and_compute(raw_df, underlying_price, exercise_ratio, compute_iv=True
             if np.isnan(iv_ask) and not np.isnan(iv_bid):
                 iv_ask = iv_bid
             if np.isnan(iv_ask):
-                continue
-
-            delta = bs_delta(S, K, T, R, iv_ask, 1.0, is_put)
-            leverage = calc_real_leverage(S, abs(delta), ask)
+                # keep_noniv (superset-with-IV mode): keep the row with all
+                # IV-derived metrics NaN instead of dropping it, mirroring the
+                # compute_iv=False null assignment for this one row.
+                if not keep_noniv:
+                    continue
+                iv_ask = iv_bid = delta = leverage = np.nan
+            else:
+                delta = bs_delta(S, K, T, R, iv_ask, 1.0, is_put)
+                leverage = calc_real_leverage(S, abs(delta), ask)
         else:
             # Arb finder does not use IV/delta/leverage — skip the solve so an
             # option is never dropped just because IV wouldn't converge.
@@ -384,7 +390,7 @@ def _fetch_mis_quotes(cid, kind):
     return rows
 
 
-def fetch_options_mis(code, compute_iv=True):
+def fetch_options_mis(code, compute_iv=True, keep_noniv=False):
     """Intraday (~20 min delayed) TW option chain from TAIFEX MIS, in the same
     schema as _parse_and_compute so callers are unchanged. Raises on failure."""
     cfg = COMMODITY_MAP[code]
@@ -453,9 +459,14 @@ def fetch_options_mis(code, compute_iv=True):
             if np.isnan(iv_ask) and not np.isnan(iv_bid):
                 iv_ask = iv_bid
             if np.isnan(iv_ask):
-                continue
-            delta = bs_delta(spot, K, T, r_free, iv_ask, ratio, is_put)
-            leverage = calc_real_leverage(spot, abs(delta), ask)
+                # keep_noniv (superset-with-IV mode): keep the row with all
+                # IV-derived metrics NaN instead of dropping it.
+                if not keep_noniv:
+                    continue
+                iv_ask = iv_bid = delta = leverage = np.nan
+            else:
+                delta = bs_delta(spot, K, T, r_free, iv_ask, ratio, is_put)
+                leverage = calc_real_leverage(spot, abs(delta), ask)
         else:
             iv_ask = iv_bid = delta = leverage = np.nan
 
@@ -498,6 +509,7 @@ def fetch_options(
     min_leverage=0,
     min_volume=0,
     compute_iv=True,
+    keep_noniv=False,
 ):
     dfs = []
     errors = []
@@ -510,7 +522,7 @@ def fetch_options(
         df = None
         # Primary: MIS intraday quotes. Fallback: EOD data-download file.
         try:
-            df = fetch_options_mis(code, compute_iv=compute_iv)
+            df = fetch_options_mis(code, compute_iv=compute_iv, keep_noniv=keep_noniv)
             applog.log("OPT", f"{code} source=MIS {len(df)} contracts")
         except Exception as e:
             errors.append(f"{code}: MIS {e}")
@@ -522,7 +534,8 @@ def fetch_options(
             try:
                 S = _get_spot(cfg["ticker"])
                 raw = _fetch_taifex(cfg["commodity_ids"])
-                df = _parse_and_compute(raw, S, cfg["exercise_ratio"], compute_iv=compute_iv)
+                df = _parse_and_compute(raw, S, cfg["exercise_ratio"], compute_iv=compute_iv,
+                                        keep_noniv=keep_noniv)
                 applog.log("OPT", f"{code} source=EOD {len(df)} contracts spot={S}")
             except Exception as e:
                 errors.append(f"{code}: EOD {e}")

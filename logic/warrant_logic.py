@@ -251,7 +251,7 @@ def get_cmoney_prices(codes):
     return results
 
 
-def build_warrant_df(cmoney_results, compute_iv=True):
+def build_warrant_df(cmoney_results, compute_iv=True, keep_noniv=False):
     r_free_default = 0.02
     rows = []
 
@@ -298,14 +298,21 @@ def build_warrant_df(cmoney_results, compute_iv=True):
                 )
 
                 if np.isnan(iv_ask):
-                    continue
-                if np.isnan(iv_bid):
-                    iv_bid = iv_ask
+                    # keep_noniv (superset-with-IV mode): keep the row instead of
+                    # dropping it, with every IV-derived metric NaN — mirrors the
+                    # compute_iv=False null assignment for this one row so the row
+                    # SET equals the superset while converged rows still carry IV.
+                    if not keep_noniv:
+                        continue
+                    iv_ask = iv_bid = calc_delta = calc_leverage = np.nan
+                else:
+                    if np.isnan(iv_bid):
+                        iv_bid = iv_ask
 
-                calc_delta = bs_delta(
-                    underlying_price, strike, T, r_free, iv_ask, exercise_ratio, is_put
-                )
-                calc_leverage = calc_real_leverage(underlying_price, abs(calc_delta), ask)
+                    calc_delta = bs_delta(
+                        underlying_price, strike, T, r_free, iv_ask, exercise_ratio, is_put
+                    )
+                    calc_leverage = calc_real_leverage(underlying_price, abs(calc_delta), ask)
             else:
                 # Arb finder does not use IV/delta/leverage — skip the solve so a
                 # leg is never dropped just because IV wouldn't converge, and no
@@ -702,6 +709,7 @@ def fetch_warrants(
     max_tv_pct=100.0,
     min_volume=0,
     compute_iv=True,
+    keep_noniv=False,
 ):
     if isinstance(stock_codes, str):
         stock_codes = [stock_codes]
@@ -717,7 +725,7 @@ def fetch_warrants(
         applog.log("WARR", f"{codes_s} -> 0 rows (no warrants found)")
         return pd.DataFrame(), "No warrants found", meta
 
-    df = build_warrant_df(cmoney_results, compute_iv=compute_iv)
+    df = build_warrant_df(cmoney_results, compute_iv=compute_iv, keep_noniv=keep_noniv)
 
     if df.empty:
         applog.log(
