@@ -29,3 +29,139 @@ alter table custom_stocks enable row level security;
 alter table allowed_users enable row level security;
 create policy "own rows" on portfolio for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 create policy "own row" on custom_stocks for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- SERVER-ONLY market-data tables (Supabase market-data migration, Phase 2).
+--
+-- These are written and read ONLY by the server using the service-role key,
+-- which BYPASSES row level security. Following the allowed_users precedent
+-- above, RLS is enabled with NO policy: that denies every anon/authenticated
+-- client (the browser) while the service role still has full access. Never add
+-- a policy here — a policy would expose the raw market snapshots to end users.
+--
+-- Snapshot model: each category (warrants / tw_options / us_options /
+-- warrant_universe) is a set of rows tagged by batch_id. md_batches holds the
+-- current-generation batch_id per category; a writer inserts a whole new batch,
+-- flips the md_batches pointer, then deletes the old batch. supabase-py has no
+-- transactions, so the pointer flip is the atomicity mechanism: a concurrent
+-- reader always resolves one complete batch, never a half-written one.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- Current-generation batch pointer, one row per category.
+create table if not exists md_batches (
+  category text primary key,
+  batch_id uuid not null,
+  created_at timestamptz not null default now()
+);
+
+-- Warrant snapshot rows (columns from logic/warrant_logic.py COL_ORDER).
+create table if not exists md_warrants (
+  batch_id uuid not null,
+  warrant_code text,
+  warrant_name text,
+  underlying_code text,
+  type text,
+  underlying_price double precision,
+  ask double precision,
+  bid double precision,
+  ask_qty double precision,
+  bid_qty double precision,
+  days_to_expiry integer,
+  strike double precision,
+  exercise_ratio double precision,
+  volume double precision,
+  time_value double precision,
+  time_value_pct double precision,
+  time_value_am double precision,
+  iv_ask double precision,
+  iv_bid double precision,
+  delta_calc double precision,
+  leverage_calc double precision
+);
+create index if not exists md_warrants_batch_code_idx on md_warrants (batch_id, underlying_code);
+
+-- Taiwan option snapshot rows: UNION of the MIS intraday row (fetch_options_mis)
+-- and the EOD row (_parse_and_compute) in logic/options_logic.py. EOD rows lack
+-- bid_size / ask_size / quote_time, so those are nullable. strike is numeric
+-- (not integer): MIS single-stock-option strikes can be fractional.
+create table if not exists md_tw_options (
+  batch_id uuid not null,
+  stock_code text,
+  source text,
+  contract text,
+  type text,
+  underlying_price double precision,
+  ask double precision,
+  bid double precision,
+  days_to_expiry integer,
+  strike numeric,
+  exercise_ratio double precision,
+  bid_size integer,
+  ask_size integer,
+  volume integer,
+  oi integer,
+  time_value_am double precision,
+  iv_ask double precision,
+  iv_bid double precision,
+  delta_calc double precision,
+  leverage_calc double precision,
+  is_live boolean,
+  quote_time text
+);
+create index if not exists md_tw_options_batch_stock_idx on md_tw_options (batch_id, stock_code);
+
+-- US ADR option snapshot rows (columns from logic/us_options_logic.py
+-- fetch_us_options built row). No leverage_calc on this leg.
+create table if not exists md_us_options (
+  batch_id uuid not null,
+  stock_code text,
+  contract text,
+  type text,
+  underlying_price double precision,
+  strike double precision,
+  days_to_expiry integer,
+  bid double precision,
+  ask double precision,
+  iv_ask double precision,
+  iv_bid double precision,
+  delta_calc double precision,
+  volume integer,
+  oi integer,
+  is_live boolean,
+  strike_usd double precision,
+  bid_usd double precision,
+  ask_usd double precision,
+  adr_price double precision,
+  fx double precision
+);
+create index if not exists md_us_options_batch_stock_idx on md_us_options (batch_id, stock_code);
+
+-- Daily listed-warrant universe snapshot (written by the daily universe job).
+create table if not exists md_warrant_universe (
+  batch_id uuid not null,
+  code text,
+  name text,
+  start date,
+  market text
+);
+create index if not exists md_warrant_universe_batch_code_idx on md_warrant_universe (batch_id, code);
+
+-- Single-row CMoney API token store (survives restarts). NOT a snapshot
+-- category — a plain one-row upsert keyed on id=1.
+create table if not exists cmoney_key (
+  id integer primary key default 1,
+  key text,
+  updated_at timestamptz
+);
+
+alter table md_batches enable row level security;
+alter table md_warrants enable row level security;
+alter table md_tw_options enable row level security;
+alter table md_us_options enable row level security;
+alter table md_warrant_universe enable row level security;
+alter table cmoney_key enable row level security;
+
+-- The service role bypasses RLS but still needs table-level privileges. Tables
+-- created via the SQL editor do not always inherit the default grants, so grant
+-- explicitly (only to service_role — anon/authenticated stay blocked by RLS).
+grant all on md_batches, md_warrants, md_tw_options, md_us_options, md_warrant_universe, cmoney_key to service_role;
