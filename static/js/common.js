@@ -63,6 +63,79 @@ function asOfLabel(data) {
   return ` · ${age}${data.cached === false ? " (live fetch)" : ""}`;
 }
 
+// Live-ticking "updated N min ago". A fetch handler sets the status via
+// setStatusWithAge, which remembers the count prefix + the data object per
+// scanner. A single interval then re-renders just the age suffix every 30s,
+// so the minute count climbs without re-fetching. Keyed by scanner name.
+
+window._lastAsOf = window._lastAsOf || {};
+
+function setStatusWithAge(key, elId, base, data) {
+  window._lastAsOf[key] = { elId, base, data };
+  const el = document.getElementById(elId);
+  if (el) el.textContent = base + asOfLabel(data);
+}
+
+function _tickAges() {
+  for (const key in window._lastAsOf) {
+    const rec = window._lastAsOf[key];
+    if (!rec || !rec.data) continue;
+    const el = document.getElementById(rec.elId);
+    // Skip missing or hidden (inactive-tab) status lines, and never clobber a
+    // transient message (e.g. "Fetching…") that replaced the count line.
+    if (!el || el.offsetParent === null) continue;
+    if (!el.textContent.startsWith(rec.base)) continue;
+    el.textContent = rec.base + asOfLabel(rec.data);
+  }
+}
+
+setInterval(_tickAges, 30000);
+
+// "Refresh now" helper shared by both scanner tabs. Kicks the backend's
+// debounced background re-scrape, then polls the tab's own fetch until the
+// snapshot's as_of advances (so the table auto-updates when the scrape lands)
+// or a 60s cap elapses. Always re-enables the button, even on error.
+
+async function refreshNow(kind, statusEl, btn, onDone) {
+  if (!statusEl || !btn) return;
+  const origLabel = btn.textContent;
+  const wasDisabled = btn.disabled;
+  // Pre-refresh as_of, read from the last stored fetch for this status line.
+  let prevAsOf = null;
+  for (const k in window._lastAsOf) {
+    const rec = window._lastAsOf[k];
+    if (rec && rec.elId === statusEl.id && rec.data) { prevAsOf = rec.data.as_of || null; break; }
+  }
+  btn.disabled = true;
+  btn.textContent = "Refreshing…";
+  statusEl.textContent = "Refreshing market data… (up to ~30s)";
+  try {
+    const res = await api("/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind }),
+    });
+    const data = await res.json();
+    if (data && Array.isArray(data.skipped) && data.skipped.includes(kind)) {
+      statusEl.textContent = "A refresh is already running — showing latest.";
+    }
+    const prevMs = prevAsOf ? new Date(prevAsOf).getTime() : 0;
+    const deadline = Date.now() + 60000;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 4000));
+      let fresh;
+      try { fresh = await onDone(); } catch (e) { continue; }
+      const newAsOf = fresh && fresh.as_of;
+      if (newAsOf && new Date(newAsOf).getTime() > prevMs) break;
+    }
+  } catch (e) {
+    statusEl.textContent = "Refresh failed: " + (e && e.message ? e.message : e);
+  } finally {
+    btn.disabled = wasDisabled;
+    btn.textContent = origLabel;
+  }
+}
+
 function _saveView(k, v) { try { sessionStorage.setItem(k, v); } catch (e) {} }
 
 function _readView(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } }

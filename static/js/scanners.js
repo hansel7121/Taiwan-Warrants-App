@@ -116,9 +116,17 @@ async function fetchData() {
   });
   const data = await res.json();
   currentData = data.rows;
-  document.getElementById("status").textContent = `${data.count} warrants${asOfLabel(data)}`;
+  setStatusWithAge("warrants", "status", `${data.count} warrants`, data);
   document.getElementById("downloadBtn").style.display = "inline-block";
   renderTable(currentData);
+  return data;
+}
+
+function refreshWarrants() {
+  return refreshNow("warrants",
+    document.getElementById("status"),
+    document.getElementById("refreshWarrantsBtn"),
+    fetchData);
 }
 
 function renderTable(rows) {
@@ -382,9 +390,18 @@ async function fetchOptionsData() {
     return;
   }
   currentOptionsData = data.rows;
-  document.getElementById("opt-status").textContent = `${data.count} options${asOfLabel(data)}`;
+  setStatusWithAge("options", "opt-status", `${data.count} options`, data);
   document.getElementById("optDownloadBtn").style.display = "inline-block";
   renderOptionsTable(currentOptionsData);
+  return data;
+}
+
+function refreshOptions() {
+  const kind = _optMarket === "us" ? "us_options" : "tw_options";
+  return refreshNow(kind,
+    document.getElementById("opt-status"),
+    document.getElementById("refreshOptionsBtn"),
+    fetchOptionsData);
 }
 
 function renderOptionsTable(rows) {
