@@ -14,6 +14,7 @@ one complete batch (old or new), never an empty or half-written one.
 
 This module MAY import pandas (it is a market-data module).
 """
+import os
 import uuid
 from datetime import datetime, timezone
 
@@ -124,6 +125,28 @@ def read_snapshot(category, codes=None):
     if not df.empty and "batch_id" in df.columns:
         df = df.drop(columns=["batch_id"])
     return df, created_at
+
+
+def snapshot_enabled():
+    """True when readers should serve the Supabase snapshot first.
+
+    Gated on MARKET_SOURCE=supabase; read at call time so the env can be
+    toggled per call (the parity gate relies on this).
+    """
+    return os.environ.get("MARKET_SOURCE") == "supabase"
+
+
+def snapshot_as_of(category):
+    """Return the current batch's md_batches.created_at ISO string, or None."""
+    ptr = db._run(
+        lambda c: c.table("md_batches")
+        .select("created_at")
+        .eq("category", category)
+        .execute()
+    )
+    if not ptr.data:
+        return None
+    return ptr.data[0].get("created_at")
 
 
 def get_key():

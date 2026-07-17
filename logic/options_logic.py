@@ -1,11 +1,13 @@
 import io
 import re
 import time
+from datetime import datetime
 import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
 from services import applog
+from services import db_market
 from logic.warrant_logic import implied_vol, bs_delta, calc_real_leverage
 
 R = 0.01875  # Taiwan CBC benchmark rate
@@ -33,6 +35,16 @@ def data_as_of(stock_codes):
     MIS (intraday) entries are checked first since they are the primary
     source; EOD taifex entries only matter when MIS failed.
     """
+    # Snapshot mode: the freshness is the snapshot batch's created_at, returned
+    # as an epoch float so the route's _epoch_iso(...) still works.
+    if db_market.snapshot_enabled():
+        try:
+            iso = db_market.snapshot_as_of("tw_options")
+        except Exception:
+            iso = None
+        if iso:
+            return datetime.fromisoformat(iso).timestamp()
+        return None
     ts_list = []
     for code in stock_codes:
         cfg = COMMODITY_MAP.get(code)
@@ -501,6 +513,26 @@ def fetch_options_mis(code, compute_iv=True, keep_noniv=False):
     return pd.DataFrame(rows)
 
 
+def _apply_option_filters(result, option_type, min_days, max_days, min_leverage,
+                          min_volume):
+    """Post-concat option filter chain + final sort.
+
+    Pure filtering (day-range, min_leverage, min_volume, option_type) followed by
+    the canonical sort/reset. Shared by the live and supabase read paths so the
+    two produce identical frames.
+    """
+    result = result[
+        result["days_to_expiry"].between(int(min_days), int(max_days))
+    ]
+    if float(min_leverage) > 0:
+        result = result[result["leverage_calc"] >= float(min_leverage)]
+    if float(min_volume) > 0:
+        result = result[result["volume"] >= float(min_volume)]
+    if option_type != "All":
+        result = result[result["type"] == option_type]
+    return result.sort_values(["days_to_expiry", "strike"]).reset_index(drop=True)
+
+
 def fetch_options(
     stock_codes,
     option_type="All",
@@ -511,6 +543,36 @@ def fetch_options(
     compute_iv=True,
     keep_noniv=False,
 ):
+    # Snapshot-first read (MARKET_SOURCE=supabase). The stored snapshot is the
+    # superset-with-IV; compute_iv=True (scanner) drops non-converged-IV rows,
+    # compute_iv=False (arb) keeps the superset. Empty snapshot / read error
+    # falls through to the live path; a non-empty snapshot keeps the live
+    # raise-on-empty contract.
+    if db_market.snapshot_enabled():
+        snap = None
+        try:
+            snap, _as_of = db_market.read_snapshot("tw_options", codes=list(stock_codes))
+        except Exception as e:
+            applog.log("OPT", f"supabase read failed ({e}) — falling back to live")
+            snap = None
+        if snap is not None and not snap.empty:
+            if compute_iv:
+                snap = snap[snap["iv_ask"].notna()]
+            else:
+                # Live compute_iv=False emits NaN IV-derived metrics; blank the
+                # superset's stored values so the arb path (which branches on IV
+                # presence) matches the live arb frame exactly.
+                snap = snap.copy()
+                for _c in ("iv_ask", "iv_bid", "delta_calc", "leverage_calc"):
+                    if _c in snap.columns:
+                        snap[_c] = np.nan
+            result = _apply_option_filters(
+                snap, option_type, min_days, max_days, min_leverage, min_volume
+            )
+            if result.empty:
+                raise RuntimeError("No data returned")
+            return result
+
     dfs = []
     errors = []
     for code in stock_codes:
@@ -551,19 +613,13 @@ def fetch_options(
 
     result = pd.concat(dfs, ignore_index=True)
 
-    result = result[
-        result["days_to_expiry"].between(int(min_days), int(max_days))
-    ]
-    if float(min_leverage) > 0:
-        result = result[result["leverage_calc"] >= float(min_leverage)]
-    if float(min_volume) > 0:
-        result = result[result["volume"] >= float(min_volume)]
-    if option_type != "All":
-        result = result[result["type"] == option_type]
+    result = _apply_option_filters(
+        result, option_type, min_days, max_days, min_leverage, min_volume
+    )
 
     applog.log(
         "OPT",
         f"{','.join(stock_codes)} -> {len(result)} rows type={option_type} "
         f"days={min_days}-{max_days}",
     )
-    return result.sort_values(["days_to_expiry", "strike"]).reset_index(drop=True)
+    return result

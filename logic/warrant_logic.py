@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services import applog
 from services import memlog
+from services import db_market
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -153,7 +154,18 @@ def prefetch_cmoney_key():
 
 
 def get_cmoney_key():
+    global _cmoney_key
     if _cmoney_key is None:
+        # Snapshot-first: the scheduler persists the live key to Supabase, so in
+        # supabase mode use the stored key and only scrape if it is unavailable.
+        if db_market.snapshot_enabled():
+            try:
+                stored = db_market.get_key()
+            except Exception:
+                stored = None
+            if stored:
+                _cmoney_key = stored
+                return _cmoney_key
         # Double-checked: concurrent first requests share one fetch instead of
         # each hitting CMoney.
         with _cmoney_key_fetch_lock:
@@ -721,6 +733,34 @@ def cache_as_of(stock_codes):
     return min(ts) if ts else None
 
 
+def _apply_warrant_filters(df, stock_codes, option_type, min_days, max_days,
+                           min_leverage, max_tv_pct, min_volume):
+    """Downstream warrant filter chain (COL_ORDER select through option_type).
+
+    Pure filtering: returns the filtered df (possibly empty). No logging / no
+    tuple returns — callers own the empty-case messaging so the live path stays
+    byte-identical and the supabase path can reuse the exact same filtering.
+    """
+    df = df[COL_ORDER]
+    # Verify the true underlying: the name prefilter is intentionally permissive
+    # (so no issuer is ever dropped), and abbreviated warrant names can point at
+    # a different stock (e.g. 長榮太 -> 2645, not 長榮/2603). CommKey settles it.
+    wanted = {str(c) for c in stock_codes}
+    df = df[df["underlying_code"].astype(str).isin(wanted)]
+    if df.empty:
+        return df
+    df = df[(df["days_to_expiry"] >= min_days) & (df["days_to_expiry"] <= max_days)]
+    # leverage_calc is NaN when compute_iv=False; only filter when a real
+    # threshold is set (NaN >= 0 is False and would wipe the whole frame).
+    if float(min_leverage) > 0:
+        df = df[df["leverage_calc"] >= float(min_leverage)]
+    df = df[df["time_value_pct"] <= max_tv_pct]
+    df = df[df["volume"] >= min_volume]
+    if option_type != "All":
+        df = df[df["type"] == option_type]
+    return df
+
+
 def fetch_warrants(
     stock_codes,
     option_type="All",
@@ -734,6 +774,36 @@ def fetch_warrants(
 ):
     if isinstance(stock_codes, str):
         stock_codes = [stock_codes]
+
+    # Snapshot-first read (MARKET_SOURCE=supabase). The stored snapshot is the
+    # superset-with-IV; compute_iv=True (scanner) drops non-converged-IV rows to
+    # reproduce the live scanner set, compute_iv=False (arb) keeps the superset.
+    # Any error / empty snapshot falls through to the live path below.
+    if db_market.snapshot_enabled():
+        try:
+            snap, as_of = db_market.read_snapshot("warrants", codes=stock_codes)
+            if snap is not None and not snap.empty:
+                meta = {"as_of": as_of, "cached": True}
+                if compute_iv:
+                    snap = snap[snap["iv_ask"].notna()]
+                else:
+                    # Live compute_iv=False emits NaN IV-derived metrics (no
+                    # solve). The superset stored them; blank them so the frame —
+                    # and every downstream consumer that branches on IV presence
+                    # (arb_logic) — matches the live arb path exactly.
+                    snap = snap.copy()
+                    for _c in ("iv_ask", "iv_bid", "delta_calc", "leverage_calc"):
+                        if _c in snap.columns:
+                            snap[_c] = np.nan
+                filtered = _apply_warrant_filters(
+                    snap, stock_codes, option_type, min_days, max_days,
+                    min_leverage, max_tv_pct, min_volume,
+                )
+                if filtered.empty:
+                    return pd.DataFrame(), "No warrants for requested underlying", meta
+                return filtered, None, meta
+        except Exception as e:
+            applog.log("WARR", f"supabase read failed ({e}) — falling back to live")
 
     cmoney_results, as_of, cached = get_warrant_results(stock_codes)
     meta = {
@@ -756,27 +826,21 @@ def fetch_warrants(
         return pd.DataFrame(), "No warrants passed filters", meta
 
     built = len(df)
-    df = df[COL_ORDER]
-    # Verify the true underlying: the name prefilter is intentionally permissive
-    # (so no issuer is ever dropped), and abbreviated warrant names can point at
-    # a different stock (e.g. 長榮太 -> 2645, not 長榮/2603). CommKey settles it.
     wanted = {str(c) for c in stock_codes}
-    df = df[df["underlying_code"].astype(str).isin(wanted)]
-    if df.empty:
+    filtered = _apply_warrant_filters(
+        df, stock_codes, option_type, min_days, max_days,
+        min_leverage, max_tv_pct, min_volume,
+    )
+    # The only distinct intermediate return is "nothing matched the underlying";
+    # COL_ORDER never drops rows, so an empty result with no underlying match is
+    # exactly that case (preserves the pre-extraction message + log verbatim).
+    if filtered.empty and not df["underlying_code"].astype(str).isin(wanted).any():
         applog.log(
             "WARR",
             f"{codes_s} -> 0 rows ({built} built, none matched the requested underlying)",
         )
         return pd.DataFrame(), "No warrants for requested underlying", meta
-    df = df[(df["days_to_expiry"] >= min_days) & (df["days_to_expiry"] <= max_days)]
-    # leverage_calc is NaN when compute_iv=False; only filter when a real
-    # threshold is set (NaN >= 0 is False and would wipe the whole frame).
-    if float(min_leverage) > 0:
-        df = df[df["leverage_calc"] >= float(min_leverage)]
-    df = df[df["time_value_pct"] <= max_tv_pct]
-    df = df[df["volume"] >= min_volume]
-    if option_type != "All":
-        df = df[df["type"] == option_type]
+    df = filtered
 
     applog.log(
         "WARR",

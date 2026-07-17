@@ -17,11 +17,13 @@ single spot FX snapshot is used for every conversion.
 """
 
 import time
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
 from services import applog
+from services import db_market
 from logic.warrant_logic import implied_vol, bs_delta, calc_real_leverage
 
 # One US option contract covers 100 ADRs. The number of ordinary (Taiwan)
@@ -53,6 +55,15 @@ _CACHE_TTL = 1200  # refreshed every 15 min by the scheduler (Yahoo is ~15 min d
 
 def data_as_of(stock_code):
     """Timestamp (epoch) of the cached chain for this code, or None."""
+    # Snapshot mode: freshness is the snapshot batch's created_at as an epoch.
+    if db_market.snapshot_enabled():
+        try:
+            iso = db_market.snapshot_as_of("us_options")
+        except Exception:
+            iso = None
+        if iso:
+            return datetime.fromisoformat(iso).timestamp()
+        return None
     ts_list = [
         ts for (code, _civ), (ts, _df) in _cache.items() if code == stock_code
     ]
@@ -387,6 +398,31 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
     """
     if stock_code not in US_ADR_MAP:
         raise RuntimeError(f"{stock_code}: no US ADR mapping")
+
+    # Snapshot-first read (MARKET_SOURCE=supabase). The stored snapshot is the
+    # superset-with-IV; compute_iv=True (scanner) drops non-converged-IV rows,
+    # compute_iv=False (arb) keeps the superset. _filter_chain preserves the
+    # raise-on-empty-range contract. Empty snapshot / read error falls through
+    # to the live path below; the supabase path never warms _cache.
+    if db_market.snapshot_enabled():
+        snap = None
+        try:
+            snap, _as_of = db_market.read_snapshot("us_options", codes=[stock_code])
+        except Exception as e:
+            applog.log("USOPT", f"supabase read failed ({e}) — falling back to live")
+            snap = None
+        if snap is not None and not snap.empty:
+            if compute_iv:
+                snap = snap[snap["iv_ask"].notna()]
+            else:
+                # Live compute_iv=False emits NaN IV-derived metrics; blank the
+                # superset's stored values so the arb path (which branches on IV
+                # presence) matches the live arb frame exactly.
+                snap = snap.copy()
+                for _c in ("iv_ask", "iv_bid", "delta_calc"):
+                    if _c in snap.columns:
+                        snap[_c] = np.nan
+            return _filter_chain(snap, option_type, min_days, max_days)
 
     cfg = US_ADR_MAP[stock_code]
     # The cache holds the FULL chain (all types, all expiries); the requested
