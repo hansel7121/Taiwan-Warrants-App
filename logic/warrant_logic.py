@@ -646,12 +646,30 @@ def get_warrant_results(stock_codes, force=False):
                 f"in {time.time() - t0:.1f}s",
             )
             ts = time.time()
+            failed = []
             with _warrant_cache_lock:
                 for sc in need:
-                    _warrant_cache[sc] = (
-                        ts,
-                        {c: fetched[c] for c in code_map.get(sc, []) if c in fetched},
-                    )
+                    sc_codes = code_map.get(sc, [])
+                    sc_results = {c: fetched[c] for c in sc_codes if c in fetched}
+                    # A stock that HAS warrant codes but returned none was a
+                    # wholesale fetch failure (cmoney unreachable / cmkey fetch
+                    # failed), not a stock with no warrants. Caching that empty
+                    # result would pin "no warrants found" for WARRANT_CACHE_TTL
+                    # and block retries, keeping the app dark long after cmoney
+                    # recovers — so skip it and let the next request retry. Any
+                    # prior good entry is left in place (its stale timestamp
+                    # keeps it "expired", so it still serves last-known-good and
+                    # retries). sc_codes empty == genuinely no warrants: cache it.
+                    if sc_codes and not sc_results:
+                        failed.append(sc)
+                        continue
+                    _warrant_cache[sc] = (ts, sc_results)
+            if failed:
+                applog.log(
+                    "WARR",
+                    f"{','.join(failed)} fetch failed (0/{len(all_codes)} codes ok) "
+                    f"— not caching, will retry next request",
+                )
     merged, as_of = {}, None
     with _warrant_cache_lock:
         for sc in stock_codes:
