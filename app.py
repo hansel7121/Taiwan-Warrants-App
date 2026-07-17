@@ -1,14 +1,14 @@
 from flask import Flask, render_template, request, jsonify, Response, g
-import applog
-import warrant_logic
-import options_logic
-import us_options_logic
-import scheduler
-import auth
-import db
-import store
-import arb_logic
-from auth import require_auth
+from services import applog
+from logic import warrant_logic
+from logic import options_logic
+from logic import us_options_logic
+from services import scheduler
+from services import auth
+from services import db
+from services import store
+from logic import arb_logic
+from services.auth import require_auth
 import os
 import io
 import json

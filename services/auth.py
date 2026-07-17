@@ -16,7 +16,7 @@ import jwt
 from jwt import PyJWKClient
 from flask import request, jsonify, g
 
-import db
+from services import db
 
 _jwks_client = None
 _allow_cache = {}  # email -> (expiry_epoch, bool)

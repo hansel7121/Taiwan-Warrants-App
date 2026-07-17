@@ -10,7 +10,7 @@ conflict logic — on Render nothing touches disk at all.
 import json
 import os
 
-import db
+from services import db
 
 _MIRROR_NAME = "portfolio.json"
 

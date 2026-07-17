@@ -21,8 +21,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-import applog
-from warrant_logic import implied_vol, bs_delta, calc_real_leverage
+from services import applog
+from logic.warrant_logic import implied_vol, bs_delta, calc_real_leverage
 
 # One US option contract covers 100 ADRs. The number of ordinary (Taiwan)
 # shares per ADR ("adr_ratio") is per-listing, so contract size in Taiwan

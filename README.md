@@ -66,13 +66,24 @@ Uses put-call parity to identify mispricing between call and put warrants via sy
 ## Architecture
 
 ```
-app.py              Flask routes (request/response only)
-arb_logic.py        warrant<->option matching, put-call parity, TW/US leg arb
-warrant_logic.py    CMoney data fetch, IV/delta/leverage computation
-options_logic.py    TAIFEX option data fetch and computation
-us_options_logic.py US ADR option data fetch and computation
+app.py                Flask routes (request/response only)
+wsgi.py               gunicorn entry point (wsgi:app)
+logic/                pure market-data + math, no side effects
+  warrant_logic.py      CMoney data fetch, IV/delta/leverage computation
+  options_logic.py      TAIFEX option data fetch and computation
+  us_options_logic.py   US ADR option data fetch and computation
+  arb_logic.py          warrant<->option matching, put-call parity, TW/US leg arb
+services/             side-effecting infrastructure
+  db.py                 Supabase client
+  store.py              portfolio persistence (Supabase + local JSON mirror)
+  auth.py               JWT verification + email allowlist
+  scheduler.py          APScheduler cache-refresh jobs (opt-in)
+  applog.py memlog.py   request + memory logging
 templates/
-  index.html        Single-page frontend (Plotly, vanilla JS)
+  index.html          single-page frontend shell (Jinja + Plotly)
+static/
+  css/app.css           extracted stylesheet
+  js/*.js               extracted JS bundles (common, quant, scanners, arb, portfolio)
 ```
 
 **Data sources:**

@@ -12,10 +12,10 @@ from datetime import datetime, timedelta
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 
-import memlog
-import warrant_logic
-import options_logic
-import us_options_logic
+from services import memlog
+from logic import warrant_logic
+from logic import options_logic
+from logic import us_options_logic
 
 # Mirror of DEFAULT_STOCKS in templates/index.html — keep the two in sync.
 DEFAULT_WARRANT_STOCKS = [

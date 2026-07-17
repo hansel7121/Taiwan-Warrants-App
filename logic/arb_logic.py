@@ -9,12 +9,12 @@ Market data comes only through the logic modules' fetchers (warrant_logic,
 options_logic, us_options_logic), which own their own in-process caches; this
 module keeps no cache of its own.
 """
-import applog
+from services import applog
 import numpy as np
 import pandas as pd
-import options_logic
-import us_options_logic
-import warrant_logic
+from logic import options_logic
+from logic import us_options_logic
+from logic import warrant_logic
 
 
 

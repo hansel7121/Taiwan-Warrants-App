@@ -23,8 +23,8 @@ import time
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import applog
-import memlog
+from services import applog
+from services import memlog
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 

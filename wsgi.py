@@ -5,8 +5,8 @@ refresh jobs live in process memory and would diverge across workers.
 """
 import os
 
-import memlog
-import scheduler
+from services import memlog
+from services import scheduler
 from app import app
 
 memlog.log_baseline("boot")
