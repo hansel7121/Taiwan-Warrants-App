@@ -16,6 +16,43 @@
       <span class="badge">TW</span>
     </header>
 
+    <style>
+      #market-clock{position:fixed;right:14px;bottom:14px;z-index:900;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 11px;font-size:11px;color:var(--muted);box-shadow:0 4px 16px rgba(0,0,0,.35);min-width:150px;user-select:none}
+      #market-clock .mc-clocks{display:flex;justify-content:space-between;gap:10px;margin-bottom:7px;padding-bottom:6px;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums}
+      #market-clock .mc-clocks b{color:var(--text);font-size:12px;font-weight:700}
+      #market-clock .mc-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:2px 0}
+      #market-clock .mc-lbl{color:var(--muted)}
+      #market-clock .mc-badge{font-weight:700;font-size:10px;letter-spacing:.3px;text-transform:uppercase;padding:2px 7px;border-radius:10px;white-space:nowrap}
+      .mc-open{color:var(--put);background:rgba(74,222,128,.15)}
+      .mc-after{color:#fbbf24;background:rgba(251,191,36,.15)}
+      .mc-closed{color:var(--muted);background:rgba(139,144,160,.13)}
+      #universe-bar{position:fixed;top:14px;right:14px;z-index:950;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 13px;width:236px;box-shadow:0 4px 16px rgba(0,0,0,.4);font-size:12px}
+      #universe-bar .ub-title{color:var(--text);font-weight:700;font-size:12px;margin-bottom:9px;display:flex;align-items:center;gap:7px}
+      #universe-bar .ub-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none;animation:ubpulse 1s ease-in-out infinite}
+      #universe-bar.ub-done .ub-dot{background:var(--put);animation:none}
+      #universe-bar.ub-err .ub-dot{background:var(--call);animation:none}
+      @keyframes ubpulse{0%,100%{opacity:.35}50%{opacity:1}}
+      #universe-bar .ub-track{height:8px;background:var(--border);border-radius:6px;overflow:hidden}
+      #universe-bar .ub-fill{height:100%;width:0%;background:var(--accent);border-radius:6px;transition:width .6s ease}
+      #universe-bar.ub-done .ub-fill{background:var(--put)}
+      #universe-bar.ub-err .ub-fill{background:var(--call)}
+      #universe-bar .ub-sub{color:var(--muted);margin-top:7px;font-variant-numeric:tabular-nums}
+    </style>
+    <div id="universe-bar" style="display:none">
+      <div class="ub-title"><span class="ub-dot"></span><span id="ub-title-txt">Building Warrant Universe…</span></div>
+      <div class="ub-track"><div id="ub-fill" class="ub-fill"></div></div>
+      <div id="ub-sub" class="ub-sub">starting…</div>
+    </div>
+    <div id="market-clock" title="Local exchange time + current session">
+      <div class="mc-clocks">
+        <span><b id="mc-ny-time">--:--</b> ET</span>
+        <span><b id="mc-tw-time">--:--</b> TPE</span>
+      </div>
+      <div class="mc-row"><span class="mc-lbl">NYSE</span><span class="mc-badge mc-closed" id="mc-ny-st">–</span></div>
+      <div class="mc-row"><span class="mc-lbl">TWSE</span><span class="mc-badge mc-closed" id="mc-tw-st">–</span></div>
+      <div class="mc-row"><span class="mc-lbl">TAIFEX opt</span><span class="mc-badge mc-closed" id="mc-tx-st">–</span></div>
+    </div>
+
     <div class="tab-bar">
       <button class="active" onclick="switchTab('options', this)">Options Scanner</button>
       <button onclick="switchTab('scanner', this)">Warrant Scanner</button>
@@ -660,6 +697,7 @@
             (how far the US ADR trades from the local share). Enter when it sits near 0; a spike/drop is where the trade goes sideways.
           </p>
           <div id="us-prem-chart" style="width:100%;height:240px"></div>
+          <div id="us-prem-adf" style="margin-top:10px;font-size:12px;line-height:1.6"></div>
 
           <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:18px 0 6px">Distribution of daily ADR premiums</p>
           <div id="us-prem-hist" style="width:100%;height:230px"></div>

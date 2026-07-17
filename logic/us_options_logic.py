@@ -287,6 +287,38 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
     }
 
 
+def _adf_test(series):
+    """Augmented Dickey-Fuller unit-root test + AR(1) half-life on the premium
+    LEVEL series. ADF null = unit root (random walk, NOT mean-reverting); a low
+    p-value (< 0.05) rejects it => the premium is stationary / mean-reverting,
+    which is the whole thesis of the trade. Half-life = trading days for a
+    premium deviation to decay halfway back to its mean.
+    """
+    x = np.asarray(series, dtype=float)
+    x = x[np.isfinite(x)]
+    out = {"stat": None, "pvalue": None, "nobs": int(len(x)), "usedlag": None,
+           "crit": {}, "half_life": None, "stationary": None}
+    if len(x) < 30:
+        return out
+    try:
+        # Lazy import: statsmodels is heavy on the 512MB host, so keep it out of
+        # module-import cost and degrade gracefully if it isn't installed.
+        from statsmodels.tsa.stattools import adfuller
+        stat, pval, usedlag, nobs, crit, _ = adfuller(x, autolag="AIC")
+    except Exception:
+        return out
+    out.update({"stat": float(stat), "pvalue": float(pval), "usedlag": int(usedlag),
+                "nobs": int(nobs), "crit": {k: float(v) for k, v in crit.items()},
+                "stationary": bool(pval < 0.05)})
+    # AR(1) half-life: Δp_t = a + b·p_{t-1}; mean-revert speed φ = 1 + b (b < 0),
+    # half-life = −ln2 / ln(1 + b). Only defined when the level pulls back (b<0).
+    dp = np.diff(x)
+    b = float(np.polyfit(x[:-1], dp, 1)[0])
+    if b < 0:
+        out["half_life"] = float(-np.log(2) / np.log(1.0 + b))
+    return out
+
+
 def adr_premium_stats(stock_code, period="3y"):
     """Historical ADR-vs-local premium series + regime probabilities.
 
@@ -331,6 +363,7 @@ def adr_premium_stats(stock_code, period="3y"):
         "latest_premium": float(prem.iloc[-1]),
         "mean_premium": float(prem.mean()),
         "std_premium": float(prem.std()),
+        "adf": _adf_test(prem.values),          # unit-root test: is the premium mean-reverting?
         "threshold": PREM_THRESHOLD,
         "dates": [d.strftime("%Y-%m-%d") for d in df.index],
         "premium_pct": [round(float(x) * 100, 3) for x in prem],

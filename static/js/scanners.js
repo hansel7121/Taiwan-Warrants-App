@@ -484,3 +484,42 @@ async function downloadOptionsCSV() {
 }
 
 // ── Arb Finder ─────────────────────────────────────────────────────
+
+// ── Warrant-universe build progress bar (top-right) ──────────────────
+// The live ISIN scrape runs at startup (~1-2 min). Warrant fetches are
+// blocked until it lands; this polls its status and shows the progress.
+async function pollUniverse() {
+  const bar = document.getElementById("universe-bar");
+  const fill = document.getElementById("ub-fill");
+  const sub = document.getElementById("ub-sub");
+  const title = document.getElementById("ub-title-txt");
+  let s;
+  try {
+    s = await (await fetch("/universe_status")).json();
+  } catch (e) { setTimeout(pollUniverse, 2500); return; }
+
+  if (s.ready) {
+    bar.style.display = "block";
+    bar.className = "ub-done";
+    fill.style.width = "100%";
+    title.textContent = "Warrant Universe ready";
+    sub.textContent = `${s.warrants.toLocaleString()} warrants · you can fetch now`;
+    setTimeout(() => { bar.style.display = "none"; }, 5000);
+    return;   // stop polling once ready
+  }
+  bar.style.display = "block";
+  if (s.error) {
+    bar.className = "ub-err";
+    fill.style.width = "100%";
+    title.textContent = "Universe build failed";
+    sub.textContent = "retrying… (" + s.error.slice(0, 40) + ")";
+    setTimeout(pollUniverse, 5000);
+    return;
+  }
+  bar.className = "";
+  title.textContent = "Building Warrant Universe…";
+  fill.style.width = Math.max(4, s.progress) + "%";
+  sub.textContent = s.progress + "%";
+  setTimeout(pollUniverse, 700);
+}
+pollUniverse();

@@ -393,6 +393,8 @@ _universe_codes: dict = {}  # code -> twstock fetch.ROW
 _universe_ts = 0.0
 _universe_fetching = False
 _universe_fetch_started = 0.0
+_universe_progress = 0        # 0-100, drives the frontend progress bar
+_universe_error = None        # last scrape error message, or None
 _universe_lock = threading.Lock()
 UNIVERSE_TTL = 86400
 # The ISIN scrape is slow and highly variable (2-6 min per market observed) and
@@ -413,7 +415,7 @@ def _malloc_trim():
         pass
 
 
-def _stream_isin(url):
+def _stream_isin(url, prog_band=None):
     """Stream-parse an ISIN listing into twstock ROW tuples without a full DOM.
 
     twstock's fetch_data builds one lxml tree over the ~7.7MB page; that single
@@ -422,29 +424,51 @@ def _stream_isin(url):
     row as it closes, holds only one row at a time. Output is the identical ROW
     list fetch_data returns (same make_row_tuple, same header/type handling), so
     nothing downstream changes.
+
+    The body is downloaded in ~64KB chunks so the progress bar can climb smoothly
+    with bytes received (the download dominates the wall time). ``prog_band`` is
+    ``(lo, hi, expected_bytes)``: progress sweeps lo→hi as the download lands
+    (using Content-Length when the server sends it, else expected_bytes), then
+    pins at hi once the buffer is complete. Omit it (the scheduler path) and no
+    progress is reported.
     """
+    global _universe_progress
     r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"},
-                     verify=False, timeout=60)
+                     verify=False, timeout=60, stream=True)
     r.raise_for_status()
-    rows = []
-    typ = ""
-    first = True
     # The ISIN listing is served as Big5/MS950 (its Content-Type charset) with
     # no <meta> charset. fetch_data decodes it through requests' r.text, which
-    # honours the header charset (r.encoding) and only falls back to a chardet
-    # sniff (r.apparent_encoding) when the header omits it — so mirror that
-    # resolution exactly. A pinned "utf-8" mangles the ideographic space in each
+    # honours the header charset (r.encoding). In stream mode r.apparent_encoding
+    # would force-load the whole body (defeating streaming), so take the header
+    # charset and fall back to cp950 (what these pages always are) instead of the
+    # chardet sniff. A pinned "utf-8" mangles the ideographic space in each
     # "code　name" cell into U+FFFD, so make_row_tuple's split("　") returns
     # a single field and unpacking raises "not enough values to unpack (expected
     # 2, got 1)" on the very first data row. libxml2 needs an encoding name it
     # recognises, so normalise via the Python codec registry (MS950 -> cp950,
-    # which it accepts); anything it can't resolve degrades to utf-8.
-    enc = r.encoding or r.apparent_encoding
+    # which it accepts); anything it can't resolve degrades to cp950.
+    enc = r.encoding or "cp950"
     try:
         enc = codecs.lookup(enc).name
     except (LookupError, TypeError):
-        enc = "utf-8"
-    context = etree.iterparse(BytesIO(r.content), html=True,
+        enc = "cp950"
+    lo, hi, exp = prog_band or (None, None, None)
+    total = int(r.headers.get("Content-Length") or 0) or (exp or 0)
+    buf = BytesIO()
+    got = 0
+    for chunk in r.iter_content(65536):
+        if not chunk:
+            continue
+        buf.write(chunk)
+        if prog_band:
+            got += len(chunk)
+            frac = min(1.0, got / total) if total else 0.0
+            with _universe_lock:
+                _universe_progress = int(lo + (hi - lo) * frac)
+    rows = []
+    typ = ""
+    first = True
+    context = etree.iterparse(BytesIO(buf.getvalue()), html=True,
                               encoding=enc, tag="tr")
     for _event, elem in context:
         if first:
@@ -465,18 +489,24 @@ def _stream_isin(url):
         if parent is not None:
             while elem.getprevious() is not None:
                 del parent[0]
+    if prog_band:
+        with _universe_lock:
+            _universe_progress = hi
     return rows
 
 
 def refresh_warrant_universe():
     """Scheduler hook: re-scrape the ISIN listing and swap it into the cache."""
     global _universe_codes, _universe_ts, _universe_fetching, _universe_fetch_started
+    global _universe_progress, _universe_error
     with _universe_lock:
         if _universe_fetching and time.time() - _universe_fetch_started < UNIVERSE_FETCH_STALL:
             print("WARR: universe fetch already in flight", flush=True)
             return
         _universe_fetching = True
         _universe_fetch_started = time.time()
+        _universe_progress = 4
+        _universe_error = None
     try:
         # Sequential, not parallel: two lxml trees over ~31k rows at once is the
         # largest memory spike in the process and the host caps at 512 MB.
@@ -484,8 +514,14 @@ def refresh_warrant_universe():
         t0 = time.time()
         with memlog.measure("warrant_universe"):
             merged = {}
-            for market, url in (("twse", TWSE_EQUITIES_URL), ("tpex", TPEX_EQUITIES_URL)):
-                rows = _stream_isin(url)
+            # Each market owns a progress band and sweeps it smoothly by bytes
+            # downloaded (expected sizes are the no-Content-Length fallback:
+            # TWSE ~7.7MB, TPEX ~2.6MB).
+            for market, url, lo, hi, exp in (
+                ("twse", TWSE_EQUITIES_URL, 4, 64, 7_700_000),
+                ("tpex", TPEX_EQUITIES_URL, 64, 98, 2_600_000),
+            ):
+                rows = _stream_isin(url, prog_band=(lo, hi, exp))
                 print(f"WARR: universe {market} {len(rows)} rows", flush=True)
                 for row in rows:
                     merged[row.code] = row
@@ -493,6 +529,8 @@ def refresh_warrant_universe():
             # measured block, so MEM: rss_after reflects the trimmed floor.
             _malloc_trim()
         if not merged:
+            with _universe_lock:
+                _universe_error = "ISIN listing returned no rows"
             print("WARR: universe fetch returned nothing — keeping fallback", flush=True)
             return
         fresh_w = sum(1 for v in merged.values() if "權證" in v.type)
@@ -510,6 +548,7 @@ def refresh_warrant_universe():
             changed = merged.keys() != in_effect.keys()
             _universe_codes = merged
             _universe_ts = time.time()
+            _universe_progress = 100
         # Cleared outside _universe_lock: these two locks are never nested
         # anywhere else, and nesting them here would be the only place that
         # could order them against the request path.
@@ -525,6 +564,8 @@ def refresh_warrant_universe():
             flush=True,
         )
     except Exception as e:
+        with _universe_lock:
+            _universe_error = str(e)
         print(f"WARR: universe fetch failed: {e} — using bundled codes", flush=True)
     finally:
         with _universe_lock:
@@ -550,6 +591,20 @@ def universe_rows():
             start = None
         out.append({"code": r.code, "name": r.name, "start": start, "market": r.market})
     return out
+
+
+def universe_status():
+    """Progress-bar payload for the frontend: ready / building / progress / error."""
+    with _universe_lock:
+        ready = bool(_universe_codes) and time.time() - _universe_ts < UNIVERSE_TTL
+        return {
+            "ready": ready,
+            "building": _universe_fetching and not ready,
+            "progress": 100 if ready else _universe_progress,
+            "codes": len(_universe_codes),
+            "warrants": sum(1 for v in _universe_codes.values() if "權證" in v.type),
+            "error": _universe_error,
+        }
 
 
 def _ensure_universe_fetch():

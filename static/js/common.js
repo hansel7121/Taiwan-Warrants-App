@@ -175,3 +175,44 @@ const COL_LABELS = { us_stock_code: "tw_stock_code",
 const visCols = (row) => Object.keys(row).filter(c => !HIDDEN_COLS.includes(c));
 
 const colLabel = (c) => COL_LABELS[c] || c;
+
+// ── Market session clock (NYSE / TWSE / TAIFEX options) ──────────────
+// NYSE runs in US Eastern; TWSE and TAIFEX in Taipei. Sessions are wall-
+// clock ranges in each exchange's own timezone (minutes past midnight).
+// Holidays are not modeled — weekday hours only.
+function _tzParts(tz) {
+  const f = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour12: false,
+    weekday: "short", hour: "2-digit", minute: "2-digit" });
+  const o = {}; f.formatToParts(new Date()).forEach(p => o[p.type] = p.value);
+  const h = parseInt(o.hour, 10) % 24, m = parseInt(o.minute, 10);
+  return { wd: o.weekday, mins: h * 60 + m, str: String(h).padStart(2, "0") + ":" + o.minute };
+}
+function _mcSet(id, txt, cls) {
+  const e = document.getElementById(id); if (!e) return;
+  e.textContent = txt; e.className = "mc-badge " + cls;
+}
+function updateMarketClock() {
+  const et = _tzParts("America/New_York"), tp = _tzParts("Asia/Taipei");
+  document.getElementById("mc-ny-time").textContent = et.str;
+  document.getElementById("mc-tw-time").textContent = tp.str;
+  const nyWknd = et.wd === "Sat" || et.wd === "Sun", nt = et.mins;
+  // NYSE: pre 04:00–09:30, regular 09:30–16:00, after 16:00–20:00
+  if (!nyWknd && nt >= 570 && nt < 960) _mcSet("mc-ny-st", "Open", "mc-open");
+  else if (!nyWknd && nt >= 960 && nt < 1200) _mcSet("mc-ny-st", "After-hrs", "mc-after");
+  else if (!nyWknd && nt >= 240 && nt < 570) _mcSet("mc-ny-st", "Pre-mkt", "mc-after");
+  else _mcSet("mc-ny-st", "Closed", "mc-closed");
+  // TWSE stocks: 09:00–13:30
+  const twWknd = tp.wd === "Sat" || tp.wd === "Sun", tt = tp.mins;
+  if (!twWknd && tt >= 540 && tt < 810) _mcSet("mc-tw-st", "Open", "mc-open");
+  else _mcSet("mc-tw-st", "Closed", "mc-closed");
+  // TAIFEX options: regular 08:45–13:45; after-hours 15:00–05:00 next day.
+  // Evening leg (15:00–24:00) runs Mon–Fri; morning leg (00:00–05:00) is
+  // the continuation of the prior weekday session, so it's live Tue–Sat.
+  const weekday = !twWknd;
+  if (weekday && tt >= 525 && tt < 825) _mcSet("mc-tx-st", "Regular", "mc-open");
+  else if (weekday && tt >= 900) _mcSet("mc-tx-st", "After-hrs", "mc-after");
+  else if (tt < 300 && tp.wd !== "Sun" && tp.wd !== "Mon") _mcSet("mc-tx-st", "After-hrs", "mc-after");
+  else _mcSet("mc-tx-st", "Closed", "mc-closed");
+}
+updateMarketClock();
+setInterval(updateMarketClock, 15000);
