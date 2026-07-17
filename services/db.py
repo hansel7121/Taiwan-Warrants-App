@@ -11,7 +11,12 @@ from datetime import datetime, timezone
 
 def _load_dotenv():
     """Minimal .env loader (python-dotenv is not a dependency). Silent on any error."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    # .env lives at the repo root; this module is services/db.py, so go up one
+    # directory from here. (Before the logic/services restructure db.py sat at
+    # the root and a single dirname sufficed — the extra level is required now,
+    # else local mode's LOCAL_USER_ID never loads and every route 503s.)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, ".env")
     try:
         with open(path) as f:
             for line in f:
