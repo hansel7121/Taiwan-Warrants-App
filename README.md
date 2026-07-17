@@ -111,12 +111,26 @@ in the git history) to keep diffs small.
 conda activate warrants
 pip install -r requirements.txt
 
-# Dev server
-python app.py                 # http://127.0.0.1:5001
+# Dev server — always prefix with the Taiwan timezone (see note below)
+TZ=Asia/Taipei python app.py                 # http://127.0.0.1:5001
 
 # Production-style (what deployment uses)
-gunicorn -w 1 --threads 8 --timeout 180 -b 0.0.0.0:5001 wsgi:app
+TZ=Asia/Taipei gunicorn -w 1 --threads 8 --timeout 180 -b 0.0.0.0:5001 wsgi:app
 ```
+
+Stop the dev server with **`Ctrl+C`** in that terminal (or `pkill -f "python app.py"`).
+
+**Always set `TZ=Asia/Taipei`.** The scanners compute days-to-expiry against the
+machine's local "today". On a machine west of Taiwan (e.g. US Pacific) the local
+date is a day behind Taiwan for part of the day, so an already-expired option
+batch leaks into the results and counts come out inflated (e.g. ~1580 locally vs
+~1407 on the UTC deploy). The `TZ` prefix scopes Taiwan time to this process only
+— it does not change your computer's clock.
+
+**No-login local mode.** With `LOCAL_USER_ID` set in `.env` and `RENDER` unset, the
+app runs with no login and acts as that fixed user, syncing its portfolio with the
+shared Supabase. `.env` lives at the **repo root** (loaded by `services/db.py`). See
+[`SETUP-LOCAL.md`](SETUP-LOCAL.md) for the full local-redundancy setup and seeding steps.
 
 Exactly **1 gunicorn worker**: market-data caches live in process memory and would diverge across workers; threads provide concurrency.
 
