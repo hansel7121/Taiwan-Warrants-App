@@ -15,6 +15,13 @@ services:
       # balloon RSS. Harmless on non-glibc platforms.
       - key: MALLOC_ARENA_MAX
         value: "2"
+      # Phase 2 cutover (staged). ENABLE_SCHEDULER turns on the background
+      # refresh jobs that WRITE Supabase market snapshots (gated to each
+      # market's trading hours, on a wall-clock 15-min cron grid). Readers
+      # still serve live data until MARKET_SOURCE=supabase is added (step 5b),
+      # so this alone is behavior-preserving.
+      - key: ENABLE_SCHEDULER
+        value: "1"
       # Paste these in the Render dashboard — never commit real values.
       - key: SUPABASE_URL
         sync: false
