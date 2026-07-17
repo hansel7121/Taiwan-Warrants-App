@@ -519,6 +519,27 @@ def refresh_warrant_universe():
             _universe_fetching = False
 
 
+def universe_rows():
+    """Expose the in-memory merged universe as plain rows for the snapshot writer.
+
+    Returns a list of {"code","name","start","market"} dicts from the current
+    _universe_codes (twstock StockCodeInfo namedtuples). `start` is a
+    "YYYY/MM/DD" string; normalise it to an ISO "YYYY-MM-DD" string (JSON-safe
+    and castable by the md_warrant_universe.start date column), or None when it
+    is missing/unparseable. Empty list if no universe has been scraped yet.
+    """
+    with _universe_lock:
+        rows = list(_universe_codes.values())
+    out = []
+    for r in rows:
+        try:
+            start = datetime.strptime(r.start, "%Y/%m/%d").date().isoformat()
+        except (ValueError, TypeError):
+            start = None
+        out.append({"code": r.code, "name": r.name, "start": start, "market": r.market})
+    return out
+
+
 def _ensure_universe_fetch():
     """Kick a background scrape if the universe is stale and none is running.
 
