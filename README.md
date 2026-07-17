@@ -66,9 +66,11 @@ Uses put-call parity to identify mispricing between call and put warrants via sy
 ## Architecture
 
 ```
-app.py              Flask routes + arb matching logic
+app.py              Flask routes (request/response only)
+arb_logic.py        warrant<->option matching, put-call parity, TW/US leg arb
 warrant_logic.py    CMoney data fetch, IV/delta/leverage computation
 options_logic.py    TAIFEX option data fetch and computation
+us_options_logic.py US ADR option data fetch and computation
 templates/
   index.html        Single-page frontend (Plotly, vanilla JS)
 ```
