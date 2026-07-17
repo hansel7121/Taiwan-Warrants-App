@@ -84,6 +84,11 @@ templates/
 - All Taiwan equity options use exercise ratio = 2,000 shares/contract
 - TXO index options use 50 NT$/point
 
+**Notebooks:** `notebooks/` holds exploratory research (ADR parity, universe
+screening). Committed **without outputs** — clear cell outputs before committing
+(`jupyter nbconvert --clear-output --inplace notebooks/*.ipynb`, or the jq one-liner
+in the git history) to keep diffs small.
+
 ---
 
 ## Running Locally
