@@ -1106,11 +1106,34 @@
       let allSelected = false;
       let allSelectedIV = false;
 
+      // Remember the current view so a page reload restores it. sessionStorage
+      // (not localStorage) is deliberate: a reload keeps your place, but opening
+      // the site fresh in a new tab/window still lands on the default Taiwan
+      // options view. Guarded so private-mode / disabled storage can't break nav.
+      function _saveView(k, v) { try { sessionStorage.setItem(k, v); } catch (e) {} }
+      function _readView(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } }
+
       function switchTab(tab, btn) {
         document.querySelectorAll(".tab-content").forEach(el => el.classList.remove("active"));
         document.querySelectorAll(".tab-bar button").forEach(el => el.classList.remove("active"));
         document.getElementById("tab-" + tab).classList.add("active");
         btn.classList.add("active");
+        _saveView("ws_activeTab", tab);
+      }
+
+      // Re-apply the tab + options sub-market saved before the last reload. The
+      // HTML already renders the Options/Taiwan default, so this only acts when a
+      // different view was active. Runs after auth in _boot.
+      function restoreView() {
+        const tab = _readView("ws_activeTab");
+        if (tab && tab !== "options") {
+          const btn = document.querySelector(`.tab-bar button[onclick*="switchTab('${tab}'"]`);
+          if (btn) { switchTab(tab, btn); if (tab === "portfolio") loadPortfolioOnce(); }
+        }
+        if (_readView("ws_optMarket") === "us") {
+          const b = document.getElementById("optmkt-btn-us");
+          if (b) setOptMarket("us", b);
+        }
       }
 
       function toggleSelectAll() {
@@ -2164,6 +2187,7 @@
       let _optMarket = "tw";   // "tw" = TAIFEX (European), "us" = US ADR (American)
       function setOptMarket(m, btn) {
         _optMarket = m;
+        _saveView("ws_optMarket", m);
         document.querySelectorAll("#optmkt-btn-tw,#optmkt-btn-us").forEach(b => b.classList.remove("active"));
         btn.classList.add("active");
         document.getElementById("optionStockSelect").style.display = m === "tw" ? "" : "none";
@@ -3599,6 +3623,7 @@
         // Portfolio is loaded lazily on first Portfolio-tab click (loadPortfolioOnce),
         // not here — the landing tab doesn't use it. Saves /get_portfolio +
         // /adr_premium_scenario calls on every reload.
+        restoreView();   // put the user back on the tab/market they had before reload
       }
       _boot();
     </script>
