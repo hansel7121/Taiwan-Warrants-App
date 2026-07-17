@@ -22,6 +22,12 @@ services:
       # so this alone is behavior-preserving.
       - key: ENABLE_SCHEDULER
         value: "1"
+      # Step 5b: readers now serve the Supabase snapshots (falling back to a
+      # live fetch on empty/error/unconfigured). With ENABLE_SCHEDULER above,
+      # the scheduler keeps those snapshots fresh during market hours; off-hours
+      # the readers serve the last pre-close snapshot (timestamped in the UI).
+      - key: MARKET_SOURCE
+        value: "supabase"
       # Paste these in the Render dashboard — never commit real values.
       - key: SUPABASE_URL
         sync: false
