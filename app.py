@@ -825,6 +825,230 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
 R_FREE = 0.01875
 
 
+# ── Straddle arbitrage (volatility relative-value) ───────────────────────────
+# A "straddle package" = one call leg + one put leg on the same underlying (their
+# strikes may differ within ΔK — a strangle — so packages carry net delta). We
+# LONG the cheapest-implied-vol package (legs from either warrant or option, all
+# bought) and SHORT the dearest-implied-vol package (OPTION legs only, since
+# Taiwan warrants can't be shorted). Edge = short_iv − long_iv, in vol points.
+# The comparison is done in IMPLIED VOL, not price, to strip out the intrinsic
+# |F−K| (strike) and √T (expiry) terms that dominate raw straddle prices.
+
+def _straddle_legs(warrant_df, opt_df):
+    """Flatten warrants + options into a common leg record list.
+
+    px_* are per-underlying-share (warrant quote ÷ exercise ratio; options are
+    already per-share). Only option legs are `shortable`.
+    """
+    legs = []
+    for _, w in warrant_df.iterrows():
+        ratio = float(w["exercise_ratio"] or 0)
+        ask = float(w["ask"] or 0)
+        if ratio <= 0 or ask <= 0:
+            continue
+        iv_ask = w.get("iv_ask")
+        iv_ask = float(iv_ask) if pd.notna(iv_ask) and 0 < float(iv_ask) <= 3 else None
+        legs.append({
+            "source": "warrant", "type": w["type"], "K": float(w["strike"]),
+            "dte": int(w["days_to_expiry"]), "id": str(w["warrant_code"]),
+            "name": w["warrant_name"], "ratio": ratio,
+            "px_buy": round(ask / ratio, 4), "iv_buy": iv_ask,
+            "px_sell": None, "iv_sell": None, "shortable": False,
+            "S": float(w["underlying_price"]), "vol": int(w.get("volume") or 0),
+        })
+    for _, o in opt_df.iterrows():
+        ask = float(o["ask"] or 0) if pd.notna(o.get("ask")) else 0.0
+        bid = float(o["bid"] or 0) if pd.notna(o.get("bid")) else 0.0
+        S = float(o["underlying_price"])
+        K = float(o["strike"])
+        T = int(o["days_to_expiry"]) / 365.0
+        is_put = o["type"] == "Put"
+        # Compute option IV OURSELVES from the per-share quote (ratio=1.0) so it's
+        # on the same scale as the warrant IV. options_logic's own fetch-IV mixes
+        # per-share price with ratio=2000, which mis-scales it ~10x — never trust
+        # it for a cross-instrument vol comparison (the Direct arb recomputes too).
+        def _oiv(px):
+            if px <= 0:
+                return None
+            v = warrant_logic.implied_vol(px, S, K, T, R_FREE, 1.0, is_put)
+            return round(float(v), 4) if pd.notna(v) and 0 < float(v) <= 3 else None
+        legs.append({
+            "source": "option", "type": o["type"], "K": K,
+            "dte": int(o["days_to_expiry"]), "id": str(o["contract"]),
+            "name": o["contract"], "ratio": float(o.get("exercise_ratio") or 2000),
+            "px_buy": round(ask, 4) if ask > 0 else None, "iv_buy": _oiv(ask),
+            "px_sell": round(bid, 4) if bid > 0 else None, "iv_sell": _oiv(bid),
+            "shortable": True,
+            "S": S, "vol": int(o.get("volume") or 0),
+        })
+    return legs
+
+
+def _collapse_best(legs, typ, side):
+    """Keep the single best leg per (strike, dte) for one side.
+
+    side="buy": legs with px_buy+iv_buy, keep MIN iv_buy (cheapest vol to buy).
+    side="sell": shortable legs with px_sell+iv_sell, keep MAX iv_sell (dearest
+    vol to write). Collapses many same-strike issuer warrants to the best one.
+    """
+    best = {}
+    for lg in legs:
+        if lg["type"] != typ:
+            continue
+        if side == "buy":
+            if lg["px_buy"] is None or lg["iv_buy"] is None:
+                continue
+            iv = lg["iv_buy"]
+        else:
+            if not lg["shortable"] or lg["px_sell"] is None or lg["iv_sell"] is None:
+                continue
+            iv = lg["iv_sell"]
+        key = (round(lg["K"], 2), lg["dte"])
+        cur = best.get(key)
+        if cur is None or (side == "buy" and iv < cur[0]) or (side == "sell" and iv > cur[0]):
+            best[key] = (iv, lg)
+    return [v[1] for v in best.values()]
+
+
+def _straddles(calls, puts, side, S, max_k_pct, max_dte_diff):
+    """Form call+put packages within ΔK/ΔDTE. Returns list of straddle dicts."""
+    out = []
+    for c in calls:
+        for p in puts:
+            if abs(c["K"] - p["K"]) / S * 100 > max_k_pct:
+                continue
+            if abs(c["dte"] - p["dte"]) > max_dte_diff:
+                continue
+            if side == "buy":
+                iv = (c["iv_buy"] + p["iv_buy"]) / 2
+                px = c["px_buy"] + p["px_buy"]
+            else:
+                iv = (c["iv_sell"] + p["iv_sell"]) / 2
+                px = c["px_sell"] + p["px_sell"]
+            out.append({
+                "call": c, "put": p, "iv": iv, "px": px,
+                "K": (c["K"] + p["K"]) / 2, "dte": min(c["dte"], p["dte"]),
+            })
+    return out
+
+
+def _build_straddle_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
+                       min_volume=0, min_iv_edge=1.0):
+    """Straddle vol-arb rows: LONG cheap package vs SHORT dear option package.
+
+    option_type is accepted for API symmetry but ignored — a straddle needs both
+    calls and puts, so both are always fetched.
+    """
+    all_rows = []
+    errors = []
+    CONTRACT = 2000  # one TAIFEX single-stock option = 2000 shares
+
+    for code in stock_codes:
+        if code not in options_logic.COMMODITY_MAP:
+            errors.append(f"{code}: no options data available")
+            continue
+
+        warrant_df, werr = warrant_logic.fetch_warrants(
+            [code], "All", 0, 365, 0, 1e9, 0, compute_iv=True
+        )
+        if warrant_df.empty:
+            errors.append(f"{code}: {werr or 'no warrants'}")
+            continue
+        try:
+            opt_df = options_logic.fetch_options([code], "All", min_days=1, compute_iv=True)
+            opt_df = opt_df[opt_df["is_live"]]
+            if min_volume > 0:
+                opt_df = opt_df[opt_df["volume"] >= min_volume]
+        except Exception as e:
+            errors.append(f"{code}: {e}")
+            continue
+        if opt_df.empty:
+            errors.append(f"{code}: no live options")
+            continue
+
+        legs = _straddle_legs(warrant_df, opt_df)
+        if not legs:
+            continue
+        S = float(warrant_df["underlying_price"].iloc[0])
+
+        buy_calls = _collapse_best(legs, "Call", "buy")
+        buy_puts = _collapse_best(legs, "Put", "buy")
+        sell_calls = _collapse_best(legs, "Call", "sell")
+        sell_puts = _collapse_best(legs, "Put", "sell")
+        if not (buy_calls and buy_puts and sell_calls and sell_puts):
+            continue
+
+        longs = _straddles(buy_calls, buy_puts, "buy", S, max_strike_diff_pct, max_dte_diff)
+        shorts = _straddles(sell_calls, sell_puts, "sell", S, max_strike_diff_pct, max_dte_diff)
+        if not (longs and shorts):
+            continue
+
+        seen = set()
+        for sh in shorts:
+            # Best long counterpart = lowest long_iv within K/DTE tolerance of
+            # this short package (maximises the vol edge).
+            short_ids = {sh["call"]["id"], sh["put"]["id"]}
+            best_long = None
+            for lo in longs:
+                if abs(lo["K"] - sh["K"]) / S * 100 > max_strike_diff_pct:
+                    continue
+                if abs(lo["dte"] - sh["dte"]) > max_dte_diff:
+                    continue
+                # Never buy and write the SAME contract — that just crosses its
+                # own bid-ask spread and shows a phantom edge.
+                if {lo["call"]["id"], lo["put"]["id"]} & short_ids:
+                    continue
+                if best_long is None or lo["iv"] < best_long["iv"]:
+                    best_long = lo
+            if best_long is None:
+                continue
+            edge_pts = (sh["iv"] - best_long["iv"]) * 100
+            if edge_pts < min_iv_edge:
+                continue
+
+            lc, lp = best_long["call"], best_long["put"]
+            sc, sp = sh["call"], sh["put"]
+            key = (lc["id"], lp["id"], sc["id"], sp["id"])
+            if key in seen:
+                continue
+            seen.add(key)
+
+            def _leg(lg, side):
+                px = lg["px_buy"] if side == "buy" else lg["px_sell"]
+                iv = lg["iv_buy"] if side == "buy" else lg["iv_sell"]
+                lots = round(CONTRACT / lg["ratio"] / 1000, 3) if lg["source"] == "warrant" else 1
+                return {
+                    "leg": ("Long " if side == "buy" else "Short ") + lg["type"],
+                    "source": lg["source"], "type": lg["type"], "K": round(lg["K"], 2),
+                    "dte": lg["dte"], "id": lg["id"], "name": lg["name"],
+                    "px_per_share": px, "iv": round(iv, 4), "ratio": lg["ratio"],
+                    "board_lots": lots,  # 張 for a warrant leg; 1 = one option contract
+                }
+
+            net_cash = round((sh["px"] - best_long["px"]) * CONTRACT, 0)
+            all_rows.append({
+                "underlying_code": code,
+                "underlying_price": round(S, 2),
+                "long_call": _leg(lc, "buy"), "long_put": _leg(lp, "buy"),
+                "short_call": _leg(sc, "sell"), "short_put": _leg(sp, "sell"),
+                "long_iv": round(best_long["iv"], 4), "short_iv": round(sh["iv"], 4),
+                "iv_edge_pts": round(edge_pts, 2),
+                "long_cost_ps": round(best_long["px"], 4), "short_credit_ps": round(sh["px"], 4),
+                "net_cash": net_cash,   # NT$ per 2000-share package; + = net credit
+                "eff_k_long": round(best_long["K"], 2), "eff_k_short": round(sh["K"], 2),
+                "k_diff_pct": round(abs(best_long["K"] - sh["K"]) / S * 100, 2),
+                "t_long": best_long["dte"], "t_short": sh["dte"],
+                "first_expiry": min(lc["dte"], lp["dte"], sc["dte"], sp["dte"]),
+                "contract_size": CONTRACT,
+            })
+
+    if not all_rows:
+        raise RuntimeError("; ".join(errors) if errors else "No straddle matches found")
+
+    result = pd.DataFrame(all_rows).sort_values("iv_edge_pts", ascending=False)
+    return result.head(200)
+
+
 def _build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
                        positive_loose=False, min_volume=0, strategy="same_type"):
     """Match Taiwan warrants against the same-underlying US ADR options.
@@ -1248,6 +1472,54 @@ def tw_us_option_match_csv():
         output.getvalue(),
         mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=tw_us_option_match.csv"},
+    )
+
+
+def _straddle_params(data):
+    return dict(
+        stock_codes=data.get("stock_codes", ["2330"]),
+        option_type=data.get("option_type", "All"),
+        max_strike_diff_pct=float(data.get("max_strike_diff_pct", 10.0)),
+        max_dte_diff=int(data.get("max_dte_diff", 30)),
+        min_volume=int(data.get("min_volume", 0) or 0),
+        min_iv_edge=float(data.get("min_iv_edge", 1.0)),
+    )
+
+
+@app.route("/straddle_arbitrage", methods=["POST"])
+def straddle_arbitrage():
+    p = _straddle_params(request.json)
+    try:
+        df = _build_straddle_df(**p)
+        rows = json.loads(df.to_json(orient="records")) if not df.empty else []
+        return jsonify({"rows": rows, "count": len(rows)})
+    except Exception as e:
+        return jsonify({"rows": [], "count": 0, "error": str(e)})
+
+
+@app.route("/straddle_arbitrage_csv", methods=["POST"])
+def straddle_arbitrage_csv():
+    p = _straddle_params(request.json)
+    try:
+        df = _build_straddle_df(**p)
+        # Flatten the nested leg dicts so the CSV is human-readable.
+        flat = []
+        for r in json.loads(df.to_json(orient="records")):
+            row = {k: v for k, v in r.items() if not isinstance(v, dict)}
+            for lk in ("long_call", "long_put", "short_call", "short_put"):
+                lg = r.get(lk) or {}
+                row[f"{lk}"] = f"{lg.get('source')} {lg.get('id')} K{lg.get('K')} {lg.get('dte')}d iv{lg.get('iv')}"
+            flat.append(row)
+        df = pd.DataFrame(flat)
+    except Exception:
+        df = pd.DataFrame()
+    output = io.StringIO()
+    df.to_csv(output, index=False)
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=straddle_arbitrage.csv"},
     )
 
 
