@@ -17,11 +17,16 @@ services:
         value: "2"
       # Phase 2 cutover (staged). ENABLE_SCHEDULER turns on the background
       # refresh jobs that WRITE Supabase market snapshots (gated to each
-      # market's trading hours, on a wall-clock 15-min cron grid). Readers
-      # still serve live data until MARKET_SOURCE=supabase is added (step 5b),
-      # so this alone is behavior-preserving.
+      # market's trading hours, on a wall-clock 15-min cron grid). Off for now:
+      # step 5b turns readers on first, without the recurring background writes.
       - key: ENABLE_SCHEDULER
-        value: "1"
+        value: "0"
+      # Step 5b: readers now serve the Supabase snapshots (falling back to a
+      # live fetch on empty/error/unconfigured). With ENABLE_SCHEDULER off,
+      # snapshots are only as fresh as the last manual write (e.g. a validation
+      # run or /refresh) until the scheduler is turned back on.
+      - key: MARKET_SOURCE
+        value: "supabase"
       # Paste these in the Render dashboard — never commit real values.
       - key: SUPABASE_URL
         sync: false
