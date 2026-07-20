@@ -2652,8 +2652,17 @@
         });
 
         const eCol = r.iv_edge_pts >= 0 ? "var(--put)" : "var(--call)";
-        const exec = r.iv_edge_pts > 0 ? '<span style="color:var(--put)">EXECUTABLE (short legs are options)</span>'
-          : '<span style="color:var(--call)">no positive edge — long-vol is richer than short-vol here</span>';
+        // Executability is a property of the LEGS and the pricing mode, never of
+        // the edge sign. A short warrant leg can't be written at all, and loose
+        // prices don't cross the spread — either makes the row debug-only.
+        const nx = [];
+        if (r.shorts_warrant) nx.push("shorts a warrant — only the issuer can write these");
+        if (r.loose_prices) nx.push("loose prices — spread not crossed");
+        const exec = nx.length
+          ? `<span style="color:var(--call);font-weight:700">NON-EXECUTABLE (debug): ${nx.join("; ")}</span>`
+          : r.iv_edge_pts > 0
+            ? '<span style="color:var(--put)">EXECUTABLE (short legs are options)</span>'
+            : '<span style="color:var(--call)">no positive edge — long-vol is richer than short-vol here</span>';
         document.getElementById("straddle-modal-body").innerHTML = `
           <h2 style="margin:0 0 4px;font-size:18px">${r.underlying_code} — Straddle Vol Arb <span style="color:var(--muted);font-size:13px">spot ${S}</span></h2>
           <p style="margin:0 0 16px;font-size:12px;color:var(--muted)">Long the cheap-vol package, short the dear option package. ${exec}.</p>

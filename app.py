@@ -1031,7 +1031,6 @@ def _build_straddle_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
             # Best long counterpart = lowest long_iv within K/DTE tolerance of
             # this short package (maximises the vol edge).
             short_ids = {sh["call"]["id"], sh["put"]["id"]}
-            short_last = max(sh["call"]["dte"], sh["put"]["dte"])
             best_long = None
             for lo in longs:
                 if abs(lo["K"] - sh["K"]) / S * 100 > max_strike_diff_pct:
@@ -1042,9 +1041,19 @@ def _build_straddle_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
                 # own bid-ask spread and shows a phantom edge.
                 if {lo["call"]["id"], lo["put"]["id"]} & short_ids:
                     continue
-                # The long package must still be alive when the last short leg
-                # expires, otherwise the short is naked from long expiry onward.
-                if require_dte_cover and short_last > min(lo["call"]["dte"], lo["put"]["dte"]):
+                # Cover is PER OPTION TYPE, not across the package: a call can
+                # only be covered by a call, a put only by a put. Assignment on
+                # a short call means delivering shares (source them by
+                # exercising the long call); assignment on a short put means
+                # buying shares (offload them via the long put). A long call
+                # cannot cover a short put — the put is assigned precisely in
+                # the down-scenario where the call is worthless. So require the
+                # long leg of each type to outlive the short leg of that type,
+                # rather than the stricter min(long) >= max(short).
+                if require_dte_cover and (
+                    sh["call"]["dte"] > lo["call"]["dte"]
+                    or sh["put"]["dte"] > lo["put"]["dte"]
+                ):
                     diag["cut_dte_cover"] += 1
                     continue
                 if best_long is None or lo["iv"] < best_long["iv"]:
