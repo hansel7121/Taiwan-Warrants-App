@@ -2611,7 +2611,7 @@
       }
 
       function openStraddleInfo() {
-        alert("Straddle Vol Arb\n\nA straddle package = one call + one put on the same underlying (strikes may differ within Δ-strike = a strangle).\n\nLONG the cheapest-implied-vol package (legs bought from a warrant OR an option) and SHORT the dearest package (OPTION legs only — Taiwan warrants can't be shorted). Edge = short IV − long IV, in vol points.\n\nCompared in IMPLIED VOL, not price, so the deterministic intrinsic (strike) and √T (expiry) terms are stripped out. Because strikes/expiries differ (loose match) each trade carries residual net delta + net vega + skew/term exposure — see the breakdown. The trade unwinds at the FIRST expiry; surviving legs are marked at Black-Scholes.\n\nWarrants trade rich, so a positive (executable) edge is uncommon. v1 uses the raw IV spread; skew/term adjustment is a later refinement.");
+        alert("Straddle Vol Arb\n\nA straddle package = one call + one put on the same underlying (strikes may differ within Δ-strike = a strangle).\n\nLONG the cheapest-implied-vol package (legs bought from a warrant OR an option) and SHORT the dearest package (OPTION legs only — Taiwan warrants can't be shorted). Edge = short IV − long IV, in vol points.\n\nCompared in IMPLIED VOL, not price, so the deterministic intrinsic (strike) and √T (expiry) terms are stripped out. Because strikes/expiries differ (loose match) each trade carries residual net delta + net vega + skew/term exposure — see the breakdown. The trade unwinds at the FIRST expiry. Every leg is then settled at INTRINSIC — ITM exercised, OTM worthless — even legs with time left, so the P&L curve contains no IV input at all and rests only on payoff structure plus entry prices.\n\nThat approximation cuts both ways: discarding a long leg's remaining time value is conservative, but assuming a short leg that outlives first expiry is closed at intrinsic ignores the time value you'd actually pay to buy it back. The curve is only a true floor when every short leg expires at first expiry.\n\nWarrants trade rich, so a positive (executable) edge is uncommon. v1 uses the raw IV spread for ranking; skew/term adjustment is a later refinement.");
       }
 
       function closeStraddleModal() {
@@ -2651,6 +2651,23 @@
             <td style="${tdr}">${l.px_per_share}</td><td style="${tdr}">${sz}</td></tr>`;
         });
 
+        // "Stub" legs = still alive at first expiry but settled at intrinsic in
+        // the P&L. The approximation is not symmetric: for a LONG stub you give
+        // up time value you actually own (understates P&L, safe); for a SHORT
+        // stub you assume you buy it back at intrinsic when you'd really pay
+        // intrinsic + time value (overstates P&L, unsafe). Long stubs are the
+        // margin of safety, short stubs are unmodelled cost — so name them.
+        const longStubs = legs.filter(l => l.dir > 0 && l.dte > r.first_expiry);
+        const shortStubs = legs.filter(l => l.dir < 0 && l.dte > r.first_expiry);
+        const stubTxt = (arr) => arr.map(l => `${l.type} ${l.dte}d`).join(", ");
+        const stubNote =
+          (longStubs.length
+            ? `<b>Conservative:</b> long ${stubTxt(longStubs)} still ${longStubs.map(l => l.dte - r.first_expiry).join("/")}d from expiry — remaining time value discarded, so realised P&L should beat this curve. `
+            : "")
+          + (shortStubs.length
+            ? `<b style="color:var(--call)">Unmodelled cost:</b> short ${stubTxt(shortStubs)} outlives first expiry by ${shortStubs.map(l => l.dte - r.first_expiry).join("/")}d — closing it costs intrinsic <i>plus</i> time value, which this curve omits, so the line is <b>not</b> a floor.`
+            : `All short legs die at first expiry, so nothing is bought back above intrinsic — this curve is a genuine worst case.`);
+
         const eCol = r.iv_edge_pts >= 0 ? "var(--put)" : "var(--call)";
         // Executability is a property of the LEGS and the pricing mode, never of
         // the edge sign. A short warrant leg can't be written at all, and loose
@@ -2682,19 +2699,21 @@
           </div>
           <div id="straddle-payoff-chart" style="width:100%;height:280px"></div>
           <div style="background:var(--surface);border-radius:6px;padding:11px 14px;margin-top:12px;font-size:11px;color:var(--muted);line-height:1.6">
-            P&L at the FIRST expiry (${r.first_expiry}d) across spot; legs expiring later are marked at Black-Scholes with their solved IV. Because strikes/expiries differ this is a strangle-vs-strangle: it carries the <b>net Δ</b> and <b>net vega</b> above plus skew/term-structure exposure the raw IV edge doesn't capture. Warrant legs can't be shorted, so only the option (short) legs are written. Quotes are delayed; run during the TW session (09:00–13:30) for live two-sided option prices.
+            P&L at the FIRST expiry (${r.first_expiry}d) across spot. <b>Every leg is settled at intrinsic</b> — ITM legs exercised, OTM legs worthless — including legs with time left. No Black-Scholes, no IV anywhere in this curve, so it can't be distorted by the unreliable vols solved off near-intrinsic or deep-OTM quotes. ${stubNote} Because strikes/expiries differ this is a strangle-vs-strangle carrying the <b>net Δ</b> above. Warrant legs can't be shorted, so only option legs are written unless the debug toggle is on. Quotes are delayed; run during the TW session (09:00–13:30) for live two-sided option prices.
           </div>`;
 
-        // Payoff at first expiry
+        // Payoff at first expiry — every leg settled at INTRINSIC, including the
+        // ones with time left. Deliberately not marked at Black-Scholes: the
+        // solved IVs are unreliable on near-intrinsic and deep-OTM quotes, and
+        // an arb should stand on payoff structure plus entry price alone, with
+        // no vol input anywhere in the P&L.
         const lo = S * 0.8, hi = S * 1.2, N = 90, xs = [], ys = [];
         for (let i = 0; i <= N; i++) {
           const ST = lo + (hi - lo) * i / N;
           let pnl = 0;
           legs.forEach(l => {
-            const rem = (l.dte - r.first_expiry) / 365, isPut = l.type === "Put";
-            const val = rem <= 0
-              ? (isPut ? Math.max(0, l.K - ST) : Math.max(0, ST - l.K))
-              : (isPut ? bsPut(ST, l.K, rem, R_FREE, l.iv) : bsCall(ST, l.K, rem, R_FREE, l.iv));
+            const isPut = l.type === "Put";
+            const val = isPut ? Math.max(0, l.K - ST) : Math.max(0, ST - l.K);
             pnl += l.dir * CS * (val - l.px_per_share);
           });
           xs.push(ST); ys.push(Math.round(pnl));
