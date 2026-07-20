@@ -834,11 +834,22 @@ R_FREE = 0.01875
 # The comparison is done in IMPLIED VOL, not price, to strip out the intrinsic
 # |F−K| (strike) and √T (expiry) terms that dominate raw straddle prices.
 
-def _straddle_legs(warrant_df, opt_df):
+def _straddle_legs(warrant_df, opt_df, loose=False, short_warrants=False):
     """Flatten warrants + options into a common leg record list.
 
     px_* are per-underlying-share (warrant quote ÷ exercise ratio; options are
-    already per-share). Only option legs are `shortable`.
+    already per-share).
+
+    ``loose`` (DEBUG) prices every leg on its *favorable* side — buy at the bid,
+    write at the ask — instead of the executable side (buy ask / write bid). It
+    does not cross the spread, so any edge it reports is not tradeable; it exists
+    to confirm the scanner wires up at all when live quotes are thin. Mirrors the
+    ``positive_loose`` toggle in the Direct / US arb finders.
+
+    ``short_warrants`` (DEBUG) marks warrant legs shortable. Taiwan warrants can
+    only be written by the issuing bank, so any row using a short warrant leg is
+    NOT executable — this exists purely to enlarge the short-side candidate pool
+    when the option chain has too few live quotes to form packages.
     """
     legs = []
     for _, w in warrant_df.iterrows():
@@ -846,14 +857,26 @@ def _straddle_legs(warrant_df, opt_df):
         ask = float(w["ask"] or 0)
         if ratio <= 0 or ask <= 0:
             continue
-        iv_ask = w.get("iv_ask")
-        iv_ask = float(iv_ask) if pd.notna(iv_ask) and 0 < float(iv_ask) <= 3 else None
+        bid = float(w["bid"]) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else 0.0
+
+        def _wiv(col):
+            v = w.get(col)
+            return float(v) if pd.notna(v) and 0 < float(v) <= 3 else None
+
+        iv_ask, iv_bid = _wiv("iv_ask"), _wiv("iv_bid")
+        # Executable: buy at ask. Loose: buy at bid (favorable, not tradeable).
+        buy_px, buy_iv = (bid, iv_bid) if loose else (ask, iv_ask)
+        # Write side is the mirror: executable hits the bid, loose lifts the ask.
+        sell_px, sell_iv = (ask, iv_ask) if loose else (bid, iv_bid)
         legs.append({
             "source": "warrant", "type": w["type"], "K": float(w["strike"]),
             "dte": int(w["days_to_expiry"]), "id": str(w["warrant_code"]),
             "name": w["warrant_name"], "ratio": ratio,
-            "px_buy": round(ask / ratio, 4), "iv_buy": iv_ask,
-            "px_sell": None, "iv_sell": None, "shortable": False,
+            "px_buy": round(buy_px / ratio, 4) if buy_px > 0 else None,
+            "iv_buy": buy_iv,
+            "px_sell": (round(sell_px / ratio, 4) if (short_warrants and sell_px > 0) else None),
+            "iv_sell": sell_iv if short_warrants else None,
+            "shortable": bool(short_warrants),
             "S": float(w["underlying_price"]), "vol": int(w.get("volume") or 0),
         })
     for _, o in opt_df.iterrows():
@@ -872,12 +895,15 @@ def _straddle_legs(warrant_df, opt_df):
                 return None
             v = warrant_logic.implied_vol(px, S, K, T, R_FREE, 1.0, is_put)
             return round(float(v), 4) if pd.notna(v) and 0 < float(v) <= 3 else None
+
+        buy_px = bid if loose else ask
+        sell_px = ask if loose else bid
         legs.append({
             "source": "option", "type": o["type"], "K": K,
             "dte": int(o["days_to_expiry"]), "id": str(o["contract"]),
             "name": o["contract"], "ratio": float(o.get("exercise_ratio") or 2000),
-            "px_buy": round(ask, 4) if ask > 0 else None, "iv_buy": _oiv(ask),
-            "px_sell": round(bid, 4) if bid > 0 else None, "iv_sell": _oiv(bid),
+            "px_buy": round(buy_px, 4) if buy_px > 0 else None, "iv_buy": _oiv(buy_px),
+            "px_sell": round(sell_px, 4) if sell_px > 0 else None, "iv_sell": _oiv(sell_px),
             "shortable": True,
             "S": S, "vol": int(o.get("volume") or 0),
         })
@@ -933,14 +959,27 @@ def _straddles(calls, puts, side, S, max_k_pct, max_dte_diff):
 
 
 def _build_straddle_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
-                       min_volume=0, min_iv_edge=1.0):
+                       min_volume=0, min_iv_edge=1.0, loose=False,
+                       short_warrants=False, require_dte_cover=True):
     """Straddle vol-arb rows: LONG cheap package vs SHORT dear option package.
 
     option_type is accepted for API symmetry but ignored — a straddle needs both
     calls and puts, so both are always fetched.
+
+    ``loose`` / ``short_warrants`` are DEBUG relaxations — see _straddle_legs.
+    Rows produced under either flag are not executable.
+
+    ``require_dte_cover`` enforces that every short leg expires on or before
+    every long leg, so the covering package is still alive at short expiry.
+    Without it the scanner emits rows that leave a naked short — the same
+    failure the Direct arb guards against with ``opt_dte <= warrant_dte``.
     """
     all_rows = []
     errors = []
+    # Stage counters so a zero-row scan can explain WHICH filter emptied it
+    # rather than failing with a bare "no matches".
+    diag = {"legs": 0, "longs": 0, "shorts": 0, "pairs": 0,
+            "cut_dte_cover": 0, "cut_edge": 0, "best_edge": None}
     CONTRACT = 2000  # one TAIFEX single-stock option = 2000 shares
 
     for code in stock_codes:
@@ -966,9 +1005,11 @@ def _build_straddle_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
             errors.append(f"{code}: no live options")
             continue
 
-        legs = _straddle_legs(warrant_df, opt_df)
+        legs = _straddle_legs(warrant_df, opt_df, loose=loose,
+                              short_warrants=short_warrants)
         if not legs:
             continue
+        diag["legs"] += len(legs)
         S = float(warrant_df["underlying_price"].iloc[0])
 
         buy_calls = _collapse_best(legs, "Call", "buy")
@@ -980,6 +1021,8 @@ def _build_straddle_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
 
         longs = _straddles(buy_calls, buy_puts, "buy", S, max_strike_diff_pct, max_dte_diff)
         shorts = _straddles(sell_calls, sell_puts, "sell", S, max_strike_diff_pct, max_dte_diff)
+        diag["longs"] += len(longs)
+        diag["shorts"] += len(shorts)
         if not (longs and shorts):
             continue
 
@@ -988,6 +1031,7 @@ def _build_straddle_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
             # Best long counterpart = lowest long_iv within K/DTE tolerance of
             # this short package (maximises the vol edge).
             short_ids = {sh["call"]["id"], sh["put"]["id"]}
+            short_last = max(sh["call"]["dte"], sh["put"]["dte"])
             best_long = None
             for lo in longs:
                 if abs(lo["K"] - sh["K"]) / S * 100 > max_strike_diff_pct:
@@ -998,12 +1042,21 @@ def _build_straddle_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
                 # own bid-ask spread and shows a phantom edge.
                 if {lo["call"]["id"], lo["put"]["id"]} & short_ids:
                     continue
+                # The long package must still be alive when the last short leg
+                # expires, otherwise the short is naked from long expiry onward.
+                if require_dte_cover and short_last > min(lo["call"]["dte"], lo["put"]["dte"]):
+                    diag["cut_dte_cover"] += 1
+                    continue
                 if best_long is None or lo["iv"] < best_long["iv"]:
                     best_long = lo
             if best_long is None:
                 continue
+            diag["pairs"] += 1
             edge_pts = (sh["iv"] - best_long["iv"]) * 100
+            if diag["best_edge"] is None or edge_pts > diag["best_edge"]:
+                diag["best_edge"] = edge_pts
             if edge_pts < min_iv_edge:
+                diag["cut_edge"] += 1
                 continue
 
             lc, lp = best_long["call"], best_long["put"]
@@ -1040,10 +1093,25 @@ def _build_straddle_df(stock_codes, option_type, max_strike_diff_pct, max_dte_di
                 "t_long": best_long["dte"], "t_short": sh["dte"],
                 "first_expiry": min(lc["dte"], lp["dte"], sc["dte"], sp["dte"]),
                 "contract_size": CONTRACT,
+                # Executability flags — any True means this row is debug-only.
+                "loose_prices": bool(loose),
+                "shorts_warrant": bool(sc["source"] == "warrant" or sp["source"] == "warrant"),
             })
 
     if not all_rows:
-        raise RuntimeError("; ".join(errors) if errors else "No straddle matches found")
+        why = (f"No straddle rows. Stages: legs={diag['legs']}, "
+               f"long_pkgs={diag['longs']}, short_pkgs={diag['shorts']}, "
+               f"pairs={diag['pairs']}, cut_by_dte_cover={diag['cut_dte_cover']}, "
+               f"cut_by_min_iv_edge={diag['cut_edge']}")
+        if diag["best_edge"] is not None:
+            why += (f". Best edge found = {diag['best_edge']:.2f} pts vs "
+                    f"threshold {min_iv_edge:.2f} pts — lower Min IV Edge to see it")
+        elif diag["shorts"] == 0:
+            why += (". No short packages: the short leg needs a live two-sided "
+                    "option quote (or enable Debug: allow short warrants)")
+        if errors:
+            why += " | " + "; ".join(errors)
+        raise RuntimeError(why)
 
     result = pd.DataFrame(all_rows).sort_values("iv_edge_pts", ascending=False)
     return result.head(200)
@@ -1483,6 +1551,9 @@ def _straddle_params(data):
         max_dte_diff=int(data.get("max_dte_diff", 30)),
         min_volume=int(data.get("min_volume", 0) or 0),
         min_iv_edge=float(data.get("min_iv_edge", 1.0)),
+        loose=bool(data.get("loose", False)),
+        short_warrants=bool(data.get("short_warrants", False)),
+        require_dte_cover=bool(data.get("require_dte_cover", True)),
     )
 
 

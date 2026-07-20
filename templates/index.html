@@ -850,6 +850,18 @@
               <label>Min Option Volume
                 <input type="number" id="straddleMinVolume" value="0" min="0" style="width:90px"/>
               </label>
+              <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="DEBUG. Prices every leg on its favorable side (buy at bid, write at ask) instead of the executable side. Does not cross the spread — resulting edge is NOT tradeable.">
+                <input type="checkbox" id="straddleLoose" style="width:auto;margin:0"/>
+                Loose prices
+              </label>
+              <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="DEBUG. Lets warrant legs sit on the short side. Only the issuing bank can write Taiwan warrants, so these rows are NOT executable — use to enlarge the short-side pool when the option chain is thin.">
+                <input type="checkbox" id="straddleShortWarrants" style="width:auto;margin:0"/>
+                Allow short warrants
+              </label>
+              <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="DEBUG. Off = allow rows where a short leg outlives the long package, leaving a naked short after long expiry. Keep ON for tradeable results.">
+                <input type="checkbox" id="straddleDteCover" checked style="width:auto;margin:0"/>
+                Require DTE cover
+              </label>
               <div class="action-group">
                 <button class="primary" id="straddleFindBtn" onclick="runStraddle()">Find Straddle Arb</button>
                 <button class="success" id="straddleDownloadBtn" onclick="downloadStraddleCSV()" style="display:none">Download CSV</button>
@@ -2520,6 +2532,9 @@
           max_dte_diff: parseInt(document.getElementById("straddleMaxDteDiff").value) || 30,
           min_iv_edge: parseFloat(document.getElementById("straddleMinIvEdge").value) || 0,
           min_volume: parseInt(document.getElementById("straddleMinVolume").value) || 0,
+          loose: document.getElementById("straddleLoose").checked,
+          short_warrants: document.getElementById("straddleShortWarrants").checked,
+          require_dte_cover: document.getElementById("straddleDteCover").checked,
         };
       }
 
@@ -2538,7 +2553,15 @@
         } catch (e) { st.textContent = "Error: " + e.message; return; }
         if (data.error) { st.textContent = "Error: " + data.error; return; }
         currentStraddleData = data.rows;
-        st.innerHTML = `${data.count} straddle pairs — <b>long</b> the cheap-vol package (buy) vs <b>short</b> the dear option package (write). Edge = short IV − long IV (vol pts).`;
+        const f = getStraddleFilters();
+        const dbg = [];
+        if (f.loose) dbg.push("loose prices");
+        if (f.short_warrants) dbg.push("short warrants");
+        if (!f.require_dte_cover) dbg.push("DTE cover off");
+        const warn = dbg.length
+          ? `<div style="margin-top:6px;padding:6px 10px;border-radius:4px;background:rgba(220,80,60,0.15);border:1px solid rgba(220,80,60,0.5);color:var(--text);font-size:12px"><b>DEBUG MODE — rows below are NOT executable</b> (${dbg.join(", ")}).</div>`
+          : "";
+        st.innerHTML = `${data.count} straddle pairs — <b>long</b> the cheap-vol package (buy) vs <b>short</b> the dear option package (write). Edge = short IV − long IV (vol pts).` + warn;
         if (data.count) document.getElementById("straddleDownloadBtn").style.display = "inline-block";
         renderStraddleTable(currentStraddleData);
       }
