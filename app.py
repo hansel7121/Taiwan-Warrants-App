@@ -424,11 +424,24 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                 (candidates["days_to_expiry"] - w["days_to_expiry"]).abs()
             )
 
-            # Positive: opt_strike >= warrant_strike (buy warrant, sell option)
-            # Negative: opt_strike <= warrant_strike (buy option, sell warrant)
+            # The residual after pairing two same-type contracts is a vertical
+            # spread, and it must be the FAVORABLE one — payoff >= 0 at every
+            # spot — so the entry credit is never clawed back at expiry.
+            #
+            # Long the K_long leg, short the K_short leg:
+            #   calls: favorable iff K_short >= K_long (bull call spread)
+            #   puts : favorable iff K_short <= K_long (bear put spread)
+            # Puts invert because a put pays off downward: the leg you are short
+            # must be the one that starts paying LAST as spot falls.
+            #
+            # Positive = buy warrant / sell option -> K_opt vs K_warrant.
+            # Negative = buy option / sell warrant -> the comparison flips.
+            is_put_w = w["type"] == "Put"
+            long_side_is_warrant = direction == "positive"
+            opt_ge_warrant = long_side_is_warrant != is_put_w
             strike_filter = (
                 candidates["strike"] >= w["strike"]
-                if direction == "positive"
+                if opt_ge_warrant
                 else candidates["strike"] <= w["strike"]
             )
 
