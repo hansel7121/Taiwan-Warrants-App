@@ -174,7 +174,7 @@ def get_cmoney_key():
     return _cmoney_key
 
 
-def refresh_cmoney_key():
+def scrape_cmoney_key():
     global _cmoney_key
     with _cmoney_key_fetch_lock:
         _cmoney_key = None
@@ -242,7 +242,7 @@ def get_cmoney_prices(codes):
 
     if key_expired:
         applog.log("WARR", f"cmkey expired (Error -3) — refreshing key, retrying {len(codes)} codes")
-        cmkey = refresh_cmoney_key()
+        cmkey = scrape_cmoney_key()
         results = {}
         with ThreadPoolExecutor(max_workers=100) as executor:
             futures = {
@@ -468,7 +468,7 @@ def _stream_isin(url):
     return rows
 
 
-def refresh_warrant_universe():
+def scrape_twse_universe():
     """Scheduler hook: re-scrape the ISIN listing and swap it into the cache."""
     global _universe_codes, _universe_ts, _universe_fetching, _universe_fetch_started
     with _universe_lock:
@@ -565,7 +565,7 @@ def _ensure_universe_fetch():
             return
         if _universe_fetching and now - _universe_fetch_started < UNIVERSE_FETCH_STALL:
             return
-    threading.Thread(target=refresh_warrant_universe, daemon=True).start()
+    threading.Thread(target=scrape_twse_universe, daemon=True).start()
 
 
 def _universe():
@@ -756,7 +756,7 @@ def _apply_warrant_filters(df, stock_codes, option_type, min_days, max_days,
     return df
 
 
-def fetch_warrants(
+def read_warrant(
     stock_codes,
     option_type="All",
     min_days=0,
@@ -800,13 +800,13 @@ def fetch_warrants(
         except Exception as e:
             applog.log("WARR", f"supabase read failed ({e}) — falling back to live")
 
-    return fetch_warrants_live(
+    return scrape_cmoney_warrant(
         stock_codes, option_type, min_days, max_days,
         min_leverage, max_tv_pct, min_volume, compute_iv, keep_noniv,
     )
 
 
-def fetch_warrants_live(
+def scrape_cmoney_warrant(
     stock_codes,
     option_type="All",
     min_days=0,
@@ -819,7 +819,7 @@ def fetch_warrants_live(
 ):
     """Pure live-scrape reader (no Supabase snapshot branch).
 
-    The scraper half of fetch_warrants: always re-scrapes CMoney (force=True
+    The scraper half of read_warrant: always re-scrapes CMoney (force=True
     bypasses the in-process _warrant_cache so a manual refresh is guaranteed
     fresh) and applies the same filter chain. Returns the same
     (df, error, meta) tuple shape.
@@ -873,7 +873,7 @@ def fetch_warrants_live(
 
 
 def fetch_iv_surface(stock_codes, option_type="All"):
-    df, error, meta = fetch_warrants(
+    df, error, meta = read_warrant(
         stock_codes,
         option_type=option_type,
         min_days=0,

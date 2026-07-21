@@ -69,8 +69,8 @@
             <input type="number" id="optMinVolume" value="0" min="0" />
           </label>
           <div class="action-group">
-            <button class="primary" onclick="fetchOptionsData()">Fetch Options</button>
-            <button class="sm" id="refreshOptionsBtn" onclick="refreshOptions()">Refresh now</button>
+            <button class="primary" onclick="readOption()">Read Options</button>
+            <button class="sm" id="refreshOptionsBtn" onclick="syncOption()">Sync now</button>
             <button class="success" id="optDownloadBtn" onclick="downloadOptionsCSV()" style="display:none">
               Download CSV
             </button>
@@ -154,8 +154,8 @@
           </label>
 
           <div class="action-group">
-            <button class="primary" onclick="fetchData()">Fetch Warrants</button>
-            <button class="sm" id="refreshWarrantsBtn" onclick="refreshWarrants()">Refresh now</button>
+            <button class="primary" onclick="readWarrant()">Read Warrants</button>
+            <button class="sm" id="refreshWarrantsBtn" onclick="syncWarrant()">Sync now</button>
             <button class="success" id="downloadBtn" onclick="downloadCSV()" style="display:none">
               Download CSV
             </button>

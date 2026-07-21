@@ -379,11 +379,11 @@ def _live_premium_fx(stock_code):
     return None
 
 
-def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
+def read_us_option(stock_code, option_type="All", min_days=1, max_days=365,
                      compute_iv=True, keep_noniv=False):
     """Return a DataFrame of UMC options priced in TWD per Taiwan share.
 
-    Columns mirror options_logic.fetch_options so the same matching code can
+    Columns mirror options_logic.read_tw_option so the same matching code can
     consume it: type, strike, days_to_expiry, bid, ask, iv_bid, iv_ask,
     contract, is_live, plus USD reference fields (strike_usd, fx, adr_price).
     """
@@ -415,19 +415,19 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
                         snap[_c] = np.nan
             return _filter_chain(snap, option_type, min_days, max_days)
 
-    return fetch_us_options_live(
+    return scrape_yfinance_us_option(
         stock_code, option_type, min_days, max_days, compute_iv, keep_noniv,
     )
 
 
-def fetch_us_options_live(stock_code, option_type="All", min_days=1, max_days=365,
+def scrape_yfinance_us_option(stock_code, option_type="All", min_days=1, max_days=365,
                           compute_iv=True, keep_noniv=False):
     """Pure live-scrape reader (no Supabase snapshot branch).
 
-    The scraper half of fetch_us_options: always walks the yfinance option
+    The scraper half of read_us_option: always walks the yfinance option
     chain fresh (never short-circuits on the in-process _cache TTL) so a manual
     refresh is guaranteed live, then repopulates _cache so the reader-side
-    cache-hit path stays warm. Same (df) return shape as fetch_us_options.
+    cache-hit path stays warm. Same (df) return shape as read_us_option.
     """
     if stock_code not in US_ADR_MAP:
         raise RuntimeError(f"{stock_code}: no US ADR mapping")

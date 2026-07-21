@@ -387,7 +387,7 @@ def _fetch_mis_quotes(cid, kind, force=False):
     return rows
 
 
-def fetch_options_mis(code, compute_iv=True, keep_noniv=False, force=False):
+def scrape_mis_tw_option(code, compute_iv=True, keep_noniv=False, force=False):
     """Intraday (~20 min delayed) TW option chain from TAIFEX MIS, in the same
     schema as _parse_and_compute so callers are unchanged. Raises on failure."""
     cfg = COMMODITY_MAP[code]
@@ -518,7 +518,7 @@ def _apply_option_filters(result, option_type, min_days, max_days, min_leverage,
     return result.sort_values(["days_to_expiry", "strike"]).reset_index(drop=True)
 
 
-def fetch_options(
+def read_tw_option(
     stock_codes,
     option_type="All",
     min_days=0,
@@ -561,13 +561,13 @@ def fetch_options(
             # return). raise-on-empty stays only in the live scrape path below.
             return result
 
-    return fetch_options_live(
+    return scrape_tw_option(
         stock_codes, option_type, min_days, max_days,
         min_leverage, min_volume, compute_iv, keep_noniv,
     )
 
 
-def fetch_options_live(
+def scrape_tw_option(
     stock_codes,
     option_type="All",
     min_days=0,
@@ -579,7 +579,7 @@ def fetch_options_live(
 ):
     """Pure live-scrape reader (no Supabase snapshot branch).
 
-    The scraper half of fetch_options: always re-fetches from TAIFEX MIS
+    The scraper half of read_tw_option: always re-fetches from TAIFEX MIS
     (primary) / EOD (fallback) with force=True to bypass the in-process TTL
     caches (_mis_cache / _taifex_cache / _spot_cache), so a manual refresh is
     guaranteed fresh. Raises RuntimeError only when nothing can be scraped at
@@ -597,7 +597,7 @@ def fetch_options_live(
         df = None
         # Primary: MIS intraday quotes. Fallback: EOD data-download file.
         try:
-            df = fetch_options_mis(code, compute_iv=compute_iv, keep_noniv=keep_noniv,
+            df = scrape_mis_tw_option(code, compute_iv=compute_iv, keep_noniv=keep_noniv,
                                    force=True)
             applog.log("OPT", f"{code} source=MIS {len(df)} contracts")
         except Exception as e:

@@ -52,7 +52,7 @@ def us_option_last(us_code, opt_type, strike_twd, expiry_iso, fx, adr_ratio):
 def us_options_scan(stock_codes, option_type, min_days, max_days, min_volume):
     """American (US ADR) option chains for the scanner, in native USD.
 
-    Wraps fetch_us_options (which also carries the TWD-normalized view used by
+    Wraps read_us_option (which also carries the TWD-normalized view used by
     the arb finder) and returns the USD-native columns a US options trader
     expects: strike_usd, bid_usd, ask_usd, adr_price (underlying), plus IV /
     delta / volume / OI.
@@ -60,7 +60,7 @@ def us_options_scan(stock_codes, option_type, min_days, max_days, min_volume):
     frames, errors = [], []
     for code in stock_codes:
         try:
-            df = us_options_logic.fetch_us_options(
+            df = us_options_logic.read_us_option(
                 code, option_type, min_days=max(1, int(min_days)),
                 max_days=int(max_days), compute_iv=True,
             )
@@ -449,7 +449,7 @@ def build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
         # No time-value cap and no IV solve on the arb path: a positive price
         # arb only needs warrant ask + option bid, so nothing should drop a leg
         # over time value or a non-converging IV.
-        warrant_df, err, _meta = warrant_logic.fetch_warrants(
+        warrant_df, err, _meta = warrant_logic.read_warrant(
             [code], option_type, 0, 365, 0, 1e9, 0, compute_iv=False
         )
         if warrant_df.empty:
@@ -461,7 +461,7 @@ def build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
             # PCP pairs a warrant with the OPPOSITE-type option, so the option
             # fetch must include both types regardless of the warrant filter.
             opt_type_fetch = "All" if strategy == "pcp" else option_type
-            opt_df = options_logic.fetch_options([code], opt_type_fetch, min_days=1, compute_iv=False)
+            opt_df = options_logic.read_tw_option([code], opt_type_fetch, min_days=1, compute_iv=False)
             opt_df = opt_df[opt_df["is_live"]]
             if min_volume > 0:
                 opt_df = opt_df[opt_df["volume"] >= min_volume]
@@ -536,7 +536,7 @@ def build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_dif
         contract_size = us_options_logic.contract_tw_shares(code)  # TW shares/contract
 
         # No time-value cap and no IV solve on the arb path (see _build_arb_df).
-        warrant_df, err, _meta = warrant_logic.fetch_warrants(
+        warrant_df, err, _meta = warrant_logic.read_warrant(
             [code], option_type, 0, 365, 0, 1e9, 0, compute_iv=False
         )
         if warrant_df.empty:
@@ -548,7 +548,7 @@ def build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_dif
             # PCP pairs a warrant with the OPPOSITE-type option, so the option
             # fetch must include both types regardless of the warrant filter.
             opt_type_fetch = "All" if strategy == "pcp" else option_type
-            opt_df = us_options_logic.fetch_us_options(code, opt_type_fetch, min_days=1, compute_iv=False)
+            opt_df = us_options_logic.read_us_option(code, opt_type_fetch, min_days=1, compute_iv=False)
             opt_df = opt_df[opt_df["is_live"]]
             if min_volume > 0:
                 opt_df = opt_df[opt_df["volume"] >= min_volume]
@@ -785,7 +785,7 @@ def build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct, max_dte
             # quote on the TW option leg — fall back to the last settlement
             # snapshot so the scan still works when TAIFEX is closed. (Off-hours
             # prices are stale marks, not executable until the market reopens.)
-            tw_df = options_logic.fetch_options([code], option_type, min_days=1, compute_iv=False)
+            tw_df = options_logic.read_tw_option([code], option_type, min_days=1, compute_iv=False)
             if min_volume > 0:
                 tw_df = tw_df[tw_df["volume"] >= min_volume]
         except Exception as e:
@@ -794,7 +794,7 @@ def build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct, max_dte
             continue
 
         try:
-            us_df = us_options_logic.fetch_us_options(code, option_type, min_days=1, compute_iv=False)
+            us_df = us_options_logic.read_us_option(code, option_type, min_days=1, compute_iv=False)
             us_df = us_df[us_df["is_live"]]
             if min_volume > 0:
                 us_df = us_df[us_df["volume"] >= min_volume]

@@ -99,8 +99,8 @@ def _check_cols(category, df):
 def writer_assertions():
     print("\nPART 2 — writers fill tables (core writers, direct)")
 
-    print(" refresh_cmkey()")
-    scheduler.refresh_cmkey()
+    print(" sync_cmkey()")
+    scheduler.sync_cmkey()
     key = db_market.get_key()
     if key:
         print(f"  [PASS] cmoney_key non-empty (len={len(key)})")
@@ -108,8 +108,8 @@ def writer_assertions():
         _fails.append("cmoney_key empty")
         print("  [FAIL] cmoney_key empty")
 
-    print(" refresh_universe()")
-    scheduler.refresh_universe()
+    print(" sync_universe()")
+    scheduler.sync_universe()
     df, n = _read_twice("warrant_universe")
     _check_cols("warrant_universe", df)
     if n > 10000:
@@ -118,8 +118,8 @@ def writer_assertions():
         _fails.append(f"warrant_universe only {n} rows")
         print(f"  [FAIL] warrant_universe only {n} rows (want > 10000)")
 
-    print(" refresh_warrants()")
-    scheduler.refresh_warrants()
+    print(" sync_warrant()")
+    scheduler.sync_warrant()
     df, n = _read_twice("warrants")
     _check_cols("warrants", df)
     if n > 1000:
@@ -128,8 +128,8 @@ def writer_assertions():
         _fails.append(f"warrants only {n} rows")
         print(f"  [FAIL] warrants only {n} rows (want > 1000)")
 
-    print(" refresh_tw_options()")
-    scheduler.refresh_tw_options()
+    print(" sync_tw_option()")
+    scheduler.sync_tw_option()
     df, n = _read_twice("tw_options")
     _check_cols("tw_options", df)
     if n > 0:
@@ -137,8 +137,8 @@ def writer_assertions():
     else:
         print("  [note] tw_options 0 rows — acceptable off-hours, SKIP >0 assertion")
 
-    print(" refresh_us_options()")
-    scheduler.refresh_us_options()
+    print(" sync_us_option()")
+    scheduler.sync_us_option()
     df, n = _read_twice("us_options")
     _check_cols("us_options", df)
     if n > 0:

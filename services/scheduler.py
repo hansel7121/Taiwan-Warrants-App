@@ -154,11 +154,11 @@ def is_market_open(market, now=None):
 # Core writers — plain fetch + align + write_snapshot. No gate, no _job wrapper;
 # callable directly by force_refresh and the validation harness.
 # ---------------------------------------------------------------------------
-def refresh_cmkey():
+def sync_cmkey():
     """Fetch the CMoney key and persist it to Supabase (cmoney_key store)."""
-    key = warrant_logic.refresh_cmoney_key()
+    key = warrant_logic.scrape_cmoney_key()
     if not key:
-        # refresh_cmoney_key returns the fetched string, but fall back to the
+        # scrape_cmoney_key returns the fetched string, but fall back to the
         # accessor in case a future refactor changes its return.
         key = warrant_logic.get_cmoney_key()
     if key:
@@ -168,9 +168,9 @@ def refresh_cmkey():
         print("SCHED: cmkey empty, not persisted", flush=True)
 
 
-def refresh_universe():
+def sync_universe():
     """Re-scrape the ISIN listing (in-memory swap) then snapshot the universe."""
-    warrant_logic.refresh_warrant_universe()
+    warrant_logic.scrape_twse_universe()
     rows = warrant_logic.universe_rows()
     if not rows:
         print("SCHED: universe empty, skipping write", flush=True)
@@ -179,9 +179,9 @@ def refresh_universe():
     db_market.write_snapshot("warrant_universe", df)
 
 
-def refresh_warrants():
+def sync_warrant():
     """Fetch the full warrant superset (IV computed, non-converged kept) + write."""
-    df, err, meta = warrant_logic.fetch_warrants_live(
+    df, err, meta = warrant_logic.scrape_cmoney_warrant(
         warrant_universe(), "All", 0, 365, 0.0, 1e9, 0,
         compute_iv=True, keep_noniv=True,
     )
@@ -191,12 +191,12 @@ def refresh_warrants():
     db_market.write_snapshot("warrants", df)
 
 
-def refresh_tw_options():
+def sync_tw_option():
     """Fetch each TW option product (superset-with-IV), align, write one batch."""
     frames = []
     for code in TW_OPTION_CODES:
         try:
-            df = options_logic.fetch_options_live(
+            df = options_logic.scrape_tw_option(
                 [code], "All", min_days=0, max_days=365,
                 compute_iv=True, keep_noniv=True,
             )
@@ -220,12 +220,12 @@ def refresh_tw_options():
     db_market.write_snapshot("tw_options", out)
 
 
-def refresh_us_options():
+def sync_us_option():
     """Fetch each US ADR option chain (superset-with-IV), align, write one batch."""
     frames = []
     for code in US_OPTION_CODES:
         try:
-            df = us_options_logic.fetch_us_options_live(
+            df = us_options_logic.scrape_yfinance_us_option(
                 code, "All", min_days=1, max_days=730,
                 compute_iv=True, keep_noniv=True,
             )
@@ -274,23 +274,23 @@ def _gated(market, fn):
 # Registration targets: each core writer wrapped in _job logging. These (not the
 # bare cores) are what the scheduler and force_refresh dispatch.
 def _run_cmkey():
-    _job("cmkey", refresh_cmkey)
+    _job("cmkey", sync_cmkey)
 
 
 def _run_universe():
-    _job("universe", refresh_universe)
+    _job("universe", sync_universe)
 
 
 def _run_warrants():
-    _job("warrants", refresh_warrants)
+    _job("warrants", sync_warrant)
 
 
 def _run_tw_options():
-    _job("tw_options", refresh_tw_options)
+    _job("tw_options", sync_tw_option)
 
 
 def _run_us_options():
-    _job("us_options", refresh_us_options)
+    _job("us_options", sync_us_option)
 
 
 # No "universe" entry: /refresh is a refresh-prices-now action, and force_refresh

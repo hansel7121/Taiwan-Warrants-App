@@ -99,7 +99,7 @@ function getFilters() {
   };
 }
 
-async function fetchData() {
+async function readWarrant() {
   const filters = getFilters();
   if (!filters.stock_codes.length) {
     document.getElementById("status").textContent = "Please select at least one stock.";
@@ -109,7 +109,7 @@ async function fetchData() {
   document.getElementById("tableContainer").innerHTML = "";
   document.getElementById("downloadBtn").style.display = "none";
 
-  const res = await api("/fetch", {
+  const res = await api("/read_warrant", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(filters),
@@ -122,11 +122,11 @@ async function fetchData() {
   return data;
 }
 
-function refreshWarrants() {
+function syncWarrant() {
   return refreshNow("warrants",
     document.getElementById("status"),
     document.getElementById("refreshWarrantsBtn"),
-    fetchData);
+    readWarrant);
 }
 
 function renderTable(rows) {
@@ -173,7 +173,7 @@ function sortByColumn(key, asc) {
 }
 
 async function downloadCSV() {
-  const res = await api("/download", {
+  const res = await api("/read_warrant_csv", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(getFilters()),
@@ -369,7 +369,7 @@ function getOptionsFilters() {
   };
 }
 
-async function fetchOptionsData() {
+async function readOption() {
   const filters = getOptionsFilters();
   if (!filters.stock_codes.length) {
     document.getElementById("opt-status").textContent = "Please select at least one product.";
@@ -379,7 +379,7 @@ async function fetchOptionsData() {
   document.getElementById("opt-tableContainer").innerHTML = "";
   document.getElementById("optDownloadBtn").style.display = "none";
 
-  const res = await api(_optMarket === "us" ? "/us_options" : "/fetch_options", {
+  const res = await api(_optMarket === "us" ? "/read_us_option" : "/read_tw_option", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(filters),
@@ -396,12 +396,12 @@ async function fetchOptionsData() {
   return data;
 }
 
-function refreshOptions() {
+function syncOption() {
   const kind = _optMarket === "us" ? "us_options" : "tw_options";
   return refreshNow(kind,
     document.getElementById("opt-status"),
     document.getElementById("refreshOptionsBtn"),
-    fetchOptionsData);
+    readOption);
 }
 
 function renderOptionsTable(rows) {
@@ -470,7 +470,7 @@ async function downloadOptionsCSV() {
     a.href = url; a.download = "us_options.csv"; a.click();
     return;
   }
-  const res = await api("/download_options", {
+  const res = await api("/read_tw_option_csv", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(getOptionsFilters()),

@@ -110,10 +110,10 @@ async function refreshNow(kind, statusEl, btn, onDone) {
   btn.textContent = "Refreshing…";
   statusEl.textContent = "Refreshing market data… (up to ~30s)";
   try {
-    const res = await api("/refresh", {
+    const routeMap = { warrants: "/sync_warrant", tw_options: "/sync_tw_option", us_options: "/sync_us_option" };
+    const res = await api(routeMap[kind], {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind }),
     });
     const data = await res.json();
     if (data && Array.isArray(data.skipped) && data.skipped.includes(kind)) {

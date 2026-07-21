@@ -45,15 +45,15 @@ app.jinja_env.auto_reload = True
 _LOG_SKIP_PATHS = {"/healthz", "/favicon.ico"}
 # Params worth a completion line's worth of context, in the order they read best.
 _LOG_PARAMS = ("stock_codes", "option_type", "strategy", "kind", "period")
-# The paths are historical and say nothing about the work behind them (/fetch is
-# warrants, /us_options is the US chain scan). Only the routes that do real data
+# The paths say what data work is behind them. Only the routes that do real data
 # work are named here; anything else logs its bare path, as before.
 _ROUTE_LABELS = {
-    "/fetch": "warrants",
-    "/download": "warrants csv",
-    "/fetch_options": "tw options",
-    "/download_options": "tw options csv",
-    "/us_options": "us options",
+    "/read_warrant": "warrants",
+    "/read_warrant_csv": "warrants csv",
+    "/read_tw_option": "tw options",
+    "/read_tw_option_csv": "tw options csv",
+    "/read_us_option_csv": "us options csv",
+    "/read_us_option": "us options",
     "/iv_surface": "iv surface",
     "/iv_surface_options": "iv surface (options)",
     "/adr_premium": "adr premium",
@@ -247,9 +247,9 @@ def save_custom_stocks():
     return jsonify({"ok": True})
 
 
-@app.route("/fetch", methods=["POST"])
+@app.route("/read_warrant", methods=["POST"])
 @require_auth
-def fetch():
+def read_warrant():
     data = request.json
     stock_codes = data.get("stock_codes", ["2330"])
     option_type = data.get("option_type", "All")
@@ -259,7 +259,7 @@ def fetch():
     max_tv_pct = float(data.get("max_tv_pct", 100.0))
     min_volume = int(data.get("min_volume", 0))
 
-    df, error, meta = warrant_logic.fetch_warrants(
+    df, error, meta = warrant_logic.read_warrant(
         stock_codes,
         option_type,
         min_days,
@@ -275,9 +275,9 @@ def fetch():
     return jsonify({"rows": df.to_dict(orient="records"), "count": len(df), **meta})
 
 
-@app.route("/download", methods=["POST"])
+@app.route("/read_warrant_csv", methods=["POST"])
 @require_auth
-def download():
+def read_warrant_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2330"])
     option_type = data.get("option_type", "All")
@@ -287,7 +287,7 @@ def download():
     max_tv_pct = float(data.get("max_tv_pct", 100.0))
     min_volume = int(data.get("min_volume", 0))
 
-    df, error, _meta = warrant_logic.fetch_warrants(
+    df, error, _meta = warrant_logic.read_warrant(
         stock_codes,
         option_type,
         min_days,
@@ -306,9 +306,9 @@ def download():
     )
 
 
-@app.route("/fetch_options", methods=["POST"])
+@app.route("/read_tw_option", methods=["POST"])
 @require_auth
-def fetch_options():
+def read_tw_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["TXO"])
     option_type = data.get("option_type", "All")
@@ -317,7 +317,7 @@ def fetch_options():
     min_leverage = float(data.get("min_leverage", 0.0))
     min_volume = int(data.get("min_volume", 0))
     try:
-        df = options_logic.fetch_options(
+        df = options_logic.read_tw_option(
             stock_codes, option_type, min_days, max_days, min_leverage, min_volume
         )
         # Use pandas JSON serialisation so NaN → null (browser JSON.parse rejects bare NaN)
@@ -325,13 +325,13 @@ def fetch_options():
         applog.set_rows(len(df))
         return jsonify({"rows": rows, "count": len(df), "as_of": _epoch_iso(options_logic.data_as_of(stock_codes))})
     except Exception as e:
-        applog.log("OPT", f"fetch_options failed: {e}")
+        applog.log("OPT", f"read_tw_option failed: {e}")
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
-@app.route("/us_options", methods=["POST"])
+@app.route("/read_us_option", methods=["POST"])
 @require_auth
-def us_options():
+def read_us_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
     option_type = data.get("option_type", "All")
@@ -352,9 +352,32 @@ def us_options():
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
-@app.route("/download_options", methods=["POST"])
+@app.route("/read_us_option_csv", methods=["POST"])
 @require_auth
-def download_options():
+def read_us_option_csv():
+    data = request.json
+    stock_codes = data.get("stock_codes", ["2303"])
+    option_type = data.get("option_type", "All")
+    min_days = data.get("min_days", 0)
+    max_days = data.get("max_days", 365)
+    min_volume = data.get("min_volume", 0)
+    try:
+        df = arb_logic.us_options_scan(stock_codes, option_type, min_days, max_days, min_volume)
+    except Exception:
+        df = pd.DataFrame()
+    output = io.StringIO()
+    df.to_csv(output, index=False)
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=us_options.csv"},
+    )
+
+
+@app.route("/read_tw_option_csv", methods=["POST"])
+@require_auth
+def read_tw_option_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["TXO"])
     option_type = data.get("option_type", "All")
@@ -363,7 +386,7 @@ def download_options():
     min_leverage = float(data.get("min_leverage", 0.0))
     min_volume = int(data.get("min_volume", 0))
     try:
-        df = options_logic.fetch_options(
+        df = options_logic.read_tw_option(
             stock_codes, option_type, min_days, max_days, min_leverage, min_volume
         )
     except Exception:
@@ -385,7 +408,7 @@ def iv_surface_options():
     stock_codes = data.get("stock_codes", ["TXO"])
     option_type = data.get("option_type", "Call")
     try:
-        df = options_logic.fetch_options(stock_codes, option_type, min_days=1)
+        df = options_logic.read_tw_option(stock_codes, option_type, min_days=1)
     except Exception as e:
         return jsonify({"error": str(e)})
 
@@ -691,11 +714,22 @@ def healthz():
     )
 
 
-@app.route("/refresh", methods=["POST"])
+@app.route("/sync_warrant", methods=["POST"])
 @require_auth
-def refresh():
-    kind = (request.json or {}).get("kind", "all")
-    return jsonify(scheduler.force_refresh(kind))
+def sync_warrant():
+    return jsonify(scheduler.force_refresh("warrants"))
+
+
+@app.route("/sync_tw_option", methods=["POST"])
+@require_auth
+def sync_tw_option():
+    return jsonify(scheduler.force_refresh("tw_options"))
+
+
+@app.route("/sync_us_option", methods=["POST"])
+@require_auth
+def sync_us_option():
+    return jsonify(scheduler.force_refresh("us_options"))
 
 
 def open_browser(port):
