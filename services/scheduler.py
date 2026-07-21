@@ -304,24 +304,23 @@ _FORCE_MAP = {
 }
 
 
-def force_refresh(kind="all"):
-    """Manual refresh for the /refresh route; debounced per kind."""
-    kinds = list(_FORCE_MAP) if kind == "all" else [kind]
-    unknown = [k for k in kinds if k not in _FORCE_MAP]
-    if unknown:
-        return {"ok": False, "error": f"unknown kind: {unknown[0]}"}
+def force_refresh(kind):
+    """Manual sync for the /sync_X routes; debounced per kind.
+
+    Runs synchronously — blocks until the scrape+store completes — so the
+    caller's response IS the completion signal (no polling needed). A
+    debounced call still returns immediately, before any blocking work.
+    """
+    if kind not in _FORCE_MAP:
+        return {"ok": False, "error": f"unknown kind: {kind}"}
     now = time.time()
-    started, skipped = [], []
-    for k in kinds:
-        if now - _last_run.get(k, 0) < FORCE_DEBOUNCE_SECONDS:
-            skipped.append(k)
-            continue
-        # Mark at dispatch, not completion, so a second click while the
-        # refresh is still running debounces instead of double-fetching.
-        _last_run[k] = now
-        threading.Thread(target=_FORCE_MAP[k], daemon=True).start()
-        started.append(k)
-    return {"ok": True, "started": started, "skipped": skipped}
+    if now - _last_run.get(kind, 0) < FORCE_DEBOUNCE_SECONDS:
+        return {"ok": True, "started": [], "skipped": [kind]}
+    # Mark at dispatch, not completion, so a concurrent click debounces
+    # instead of double-fetching.
+    _last_run[kind] = now
+    _FORCE_MAP[kind]()
+    return {"ok": True, "started": [kind], "skipped": []}
 
 
 def last_run(name):

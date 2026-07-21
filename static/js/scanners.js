@@ -126,7 +126,8 @@ function syncWarrant() {
   return refreshNow("warrants",
     document.getElementById("status"),
     document.getElementById("refreshWarrantsBtn"),
-    readWarrant);
+    readWarrant,
+    document.getElementById("tableContainer"));
 }
 
 function renderTable(rows) {
@@ -401,7 +402,8 @@ function syncOption() {
   return refreshNow(kind,
     document.getElementById("opt-status"),
     document.getElementById("refreshOptionsBtn"),
-    readOption);
+    readOption,
+    document.getElementById("opt-tableContainer"));
 }
 
 function renderOptionsTable(rows) {

@@ -91,24 +91,20 @@ function _tickAges() {
 
 setInterval(_tickAges, 30000);
 
-// "Refresh now" helper shared by both scanner tabs. Kicks the backend's
-// debounced background re-scrape, then polls the tab's own fetch until the
-// snapshot's as_of advances (so the table auto-updates when the scrape lands)
-// or a 60s cap elapses. Always re-enables the button, even on error.
+// "Sync now" helper shared by all three scanner tabs. The /sync_X route is
+// synchronous on the backend (blocks until the scrape+store completes), so
+// this is a plain linear sequence — no polling loop: clear the table, await
+// the sync, then do exactly one read to render the result. Always re-enables
+// the button, even on error.
 
-async function refreshNow(kind, statusEl, btn, onDone) {
+async function refreshNow(kind, statusEl, btn, onDone, tableEl) {
   if (!statusEl || !btn) return;
   const origLabel = btn.textContent;
   const wasDisabled = btn.disabled;
-  // Pre-refresh as_of, read from the last stored fetch for this status line.
-  let prevAsOf = null;
-  for (const k in window._lastAsOf) {
-    const rec = window._lastAsOf[k];
-    if (rec && rec.elId === statusEl.id && rec.data) { prevAsOf = rec.data.as_of || null; break; }
-  }
   btn.disabled = true;
-  btn.textContent = "Refreshing…";
-  statusEl.textContent = "Refreshing market data… (up to ~30s)";
+  btn.textContent = "Syncing…";
+  statusEl.textContent = "Syncing market data… this may take a bit";
+  if (tableEl) tableEl.innerHTML = "";
   try {
     const routeMap = { warrants: "/sync_warrant", tw_options: "/sync_tw_option", us_options: "/sync_us_option" };
     const res = await api(routeMap[kind], {
@@ -117,19 +113,11 @@ async function refreshNow(kind, statusEl, btn, onDone) {
     });
     const data = await res.json();
     if (data && Array.isArray(data.skipped) && data.skipped.includes(kind)) {
-      statusEl.textContent = "A refresh is already running — showing latest.";
+      statusEl.textContent = "A sync is already running — showing latest.";
     }
-    const prevMs = prevAsOf ? new Date(prevAsOf).getTime() : 0;
-    const deadline = Date.now() + 60000;
-    while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 4000));
-      let fresh;
-      try { fresh = await onDone(); } catch (e) { continue; }
-      const newAsOf = fresh && fresh.as_of;
-      if (newAsOf && new Date(newAsOf).getTime() > prevMs) break;
-    }
+    await onDone();
   } catch (e) {
-    statusEl.textContent = "Refresh failed: " + (e && e.message ? e.message : e);
+    statusEl.textContent = "Sync failed: " + (e && e.message ? e.message : e);
   } finally {
     btn.disabled = wasDisabled;
     btn.textContent = origLabel;
