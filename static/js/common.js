@@ -171,3 +171,69 @@ const COL_LABELS = { us_stock_code: "tw_stock_code",
 const visCols = (row) => Object.keys(row).filter(c => !HIDDEN_COLS.includes(c));
 
 const colLabel = (c) => COL_LABELS[c] || c;
+
+// Fetch a product-list endpoint; empty array on any failure (network error,
+// 401 redirect, etc.) so a populate call just yields an empty <select> rather
+// than throwing.
+async function fetchProductList(url) {
+  try {
+    const res = await api(url);
+    return await res.json();
+  } catch (e) {
+    return [];
+  }
+}
+
+// Fill a <select> with <option>s built from `rows` ({code, name, ...}).
+// selectedCodes pre-selects matching options (mirrors a static <option
+// selected> from before this change); selectFirst pre-selects the first
+// option if nothing else ended up selected (for single-select boxes like
+// ivOptProduct that always need something chosen).
+function populateProductSelect(selectEl, rows, opts) {
+  if (!selectEl) return;
+  opts = opts || {};
+  const labelFn = opts.labelFn || (r => r.name ? `${r.code} ${r.name}` : r.code);
+  const selectedCodes = opts.selectedCodes || [];
+  selectEl.innerHTML = "";
+  rows.forEach(r => {
+    const option = document.createElement("option");
+    option.value = r.code;
+    option.textContent = labelFn(r);
+    if (selectedCodes.includes(r.code)) option.selected = true;
+    selectEl.appendChild(option);
+  });
+  if (opts.selectFirst && selectEl.options.length && !selectEl.value) {
+    selectEl.options[0].selected = true;
+  }
+}
+
+// Fetch all three product lists and populate every product/stock <select> on
+// the page. Called once from _boot() (portfolio.js). Selects driven by a
+// single list use it directly; arbStockSelect/usStockSelect/twusStockSelect
+// need the intersection of two lists (both legs of that cross-market match
+// need data for the code) — computed client-side since the lists are tiny.
+async function initProductSelects() {
+  const [warrants, twOpts, usOpts] = await Promise.all([
+    fetchProductList("/list_warrant_stocks"),
+    fetchProductList("/list_tw_option_products"),
+    fetchProductList("/list_us_option_products"),
+  ]);
+  // Exposed for Phase 5.5's add/remove UI to reuse without re-fetching.
+  window._productLists = { warrants, twOpts, usOpts };
+
+  const codesOf = rows => new Set(rows.map(r => r.code));
+  const twCodes = codesOf(twOpts), usCodes = codesOf(usOpts);
+  const warrantXTw = warrants.filter(r => twCodes.has(r.code));
+  const warrantXUs = warrants.filter(r => usCodes.has(r.code));
+  const twXUs = twOpts.filter(r => usCodes.has(r.code));
+
+  populateProductSelect(document.getElementById("stockSelect"), warrants);
+  populateProductSelect(document.getElementById("ivStockSelect"), warrants);
+  populateProductSelect(document.getElementById("optionStockSelect"), twOpts, { selectedCodes: ["TXO"] });
+  populateProductSelect(document.getElementById("optionUsSelect"), usOpts,
+    { labelFn: r => r.name || r.code, selectedCodes: ["2303"] });
+  populateProductSelect(document.getElementById("ivOptProduct"), twOpts, { selectFirst: true });
+  populateProductSelect(document.getElementById("arbStockSelect"), warrantXTw, { selectedCodes: ["2330"] });
+  populateProductSelect(document.getElementById("usStockSelect"), warrantXUs, { selectedCodes: ["2303"] });
+  populateProductSelect(document.getElementById("twusStockSelect"), twXUs, { selectedCodes: ["2303"] });
+}

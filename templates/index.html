@@ -36,17 +36,9 @@
             <span>Product</span>
             <!-- Taiwan-listed TAIFEX options -->
             <select id="optionStockSelect" multiple style="height:80px">
-              <option value="TXO" selected>TXO 台指選擇權</option>
-              <option value="2330">2330 台積電選擇權</option>
-              <option value="2303">2303 聯電選擇權 (UMC)</option>
-              <option value="2603">2603 長榮選擇權</option>
-              <option value="2881">2881 富邦金選擇權</option>
-              <option value="2882">2882 國泰金選擇權</option>
             </select>
             <!-- US ADR (American) options — hidden until toggled -->
             <select id="optionUsSelect" multiple style="height:80px;display:none">
-              <option value="2303" selected>UMC (2303 聯電) US options</option>
-              <option value="2412">CHT (2412 中華電) US options</option>
             </select>
           </div>
           <label>Option Type
@@ -95,29 +87,6 @@
           <div class="stock-select">
             <span>Stock (multi-select)</span>
             <select id="stockSelect" multiple>
-              <option value="0050">0050 元大台灣50 (ETF)</option>
-              <option value="2330">2330 台積電 (TSMC)</option>
-              <option value="2317">2317 鴻海 (Foxconn)</option>
-              <option value="2454">2454 聯發科 (MediaTek)</option>
-              <option value="2382">2382 廣達</option>
-              <option value="3231">3231 緯創</option>
-              <option value="6669">6669 緯穎</option>
-              <option value="2376">2376 技嘉</option>
-              <option value="3017">3017 奇鋐</option>
-              <option value="3324">3324 雙鴻</option>
-              <option value="2308">2308 台達電</option>
-              <option value="3711">3711 日月光投控</option>
-              <option value="3034">3034 聯詠</option>
-              <option value="2379">2379 瑞昱</option>
-              <option value="3661">3661 世芯-KY</option>
-              <option value="3443">3443 創意</option>
-              <option value="2603">2603 長榮</option>
-              <option value="3008">3008 大立光</option>
-              <option value="2881">2881 富邦金</option>
-              <option value="2882">2882 國泰金</option>
-              <option value="3037">3037 欣興</option>
-              <option value="2303">2303 聯電 (UMC)</option>
-              <option value="2886">2886 兆豐金</option>
             </select>
             <div class="btn-row">
               <button class="sm" onclick="toggleSelectAll()">Select All</button>
@@ -195,28 +164,6 @@
             <div class="stock-select">
               <span>Stock (multi-select)</span>
               <select id="ivStockSelect" multiple>
-                <option value="2330">2330 台積電 (TSMC)</option>
-                <option value="2317">2317 鴻海 (Foxconn)</option>
-                <option value="2454">2454 聯發科 (MediaTek)</option>
-                <option value="2382">2382 廣達</option>
-                <option value="3231">3231 緯創</option>
-                <option value="6669">6669 緯穎</option>
-                <option value="2376">2376 技嘉</option>
-                <option value="3017">3017 奇鋐</option>
-                <option value="3324">3324 雙鴻</option>
-                <option value="2308">2308 台達電</option>
-                <option value="3711">3711 日月光投控</option>
-                <option value="3034">3034 聯詠</option>
-                <option value="2379">2379 瑞昱</option>
-                <option value="3661">3661 世芯-KY</option>
-                <option value="3443">3443 創意</option>
-                <option value="2603">2603 長榮</option>
-                <option value="3008">3008 大立光</option>
-                <option value="2881">2881 富邦金</option>
-                <option value="2882">2882 國泰金</option>
-                <option value="3037">3037 欣興</option>
-                <option value="2303">2303 聯電 (UMC)</option>
-                <option value="2886">2886 兆豐金</option>
               </select>
               <button class="sm" onclick="toggleSelectAllIV()">Select All</button>
             </div>
@@ -237,8 +184,6 @@
           <div id="iv-options-controls" style="display:none;gap:20px;align-items:flex-end;flex-wrap:wrap">
             <label>Product
               <select id="ivOptProduct">
-                <option value="TXO">TXO 台指選擇權</option>
-                <option value="2330">2330 台積電選擇權</option>
               </select>
             </label>
             <label>Call / Put
@@ -290,11 +235,6 @@
               <div class="stock-select" id="arb-stock-select-wrap">
                 <span>Stock (multi-select)</span>
                 <select id="arbStockSelect" multiple style="height:120px;min-width:200px">
-                  <option value="2330" selected>2330 台積電 (TSMC)</option>
-                  <option value="2303">2303 聯電 (UMC)</option>
-                  <option value="2603">2603 長榮</option>
-                  <option value="2881">2881 富邦金</option>
-                  <option value="2882">2882 國泰金</option>
                 </select>
               </div>
               <label>Strategy
@@ -354,8 +294,6 @@
               <div class="stock-select">
                 <span>Stock</span>
                 <select id="usStockSelect" multiple style="height:80px;min-width:200px">
-                  <option value="2303" selected>2303 聯電 (UMC, 1:5)</option>
-                  <option value="2412">2412 中華電 (CHT, 1:10)</option>
                 </select>
               </div>
               <label>Strategy
@@ -415,7 +353,6 @@
               <div class="stock-select">
                 <span>Stock</span>
                 <select id="twusStockSelect" multiple style="height:60px;min-width:200px">
-                  <option value="2303" selected>2303 聯電 (UMC, 1:5)</option>
                 </select>
               </div>
               <label>Option Type

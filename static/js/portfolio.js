@@ -539,7 +539,7 @@ async function _boot() {
       if (event === "SIGNED_OUT" || !session) location.replace("/login");
     });
   }
-  loadCustomStocks();
+  await initProductSelects();
   // Portfolio is loaded lazily on first Portfolio-tab click (loadPortfolioOnce),
   // not here — the landing tab doesn't use it. Saves /get_portfolio +
   // /adr_premium_scenario calls on every reload.
