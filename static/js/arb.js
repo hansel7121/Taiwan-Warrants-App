@@ -1,7 +1,7 @@
 // Arb Finder (Direct / US / TW-US), ADR-premium panels, and the PCP trade modal.
 
 async function downloadArbCSV() {
-  const res = await api("/arb_finder_csv", {
+  const res = await api("/match_warrant_tw_option_csv", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(getArbFilters()),
@@ -52,13 +52,13 @@ function onUsStrategyChange() {
     : "";
 }
 
-async function fetchUsData() {
+async function matchWarrantUsOption() {
   document.getElementById("us-status").textContent = "Fetching warrants and UMC options…";
   document.getElementById("us-tableContainer").innerHTML = "";
   document.getElementById("usDownloadBtn").style.display = "none";
   let data;
   try {
-    const res = await api("/us_option_match", {
+    const res = await api("/match_warrant_us_option", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(getUsFilters()),
@@ -183,7 +183,7 @@ function openUsModal(row) {
 }
 
 async function downloadUsCSV() {
-  const res = await api("/us_option_match_csv", {
+  const res = await api("/match_warrant_us_option_csv", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(getUsFilters()),
@@ -207,13 +207,13 @@ function getTwUsFilters() {
   };
 }
 
-async function fetchTwUsData() {
+async function matchTwUsOption() {
   document.getElementById("twus-status").textContent = "Fetching Taiwan + US options…";
   document.getElementById("twus-tableContainer").innerHTML = "";
   document.getElementById("twusDownloadBtn").style.display = "none";
   let data;
   try {
-    const res = await api("/tw_us_option_match", {
+    const res = await api("/match_tw_us_option", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(getTwUsFilters()),
@@ -289,38 +289,38 @@ function sortTwUsBy(key, asc) {
 function openTwUsModal(row) {
   // TW option → warrant_* slots, US option → opt_* slots (already emitted so).
   const mapped = {
-    warrant_code:     row.warrant_code,
-    warrant_name:     row.warrant_name,
+    warrant_code:     row.tw_option_code,
+    warrant_name:     row.tw_option_name,
     warrant_type:     row.type,
     opt_type:         row.type,
-    option_contract:  row.option_contract,
+    option_contract:  row.us_option_contract,
     underlying_price: row.underlying_price,
-    warrant_dte:      row.warrant_dte,
-    opt_dte:          row.opt_dte,
+    warrant_dte:      row.tw_option_dte,
+    opt_dte:          row.us_option_dte,
     dte_diff:         row.dte_diff,
-    warrant_strike:   row.warrant_strike,
-    opt_strike:       row.opt_strike,
+    warrant_strike:   row.tw_option_strike,
+    opt_strike:       row.us_option_strike,
     strike_diff_pct:  row.strike_diff_pct,
-    warrants_needed:  row.warrants_needed,
-    opt_contract_size:row.opt_contract_size,
+    warrants_needed:  row.tw_contracts_needed,
+    opt_contract_size:row.us_option_contract_size,
     tw_contracts:     row.tw_contracts,
     us_contracts:     row.us_contracts,
     tw_depth_contracts: row.tw_depth_contracts,
     tw_fillable:      row.tw_fillable,
     us_volume:        row.us_volume,
     us_oi:            row.us_oi,
-    warrant_ask:      row.warrant_ask,
-    warrant_bid:      row.warrant_bid,
-    opt_bid:          row.opt_bid,
-    opt_ask:          row.opt_ask,
-    warrant_per_share:row.warrant_per_share,
-    opt_per_share:    row.opt_per_share,
+    warrant_ask:      row.tw_option_ask,
+    warrant_bid:      row.tw_option_bid,
+    opt_bid:          row.us_option_bid,
+    opt_ask:          row.us_option_ask,
+    warrant_per_share:row.tw_option_per_share,
+    opt_per_share:    row.us_option_per_share,
     pcp_diff:         row.price_diff,
     pcp_diff_pct:     row.price_diff_pct,
-    synthetic_price:  row.opt_per_share,
+    synthetic_price:  row.us_option_per_share,
     bond_pv:          null,
-    warrant_iv:       row.warrant_iv,
-    opt_iv:           row.opt_iv,
+    warrant_iv:       row.tw_option_iv,
+    opt_iv:           row.us_option_iv,
     us_stock_code:    row.us_stock_code,
     loose:            false,   // TW/US tab has no loose toggle (always executable)
   };
@@ -328,7 +328,7 @@ function openTwUsModal(row) {
 }
 
 async function downloadTwUsCSV() {
-  const res = await api("/tw_us_option_match_csv", {
+  const res = await api("/match_tw_us_option_csv", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(getTwUsFilters()),
@@ -669,7 +669,7 @@ function setArbMode(mode) {
   });
 }
 
-function runArb() {
+function matchWarrantTwOption() {
   fetchArbData();
 }
 
@@ -699,7 +699,7 @@ async function fetchArbData() {
   document.getElementById("arbDownloadBtn").style.display = "none";
   let data;
   try {
-    const res = await api("/arb_finder", {
+    const res = await api("/match_warrant_tw_option", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(getArbFilters()),

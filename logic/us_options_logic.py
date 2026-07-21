@@ -578,3 +578,64 @@ def _filter_chain(df, option_type, min_days, max_days):
     if view.empty:
         raise RuntimeError("no US options in range")
     return view.copy().reset_index(drop=True)
+
+
+def us_option_last(us_code, opt_type, strike_twd, expiry_iso, fx, adr_ratio):
+    """Last traded price (USD per ADR) of the surviving US option leg.
+
+    Matches the ADR option chain by nearest expiry then nearest strike. The
+    stored strike is TWD-per-TW-share, so it is converted back to a USD/ADR
+    strike (× adr_ratio ÷ FX) before matching. Returns None if anything is
+    missing so the caller can fall back to a model value.
+    """
+    cfg = US_ADR_MAP.get(us_code)
+    if not cfg or not fx or not adr_ratio or strike_twd <= 0:
+        return None
+    strike_usd = strike_twd * adr_ratio / fx
+    tk = yf.Ticker(cfg["adr_ticker"])
+    exps = tk.options
+    if not exps:
+        return None
+    if expiry_iso:
+        target = pd.Timestamp(expiry_iso).normalize()
+        exp = min(exps, key=lambda e: abs((pd.Timestamp(e) - target).days))
+    else:
+        exp = exps[0]
+    chain = tk.option_chain(exp)
+    leg = chain.calls if str(opt_type).lower().startswith("c") else chain.puts
+    if leg is None or leg.empty:
+        return None
+    row = leg.iloc[(leg["strike"] - strike_usd).abs().argmin()]
+    last = float(row.get("lastPrice") or 0)
+    return last if last > 0 else None
+
+
+def us_options_scan(stock_codes, option_type, min_days, max_days, min_volume):
+    """American (US ADR) option chains for the scanner, in native USD.
+
+    Wraps read_us_option (which also carries the TWD-normalized view used by
+    the arb finder) and returns the USD-native columns a US options trader
+    expects: strike_usd, bid_usd, ask_usd, adr_price (underlying), plus IV /
+    delta / volume / OI.
+    """
+    frames, errors = [], []
+    for code in stock_codes:
+        try:
+            df = read_us_option(
+                code, option_type, min_days=max(1, int(min_days)),
+                max_days=int(max_days), compute_iv=True,
+            )
+            if int(min_volume) > 0:
+                df = df[df["volume"] >= int(min_volume)]
+            if not df.empty:
+                df = df.assign(product=code)
+                frames.append(df)
+        except Exception as e:
+            errors.append(f"{code}: {e}")
+    if not frames:
+        raise RuntimeError("; ".join(errors) if errors else "No data returned")
+    out = pd.concat(frames, ignore_index=True)
+    cols = ["product", "contract", "type", "strike_usd", "adr_price",
+            "days_to_expiry", "bid_usd", "ask_usd", "iv_ask", "iv_bid",
+            "delta_calc", "volume", "oi", "fx", "is_live"]
+    return out[[c for c in cols if c in out.columns]]

@@ -324,7 +324,7 @@
                 Positive: loose prices
               </label>
               <div class="action-group">
-                <button class="primary" id="arbFindBtn" onclick="runArb()">Find Arb</button>
+                <button class="primary" id="arbFindBtn" onclick="matchWarrantTwOption()">Warrant vs TW Option</button>
                 <button class="success" id="arbDownloadBtn" onclick="downloadArbCSV()" style="display:none">
                   Download CSV
                 </button>
@@ -385,7 +385,7 @@
                 Positive: loose prices
               </label>
               <div class="action-group">
-                <button class="primary" id="usFindBtn" onclick="fetchUsData()">Find Match</button>
+                <button class="primary" id="usFindBtn" onclick="matchWarrantUsOption()">Warrant vs US Option</button>
                 <button class="success" id="usDownloadBtn" onclick="downloadUsCSV()" style="display:none">
                   Download CSV
                 </button>
@@ -435,7 +435,7 @@
                 <input type="number" id="twusMinVolume" value="0" min="0" style="width:90px" title="Drop options with volume below this on either leg"/>
               </label>
               <div class="action-group">
-                <button class="primary" id="twusFindBtn" onclick="fetchTwUsData()">Find Match</button>
+                <button class="primary" id="twusFindBtn" onclick="matchTwUsOption()">TW Option vs US Option</button>
                 <button class="success" id="twusDownloadBtn" onclick="downloadTwUsCSV()" style="display:none">
                   Download CSV
                 </button>

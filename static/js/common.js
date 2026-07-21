@@ -160,7 +160,7 @@ function restoreView() {
   }
 }
 
-const HIDDEN_COLS = ["warrant_iv", "opt_iv", "iv_diff",
+const HIDDEN_COLS = ["warrant_iv", "opt_iv", "tw_option_iv", "us_option_iv", "iv_diff",
   // TW/US raw depth fields — surfaced in the popup panel, not the table.
   "tw_depth_contracts", "tw_fillable", "us_volume", "us_oi"];
 // The US Option Match "us_stock_code" value is actually the TW stock code.

@@ -18,68 +18,6 @@ from logic import warrant_logic
 
 
 
-def us_option_last(us_code, opt_type, strike_twd, expiry_iso, fx, adr_ratio):
-    """Last traded price (USD per ADR) of the surviving US option leg.
-
-    Matches the ADR option chain by nearest expiry then nearest strike. The
-    stored strike is TWD-per-TW-share, so it is converted back to a USD/ADR
-    strike (× adr_ratio ÷ FX) before matching. Returns None if anything is
-    missing so the caller can fall back to a model value.
-    """
-    import yfinance as yf
-    cfg = us_options_logic.US_ADR_MAP.get(us_code)
-    if not cfg or not fx or not adr_ratio or strike_twd <= 0:
-        return None
-    strike_usd = strike_twd * adr_ratio / fx
-    tk = yf.Ticker(cfg["adr_ticker"])
-    exps = tk.options
-    if not exps:
-        return None
-    if expiry_iso:
-        target = pd.Timestamp(expiry_iso).normalize()
-        exp = min(exps, key=lambda e: abs((pd.Timestamp(e) - target).days))
-    else:
-        exp = exps[0]
-    chain = tk.option_chain(exp)
-    leg = chain.calls if str(opt_type).lower().startswith("c") else chain.puts
-    if leg is None or leg.empty:
-        return None
-    row = leg.iloc[(leg["strike"] - strike_usd).abs().argmin()]
-    last = float(row.get("lastPrice") or 0)
-    return last if last > 0 else None
-
-
-def us_options_scan(stock_codes, option_type, min_days, max_days, min_volume):
-    """American (US ADR) option chains for the scanner, in native USD.
-
-    Wraps read_us_option (which also carries the TWD-normalized view used by
-    the arb finder) and returns the USD-native columns a US options trader
-    expects: strike_usd, bid_usd, ask_usd, adr_price (underlying), plus IV /
-    delta / volume / OI.
-    """
-    frames, errors = [], []
-    for code in stock_codes:
-        try:
-            df = us_options_logic.read_us_option(
-                code, option_type, min_days=max(1, int(min_days)),
-                max_days=int(max_days), compute_iv=True,
-            )
-            if int(min_volume) > 0:
-                df = df[df["volume"] >= int(min_volume)]
-            if not df.empty:
-                df = df.assign(product=code)
-                frames.append(df)
-        except Exception as e:
-            errors.append(f"{code}: {e}")
-    if not frames:
-        raise RuntimeError("; ".join(errors) if errors else "No data returned")
-    out = pd.concat(frames, ignore_index=True)
-    cols = ["product", "contract", "type", "strike_usd", "adr_price",
-            "days_to_expiry", "bid_usd", "ask_usd", "iv_ask", "iv_bid",
-            "delta_calc", "volume", "oi", "fx", "is_live"]
-    return out[[c for c in cols if c in out.columns]]
-
-
 def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                                max_strike_diff_pct, max_dte_diff,
                                positive_loose=False):
@@ -431,7 +369,7 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
     return rows
 
 
-def build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
+def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
                   positive_loose=False, min_volume=0, strategy="same_type"):
     all_rows = []
     errors = []
@@ -507,7 +445,7 @@ def build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
     return result
 
 
-def build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
+def match_warrant_us_option(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
                        positive_loose=False, min_volume=0, strategy="same_type"):
     """Match Taiwan warrants against the same-underlying US ADR options.
 
@@ -535,7 +473,7 @@ def build_us_match_df(stock_codes, option_type, max_strike_diff_pct, max_dte_dif
 
         contract_size = us_options_logic.contract_tw_shares(code)  # TW shares/contract
 
-        # No time-value cap and no IV solve on the arb path (see _build_arb_df).
+        # No time-value cap and no IV solve on the arb path (see match_warrant_tw_option).
         warrant_df, err, _meta = warrant_logic.read_warrant(
             [code], option_type, 0, 365, 0, 1e9, 0, compute_iv=False
         )
@@ -614,8 +552,12 @@ def _match_option_legs(tw_df, us_df, tw_contract_shares, us_contract_shares,
     (executable: sell@bid, buy@ask) is the headline; the true edge is the
     probability-weighted P&L over where the premium lands by expiry, computed in
     the modal from the historical premium distribution (same engine as the
-    US Option Match tab). The TW leg fills the modal's ``warrant_*`` slots, the
-    US leg the ``opt_*`` slots.
+    US Option Match tab). This function emits product-neutral ``tw_option_*`` /
+    ``us_option_*`` keys (no warrant is involved in a TW-option-vs-US-option
+    match); the shared frontend modal engine's translation layer maps the TW leg
+    into its ``warrant_*`` slots and the US leg into its ``opt_*`` slots — those
+    modal slot names are unchanged, since the other two match functions (which
+    DO involve a real warrant) still populate them directly.
     """
     base = _lcm(int(tw_contract_shares), int(us_contract_shares))
     tw_contracts = base // int(tw_contract_shares)
@@ -721,19 +663,19 @@ def _match_option_legs(tw_df, us_df, tw_contract_shares, us_contract_shares,
 
         denom = exec_opt if exec_opt else 1
         rows.append({
-            "warrant_code": tw["contract"],
-            "warrant_name": f"TW {tw['contract']}",
-            "option_contract": us["contract"],
+            "tw_option_code": tw["contract"],
+            "tw_option_name": f"TW {tw['contract']}",
+            "us_option_contract": us["contract"],
             "type": tw["type"],
-            "warrant_type": tw["type"],
-            "opt_type": us["type"],
+            "tw_option_type": tw["type"],
+            "us_option_type": us["type"],
             "trade": trade,
             "underlying_price": round(float(tw["underlying_price"]), 4),
-            "warrant_dte": int(tw["days_to_expiry"]),
-            "opt_dte": int(us["days_to_expiry"]),
+            "tw_option_dte": int(tw["days_to_expiry"]),
+            "us_option_dte": int(us["days_to_expiry"]),
             "dte_diff": int(us["dte_diff"]),
-            "warrant_strike": round(float(tw["strike"]), 2),
-            "opt_strike": round(float(us["strike"]), 2),
+            "tw_option_strike": round(float(tw["strike"]), 2),
+            "us_option_strike": round(float(us["strike"]), 2),
             "strike_diff_pct": round(float(us["strike_diff_pct"]), 2),
             "tw_contracts": int(tw_contracts),
             "us_contracts": int(us_contracts),
@@ -742,25 +684,25 @@ def _match_option_legs(tw_df, us_df, tw_contract_shares, us_contract_shares,
             "us_volume": us_vol,
             "us_oi": us_oi,
             "matched_shares": int(matched_shares),
-            "warrants_needed": int(matched_shares),
-            "opt_contract_size": int(matched_shares),
-            "warrant_ask": round(tw_ask, 4),
-            "warrant_bid": round(tw_bid, 4),
-            "opt_bid": round(us_bid, 4),
-            "opt_ask": round(us_ask, 4),
-            "warrant_per_share": round(exec_warrant, 4),
-            "opt_per_share": round(exec_opt, 4),
+            "tw_contracts_needed": int(matched_shares),
+            "us_option_contract_size": int(matched_shares),
+            "tw_option_ask": round(tw_ask, 4),
+            "tw_option_bid": round(tw_bid, 4),
+            "us_option_bid": round(us_bid, 4),
+            "us_option_ask": round(us_ask, 4),
+            "tw_option_per_share": round(exec_warrant, 4),
+            "us_option_per_share": round(exec_opt, 4),
             "price_diff": pcp_diff,
             "price_diff_pct": round(credit / denom * 100, 2),
             "entry_credit": round(credit * matched_shares, 0),
-            "warrant_iv": tw_iv,
-            "opt_iv": us_iv,
+            "tw_option_iv": tw_iv,
+            "us_option_iv": us_iv,
             "iv_diff": round((us_iv or 0) - (tw_iv or 0), 4),
         })
     return rows
 
 
-def build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
+def match_tw_us_option(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
                            positive_loose=False, min_volume=0):
     """Match Taiwan listed options against US ADR options on the same underlying."""
     all_rows = []

@@ -211,9 +211,9 @@ def main():
             "us_options_scanner", lv, sp, ["contract"]
         )
 
-    # 5. Arb finder end-to-end (proves the /arb_finder path matches) — HARD gate.
+    # 5. Arb finder end-to-end (proves the /match_warrant_tw_option path matches) — HARD gate.
     lv, sp, Raised = _both_try(
-        arb_logic.build_arb_df, ["2330"], "All", 5.0, 30,
+        arb_logic.match_warrant_tw_option, ["2330"], "All", 5.0, 30,
         True, 0, "same_type",
     )
     live_empty = isinstance(lv, Raised) or (hasattr(lv, "empty") and lv.empty)

@@ -58,12 +58,12 @@ _ROUTE_LABELS = {
     "/iv_surface_options": "iv surface (options)",
     "/adr_premium": "adr premium",
     "/adr_premium_scenario": "adr premium scenario",
-    "/us_option_match": "us/tw match",
-    "/us_option_match_csv": "us/tw match csv",
-    "/tw_us_option_match": "tw/us match",
-    "/tw_us_option_match_csv": "tw/us match csv",
-    "/arb_finder": "arb scan",
-    "/arb_finder_csv": "arb scan csv",
+    "/match_warrant_us_option": "us/tw match",
+    "/match_warrant_us_option_csv": "us/tw match csv",
+    "/match_tw_us_option": "tw/us match",
+    "/match_tw_us_option_csv": "tw/us match csv",
+    "/match_warrant_tw_option": "arb scan",
+    "/match_warrant_tw_option_csv": "arb scan csv",
 }
 
 
@@ -221,7 +221,7 @@ def close_quote():
                     out["warrant_bid"] = bid
                     out["source"] = "market"
         elif survivor == "option" and mode in ("us", "twus") and us_code:
-            last = arb_logic.us_option_last(
+            last = us_options_logic.us_option_last(
                 us_code, d.get("opt_type"), float(d.get("opt_strike") or 0),
                 d.get("opt_expiry_iso"), out["current_fx"], out["adr_ratio"],
             )
@@ -339,7 +339,7 @@ def read_us_option():
     max_days = data.get("max_days", 365)
     min_volume = data.get("min_volume", 0)
     try:
-        df = arb_logic.us_options_scan(stock_codes, option_type, min_days, max_days, min_volume)
+        df = us_options_logic.us_options_scan(stock_codes, option_type, min_days, max_days, min_volume)
         rows = json.loads(df.to_json(orient="records"))
         as_of = min(
             (t for t in (us_options_logic.data_as_of(c) for c in stock_codes) if t),
@@ -362,7 +362,7 @@ def read_us_option_csv():
     max_days = data.get("max_days", 365)
     min_volume = data.get("min_volume", 0)
     try:
-        df = arb_logic.us_options_scan(stock_codes, option_type, min_days, max_days, min_volume)
+        df = us_options_logic.us_options_scan(stock_codes, option_type, min_days, max_days, min_volume)
     except Exception:
         df = pd.DataFrame()
     output = io.StringIO()
@@ -517,9 +517,9 @@ def adr_premium_scenario():
         return jsonify({"error": str(e)})
 
 
-@app.route("/us_option_match", methods=["POST"])
+@app.route("/match_warrant_us_option", methods=["POST"])
 @require_auth
-def us_option_match():
+def match_warrant_us_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
     option_type = data.get("option_type", "All")
@@ -529,20 +529,20 @@ def us_option_match():
     min_volume = int(data.get("min_volume", 0) or 0)
     strategy = data.get("strategy", "same_type")
     try:
-        df = arb_logic.build_us_match_df(stock_codes, option_type, max_strike_diff_pct,
+        df = arb_logic.match_warrant_us_option(stock_codes, option_type, max_strike_diff_pct,
                                 max_dte_diff, positive_loose=positive_loose,
                                 min_volume=min_volume, strategy=strategy)
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
         applog.set_rows(len(rows))
         return jsonify({"rows": rows, "count": len(rows)})
     except Exception as e:
-        applog.log("ARB", f"us_option_match failed: {e}")
+        applog.log("ARB", f"match_warrant_us_option failed: {e}")
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
-@app.route("/us_option_match_csv", methods=["POST"])
+@app.route("/match_warrant_us_option_csv", methods=["POST"])
 @require_auth
-def us_option_match_csv():
+def match_warrant_us_option_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
     option_type = data.get("option_type", "All")
@@ -552,7 +552,7 @@ def us_option_match_csv():
     min_volume = int(data.get("min_volume", 0) or 0)
     strategy = data.get("strategy", "same_type")
     try:
-        df = arb_logic.build_us_match_df(stock_codes, option_type, max_strike_diff_pct,
+        df = arb_logic.match_warrant_us_option(stock_codes, option_type, max_strike_diff_pct,
                                 max_dte_diff, positive_loose=positive_loose,
                                 min_volume=min_volume, strategy=strategy)
     except Exception:
@@ -567,9 +567,9 @@ def us_option_match_csv():
     )
 
 
-@app.route("/tw_us_option_match", methods=["POST"])
+@app.route("/match_tw_us_option", methods=["POST"])
 @require_auth
-def tw_us_option_match():
+def match_tw_us_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
     option_type = data.get("option_type", "All")
@@ -578,20 +578,20 @@ def tw_us_option_match():
     positive_loose = bool(data.get("positive_loose", False))
     min_volume = int(data.get("min_volume", 0) or 0)
     try:
-        df = arb_logic.build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct,
+        df = arb_logic.match_tw_us_option(stock_codes, option_type, max_strike_diff_pct,
                                     max_dte_diff, positive_loose=positive_loose,
                                     min_volume=min_volume)
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
         applog.set_rows(len(rows))
         return jsonify({"rows": rows, "count": len(rows)})
     except Exception as e:
-        applog.log("ARB", f"tw_us_option_match failed: {e}")
+        applog.log("ARB", f"match_tw_us_option failed: {e}")
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
-@app.route("/tw_us_option_match_csv", methods=["POST"])
+@app.route("/match_tw_us_option_csv", methods=["POST"])
 @require_auth
-def tw_us_option_match_csv():
+def match_tw_us_option_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
     option_type = data.get("option_type", "All")
@@ -600,7 +600,7 @@ def tw_us_option_match_csv():
     positive_loose = bool(data.get("positive_loose", False))
     min_volume = int(data.get("min_volume", 0) or 0)
     try:
-        df = arb_logic.build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct,
+        df = arb_logic.match_tw_us_option(stock_codes, option_type, max_strike_diff_pct,
                                     max_dte_diff, positive_loose=positive_loose,
                                     min_volume=min_volume)
     except Exception:
@@ -615,9 +615,9 @@ def tw_us_option_match_csv():
     )
 
 
-@app.route("/arb_finder", methods=["POST"])
+@app.route("/match_warrant_tw_option", methods=["POST"])
 @require_auth
-def arb_finder():
+def match_warrant_tw_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["2330"])
     option_type = data.get("option_type", "All")
@@ -627,7 +627,7 @@ def arb_finder():
     min_volume = int(data.get("min_volume", 0) or 0)
     strategy = data.get("strategy", "same_type")
     try:
-        df = arb_logic.build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
+        df = arb_logic.match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
                            positive_loose=positive_loose, min_volume=min_volume,
                            strategy=strategy)
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
@@ -639,13 +639,13 @@ def arb_finder():
         applog.set_rows(len(rows))
         return jsonify({"rows": rows, "count": len(rows), "as_of": _epoch_iso(as_of)})
     except Exception as e:
-        applog.log("ARB", f"arb_finder failed: {e}")
+        applog.log("ARB", f"match_warrant_tw_option failed: {e}")
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
-@app.route("/arb_finder_csv", methods=["POST"])
+@app.route("/match_warrant_tw_option_csv", methods=["POST"])
 @require_auth
-def arb_finder_csv():
+def match_warrant_tw_option_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2330"])
     option_type = data.get("option_type", "All")
@@ -655,7 +655,7 @@ def arb_finder_csv():
     min_volume = int(data.get("min_volume", 0) or 0)
     strategy = data.get("strategy", "same_type")
     try:
-        df = arb_logic.build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
+        df = arb_logic.match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
                            positive_loose=positive_loose, min_volume=min_volume,
                            strategy=strategy)
     except Exception:
