@@ -488,16 +488,26 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             # strike/DTE-closest one — a farther-but-profitable pair must not be
             # hidden behind a closer-but-unprofitable "best".
             for _, opt in candidates.iterrows():
-                if pd.isna(opt.get("ask")) or float(opt["ask"]) <= 0:
+                # options_logic backfills the MISSING side of a one-sided quote
+                # with settlement (or last), so opt["bid"]/opt["ask"] are always
+                # populated and cannot be trusted on their own. The *_live flags
+                # record which side was a genuine quote; only a genuine quote is
+                # an executable price, so null out the backfilled side here and
+                # let each formula below require the side it actually trades.
+                opt_ask_live = bool(opt.get("ask_live", True)) and pd.notna(opt.get("ask")) and float(opt.get("ask") or 0) > 0
+                opt_bid_live = bool(opt.get("bid_live", True)) and pd.notna(opt.get("bid")) and float(opt.get("bid") or 0) > 0
+                if not (opt_ask_live or opt_bid_live):
                     continue
-                opt_bid_per_share = round(float(opt["bid"]), 4) if pd.notna(opt.get("bid")) and float(opt.get("bid", 0)) > 0 else None
-                opt_ask_per_share = round(float(opt["ask"]), 4)
+                opt_bid_per_share = round(float(opt["bid"]), 4) if opt_bid_live else None
+                opt_ask_per_share = round(float(opt["ask"]), 4) if opt_ask_live else None
 
                 # Positive tight (executable): opt_bid - warrant_ask > 0
                 # Positive loose: opt_ask - warrant_bid > 0 (mirrors negative formula)
                 # Negative (always loose): opt_bid - warrant_ask < 0
                 if direction == "positive":
                     if positive_loose:
+                        if opt_ask_per_share is None:
+                            continue  # loose positive marks against the option ask
                         price_diff = round(opt_ask_per_share - warrant_bid_per_share, 4)
                         exec_opt = opt_ask_per_share
                         exec_warrant = warrant_bid_per_share
@@ -539,11 +549,12 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                 if pd.notna(opt.get("iv_bid")):
                     opt_iv = round(float(opt["iv_bid"]), 4)
                 else:
-                    _omid = None
-                    if pd.notna(opt.get("bid")) and pd.notna(opt.get("ask")) and float(opt["bid"]) > 0 and float(opt["ask"]) > 0:
-                        _omid = (float(opt["bid"]) + float(opt["ask"])) / 2
-                    elif pd.notna(opt.get("ask")) and float(opt["ask"]) > 0:
-                        _omid = float(opt["ask"])
+                    # Mark off the LIVE side(s) only — a settlement-backfilled
+                    # side would put a stale price into the IV solve.
+                    if opt_bid_per_share is not None and opt_ask_per_share is not None:
+                        _omid = (opt_bid_per_share + opt_ask_per_share) / 2
+                    else:
+                        _omid = opt_ask_per_share if opt_ask_per_share is not None else opt_bid_per_share
                     _oiv = warrant_logic.implied_vol(
                         _omid, float(opt["underlying_price"]), float(opt["strike"]),
                         int(opt["days_to_expiry"]) / 365.0, options_logic.R, 1.0, is_put) if _omid else None
@@ -670,8 +681,13 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
             Ko = float(opt["strike"])
             To = int(opt["days_to_expiry"]) / 365.0
             bond_pv = round(Ko * float(np.exp(-r * To)), 4)
-            opt_bid_ps = round(float(opt["bid"]), 4) if pd.notna(opt.get("bid")) and float(opt.get("bid", 0)) > 0 else None
-            opt_ask_ps = round(float(opt["ask"]), 4) if pd.notna(opt.get("ask")) and float(opt.get("ask", 0)) > 0 else None
+            # Same one-sided-quote handling as the Direct matcher: the missing
+            # side arrives settlement-backfilled, so honour the *_live flags and
+            # keep only genuinely quoted sides as executable prices.
+            _oa_live = bool(opt.get("ask_live", True)) and pd.notna(opt.get("ask")) and float(opt.get("ask") or 0) > 0
+            _ob_live = bool(opt.get("bid_live", True)) and pd.notna(opt.get("bid")) and float(opt.get("bid") or 0) > 0
+            opt_bid_ps = round(float(opt["bid"]), 4) if _ob_live else None
+            opt_ask_ps = round(float(opt["ask"]), 4) if _oa_live else None
 
             # Option-leg IV (display only) — use the OPTION's put/call flag.
             is_put_opt = opp == "Put"
@@ -797,7 +813,13 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
             # fetch must include both types regardless of the warrant filter.
             opt_type_fetch = "All" if strategy == "pcp" else option_type
             opt_df = options_logic.fetch_options([code], opt_type_fetch, min_days=1, compute_iv=False)
-            opt_df = opt_df[opt_df["is_live"]]
+            # A ONE-SIDED option quote is still a valid arb benchmark: each
+            # direction only ever executes against one side of the option book
+            # (positive tight sells the bid, positive loose / negative buys the
+            # ask). Requiring is_live (both sides) threw away ~90% of the TW
+            # option universe off-hours. The matcher gates each formula on the
+            # side it actually needs, so keep anything with at least one side.
+            opt_df = opt_df[opt_df["ask_live"] | opt_df["bid_live"]]
             if min_volume > 0:
                 opt_df = opt_df[opt_df["volume"] >= min_volume]
         except Exception as e:

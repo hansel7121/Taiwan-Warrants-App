@@ -241,6 +241,12 @@ def _parse_and_compute(raw_df, underlying_price, exercise_ratio, compute_iv=True
                 if not np.isnan(leverage)
                 else None,
                 "is_live": bool(row["is_live"]),
+                # Per-side liveness, recorded BEFORE the settlement fallback
+                # above overwrote the missing side. The arb finder needs these:
+                # a one-sided quote is a valid benchmark for the direction that
+                # uses that side, but settlement is not an executable price.
+                "ask_live": bool(row["ask_live"]),
+                "bid_live": bool(row["bid_live"]),
             }
         )
 
@@ -380,7 +386,9 @@ def fetch_options_mis(code, compute_iv=True):
             ask_size = _mis_num(q.get("CAskSize1"))
         last = _mis_num(q.get("CLastPrice"))
         settle = _mis_num(q.get("SettlementPrice"))
-        is_live = bool(pd.notna(bid) and pd.notna(ask))
+        ask_live = bool(pd.notna(ask) and ask > 0)
+        bid_live = bool(pd.notna(bid) and bid > 0)
+        is_live = ask_live and bid_live
         # Fall back ask -> last -> settle so a leg is never dropped off-hours.
         if pd.isna(ask):
             ask = last if pd.notna(last) else settle
@@ -429,6 +437,11 @@ def fetch_options_mis(code, compute_iv=True):
             "delta_calc": round(delta, 4) if pd.notna(delta) else None,
             "leverage_calc": round(leverage, 4) if pd.notna(leverage) else None,
             "is_live": is_live,
+            # See the daily-parse path: per-side liveness taken before the
+            # last/settle fallback, so the arb finder can tell a real quote
+            # from a stale reference price.
+            "ask_live": ask_live,
+            "bid_live": bid_live,
             "quote_time": quote_time,
         })
     if not rows:
