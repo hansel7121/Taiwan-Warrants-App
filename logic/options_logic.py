@@ -63,21 +63,6 @@ def data_as_of(stock_codes):
     return min(ts_list) if ts_list else None
 
 
-def refresh_cache(stock_codes):
-    """Scheduler hook: drop these codes' cached quotes and refetch them."""
-    for code in stock_codes:
-        cfg = COMMODITY_MAP.get(code)
-        if not cfg:
-            continue
-        for key in [k for k in _mis_cache if k[0] in cfg["commodity_ids"]]:
-            _mis_cache.pop(key, None)
-        _taifex_cache.pop(",".join(cfg["commodity_ids"]), None)
-        _spot_cache.pop(cfg["ticker"], None)
-    # compute_iv=False: warming only needs the raw quotes in cache; IV is
-    # computed per request from the cached raw data anyway.
-    fetch_options(stock_codes, option_type="All", min_days=0, compute_iv=False)
-
-
 def _decode(content):
     for enc in ("big5", "cp950", "utf-8-sig", "utf-8"):
         try:
@@ -87,10 +72,10 @@ def _decode(content):
     return content.decode("big5", errors="replace")
 
 
-def _fetch_taifex(commodity_ids: list[str]) -> pd.DataFrame:
+def _fetch_taifex(commodity_ids: list[str], force=False) -> pd.DataFrame:
     cache_key = ",".join(commodity_ids)
     now = time.time()
-    if cache_key in _taifex_cache:
+    if not force and cache_key in _taifex_cache:
         ts, cached_df = _taifex_cache[cache_key]
         if now - ts < _CACHE_TTL:
             applog.log("OPT", f"EOD {cache_key} cache hit (age {int(now - ts)}s)")
@@ -145,9 +130,9 @@ def _fetch_taifex(commodity_ids: list[str]) -> pd.DataFrame:
     return df
 
 
-def _get_spot(ticker):
+def _get_spot(ticker, force=False):
     now = time.time()
-    if ticker in _spot_cache:
+    if not force and ticker in _spot_cache:
         ts, price = _spot_cache[ticker]
         if now - ts < _CACHE_TTL:
             return price
@@ -367,11 +352,11 @@ def _mis_num(v):
         return float("nan")
 
 
-def _fetch_mis_quotes(cid, kind):
+def _fetch_mis_quotes(cid, kind, force=False):
     """Raw MIS QuoteList for one product code, with a short in-proc cache."""
     key = (cid, kind)
     now = time.time()
-    if key in _mis_cache and now - _mis_cache[key][0] < _MIS_TTL:
+    if not force and key in _mis_cache and now - _mis_cache[key][0] < _MIS_TTL:
         applog.log("OPT", f"MIS {cid} cache hit (age {int(now - _mis_cache[key][0])}s)")
         return _mis_cache[key][1]
     applog.log("OPT", f"MIS {cid} fetching quotes")
@@ -402,7 +387,7 @@ def _fetch_mis_quotes(cid, kind):
     return rows
 
 
-def fetch_options_mis(code, compute_iv=True, keep_noniv=False):
+def fetch_options_mis(code, compute_iv=True, keep_noniv=False, force=False):
     """Intraday (~20 min delayed) TW option chain from TAIFEX MIS, in the same
     schema as _parse_and_compute so callers are unchanged. Raises on failure."""
     cfg = COMMODITY_MAP[code]
@@ -413,7 +398,7 @@ def fetch_options_mis(code, compute_iv=True, keep_noniv=False):
 
     all_q = []
     for cid in cfg["commodity_ids"]:
-        all_q.extend(_fetch_mis_quotes(cid, kind))
+        all_q.extend(_fetch_mis_quotes(cid, kind, force=force))
     if not all_q:
         raise RuntimeError("MIS returned no quotes")
 
@@ -425,7 +410,7 @@ def fetch_options_mis(code, compute_iv=True, keep_noniv=False):
             if pd.notna(spot):
                 break
     if pd.isna(spot) or spot <= 0:
-        spot = _get_spot(cfg["ticker"])
+        spot = _get_spot(cfg["ticker"], force=force)
 
     today = pd.Timestamp.today().normalize()
     quote_time = ""
@@ -569,10 +554,38 @@ def fetch_options(
             result = _apply_option_filters(
                 snap, option_type, min_days, max_days, min_leverage, min_volume
             )
-            if result.empty:
-                raise RuntimeError("No data returned")
+            # Snapshot present but filtered to nothing is a clean empty result,
+            # not a failure — return the (possibly empty) frame so app.py
+            # round-trips an empty result as {"rows": [], "count": 0} instead of
+            # surfacing a hard error (matches warrant_logic's graceful empty
+            # return). raise-on-empty stays only in the live scrape path below.
             return result
 
+    return fetch_options_live(
+        stock_codes, option_type, min_days, max_days,
+        min_leverage, min_volume, compute_iv, keep_noniv,
+    )
+
+
+def fetch_options_live(
+    stock_codes,
+    option_type="All",
+    min_days=0,
+    max_days=365,
+    min_leverage=0,
+    min_volume=0,
+    compute_iv=True,
+    keep_noniv=False,
+):
+    """Pure live-scrape reader (no Supabase snapshot branch).
+
+    The scraper half of fetch_options: always re-fetches from TAIFEX MIS
+    (primary) / EOD (fallback) with force=True to bypass the in-process TTL
+    caches (_mis_cache / _taifex_cache / _spot_cache), so a manual refresh is
+    guaranteed fresh. Raises RuntimeError only when nothing can be scraped at
+    all (an empty filter result is a real failure to fetch, unchanged from the
+    original live path).
+    """
     dfs = []
     errors = []
     for code in stock_codes:
@@ -584,7 +597,8 @@ def fetch_options(
         df = None
         # Primary: MIS intraday quotes. Fallback: EOD data-download file.
         try:
-            df = fetch_options_mis(code, compute_iv=compute_iv, keep_noniv=keep_noniv)
+            df = fetch_options_mis(code, compute_iv=compute_iv, keep_noniv=keep_noniv,
+                                   force=True)
             applog.log("OPT", f"{code} source=MIS {len(df)} contracts")
         except Exception as e:
             errors.append(f"{code}: MIS {e}")
@@ -594,8 +608,8 @@ def fetch_options(
             df = None
         if df is None or df.empty:
             try:
-                S = _get_spot(cfg["ticker"])
-                raw = _fetch_taifex(cfg["commodity_ids"])
+                S = _get_spot(cfg["ticker"], force=True)
+                raw = _fetch_taifex(cfg["commodity_ids"], force=True)
                 df = _parse_and_compute(raw, S, cfg["exercise_ratio"], compute_iv=compute_iv,
                                         keep_noniv=keep_noniv)
                 applog.log("OPT", f"{code} source=EOD {len(df)} contracts spot={S}")

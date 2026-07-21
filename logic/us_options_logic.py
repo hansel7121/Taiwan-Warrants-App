@@ -70,15 +70,6 @@ def data_as_of(stock_code):
     return min(ts_list) if ts_list else None
 
 
-def refresh_cache(stock_codes):
-    """Scheduler hook: drop and refetch both cached chain variants per code."""
-    for code in stock_codes:
-        for civ in (True, False):
-            _cache.pop((code, civ), None)
-        # Scanner path (with IV) and arb path (without) cache separately.
-        fetch_us_options(code, "All", min_days=1, max_days=730, compute_iv=True)
-        fetch_us_options(code, "All", min_days=1, max_days=730, compute_iv=False)
-
 _prem_cache: dict = {}
 _PREM_TTL = 1800  # 30 minutes — 3y premium HISTORY only; the "now" point is refreshed live
 
@@ -424,18 +415,29 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
                         snap[_c] = np.nan
             return _filter_chain(snap, option_type, min_days, max_days)
 
+    return fetch_us_options_live(
+        stock_code, option_type, min_days, max_days, compute_iv, keep_noniv,
+    )
+
+
+def fetch_us_options_live(stock_code, option_type="All", min_days=1, max_days=365,
+                          compute_iv=True, keep_noniv=False):
+    """Pure live-scrape reader (no Supabase snapshot branch).
+
+    The scraper half of fetch_us_options: always walks the yfinance option
+    chain fresh (never short-circuits on the in-process _cache TTL) so a manual
+    refresh is guaranteed live, then repopulates _cache so the reader-side
+    cache-hit path stays warm. Same (df) return shape as fetch_us_options.
+    """
+    if stock_code not in US_ADR_MAP:
+        raise RuntimeError(f"{stock_code}: no US ADR mapping")
+
     cfg = US_ADR_MAP[stock_code]
     # The cache holds the FULL chain (all types, all expiries); the requested
-    # option_type/day-range are filter views applied on the way out, so a
-    # background warm-up serves every filter combination.
+    # option_type/day-range are filter views applied on the way out. The live
+    # scraper never returns from the cache short-circuit (that's the reader's
+    # job) — it always fetches fresh and repopulates _cache below.
     cache_key = (stock_code, compute_iv, keep_noniv)
-    hit = _cache.get(cache_key)
-    if hit and time.time() - hit[0] < _CACHE_TTL:
-        applog.log(
-            "USOPT",
-            f"{stock_code} {cfg['adr_ticker']} cache hit (age {int(time.time() - hit[0])}s)",
-        )
-        return _filter_chain(hit[1], option_type, min_days, max_days)
 
     t0 = time.time()
     adr_ratio = cfg["adr_ratio"]             # ordinary shares per ADR

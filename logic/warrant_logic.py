@@ -721,11 +721,6 @@ def get_warrant_results(stock_codes, force=False):
     return merged, as_of, not need
 
 
-def refresh_warrant_cache(stock_codes):
-    """Scheduler hook: force-refetch the given underlyings into the cache."""
-    get_warrant_results(stock_codes, force=True)
-
-
 def cache_as_of(stock_codes):
     """Oldest warrant-cache timestamp (epoch) for these codes, or None."""
     with _warrant_cache_lock:
@@ -805,7 +800,34 @@ def fetch_warrants(
         except Exception as e:
             applog.log("WARR", f"supabase read failed ({e}) — falling back to live")
 
-    cmoney_results, as_of, cached = get_warrant_results(stock_codes)
+    return fetch_warrants_live(
+        stock_codes, option_type, min_days, max_days,
+        min_leverage, max_tv_pct, min_volume, compute_iv, keep_noniv,
+    )
+
+
+def fetch_warrants_live(
+    stock_codes,
+    option_type="All",
+    min_days=0,
+    max_days=365,
+    min_leverage=0.0,
+    max_tv_pct=100.0,
+    min_volume=0,
+    compute_iv=True,
+    keep_noniv=False,
+):
+    """Pure live-scrape reader (no Supabase snapshot branch).
+
+    The scraper half of fetch_warrants: always re-scrapes CMoney (force=True
+    bypasses the in-process _warrant_cache so a manual refresh is guaranteed
+    fresh) and applies the same filter chain. Returns the same
+    (df, error, meta) tuple shape.
+    """
+    if isinstance(stock_codes, str):
+        stock_codes = [stock_codes]
+
+    cmoney_results, as_of, cached = get_warrant_results(stock_codes, force=True)
     meta = {
         "as_of": datetime.fromtimestamp(as_of).isoformat() if as_of else None,
         "cached": cached,

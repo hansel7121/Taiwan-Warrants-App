@@ -181,7 +181,7 @@ def refresh_universe():
 
 def refresh_warrants():
     """Fetch the full warrant superset (IV computed, non-converged kept) + write."""
-    df, err, meta = warrant_logic.fetch_warrants(
+    df, err, meta = warrant_logic.fetch_warrants_live(
         warrant_universe(), "All", 0, 365, 0.0, 1e9, 0,
         compute_iv=True, keep_noniv=True,
     )
@@ -196,7 +196,7 @@ def refresh_tw_options():
     frames = []
     for code in TW_OPTION_CODES:
         try:
-            df = options_logic.fetch_options(
+            df = options_logic.fetch_options_live(
                 [code], "All", min_days=0, max_days=365,
                 compute_iv=True, keep_noniv=True,
             )
@@ -225,7 +225,7 @@ def refresh_us_options():
     frames = []
     for code in US_OPTION_CODES:
         try:
-            df = us_options_logic.fetch_us_options(
+            df = us_options_logic.fetch_us_options_live(
                 code, "All", min_days=1, max_days=730,
                 compute_iv=True, keep_noniv=True,
             )
