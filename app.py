@@ -439,11 +439,27 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             is_put_w = w["type"] == "Put"
             long_side_is_warrant = direction == "positive"
             opt_ge_warrant = long_side_is_warrant != is_put_w
-            strike_filter = (
+            favorable = (
                 candidates["strike"] >= w["strike"]
                 if opt_ge_warrant
                 else candidates["strike"] <= w["strike"]
             )
+            candidates["favorable"] = favorable
+            # Max loss per share of the residual vertical at expiry: zero on the
+            # favorable side (payoff >= 0 everywhere), |Kw - Ko| on the other.
+            candidates["max_loss_per_share"] = np.where(
+                favorable, 0.0, (candidates["strike"] - w["strike"]).abs()
+            )
+            # max_strike_diff_pct bounds that MAX LOSS — it is not a similarity
+            # metric. On the favorable side the loss is already zero no matter
+            # how far the strike sits, so distance there is irrelevant and the
+            # cap must not apply: a deep-OTM option whose per-share price still
+            # beats the warrant is a riskless arb. Only the unfavorable side,
+            # where the spread can be clawed back at expiry, needs the cap.
+            # (The far favorable side is self-policing anyway — as Ko runs away
+            # from Kw the option gets cheaper per share than the warrant and the
+            # price test below rejects it.)
+            strike_ok = favorable | (candidates["strike_diff_pct"] <= max_strike_diff_pct)
 
             # Never hold the SHORT leg as the longer-dated one — the long
             # (hedge) leg would expire first, leaving a naked short position.
@@ -457,11 +473,7 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                 bad_dte = (w["days_to_expiry"] - candidates["days_to_expiry"]).clip(lower=0)
                 dte_ok = bad_dte <= max_dte_diff
 
-            candidates = candidates[
-                (candidates["strike_diff_pct"] <= max_strike_diff_pct)
-                & dte_ok
-                & strike_filter
-            ]
+            candidates = candidates[strike_ok & dte_ok]
             if candidates.empty:
                 continue
 
@@ -573,6 +585,12 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                     "warrant_strike": w["strike"],
                     "opt_strike": round(float(opt["strike"]), 2),
                     "strike_diff_pct": round(float(opt["strike_diff_pct"]), 2),
+                    # Favorable residual = the vertical pays >= 0 at every spot,
+                    # so the entry credit is never clawed back: a true arb.
+                    # Otherwise the credit is at risk up to max_loss_per_share
+                    # (per underlying share, before exercise-ratio sizing).
+                    "riskless": bool(opt["favorable"]),
+                    "max_loss_per_share": round(float(opt["max_loss_per_share"]), 4),
                     "warrants_needed": warrants_needed,
                     "board_lots": board_lots_needed,
                     "warrant_depth_lots": warrant_depth_lots,
@@ -853,7 +871,14 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
             ["executable", "price_diff_pct"], ascending=[False, False]
         )
     elif "price_diff_pct" in result.columns:
-        result = result.sort_values("price_diff_pct", ascending=False)
+        if "riskless" in result.columns:
+            # True arbs (residual vertical never clawed back at expiry) outrank
+            # capped-loss pairs regardless of headline edge.
+            result = result.sort_values(
+                ["riskless", "price_diff_pct"], ascending=[False, False]
+            )
+        else:
+            result = result.sort_values("price_diff_pct", ascending=False)
     return result
 
 
