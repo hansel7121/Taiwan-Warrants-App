@@ -18,6 +18,13 @@ COMMODITY_MAP = {
     "2603": {"commodity_ids": ["CZA", "CZO"],   "ticker": "2603.TW", "exercise_ratio": 2000},
     "2881": {"commodity_ids": ["CEO"],          "ticker": "2881.TW", "exercise_ratio": 2000},
     "2882": {"commodity_ids": ["CKO"],          "ticker": "2882.TW", "exercise_ratio": 2000},
+    # Added after screening all 34 TAIFEX stock-option underlyings
+    # (taifex.com.tw/cht/2/stockLists) for warrants AND live option activity.
+    # The "A" ids are the weekly contracts, present only where TAIFEX lists the
+    # underlying as a 股票選擇權週契約標的.
+    "2317": {"commodity_ids": ["DHO", "DHA"],   "ticker": "2317.TW", "exercise_ratio": 2000},
+    "3231": {"commodity_ids": ["DXO", "DXA"],   "ticker": "3231.TW", "exercise_ratio": 2000},
+    "2454": {"commodity_ids": ["DVO", "DVA"],   "ticker": "2454.TW", "exercise_ratio": 2000},
 }
 
 # Module-level cache: (commodity_id -> (timestamp, DataFrame))
