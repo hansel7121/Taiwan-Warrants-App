@@ -33,19 +33,30 @@ US_CONTRACT_ADRS = 100
 
 R_US = 0.04  # US benchmark rate for BS/IV on the ADR leg
 
-# Map a Taiwan stock code to its US ADR ticker, FX pair, and ADR ratio
-# (ordinary shares per ADR). Only listings whose ADR tracks the local share
-# tightly enough to treat as the same asset are included — see the parity
-# screen in analysis notebooks (persistent/large premium => excluded, e.g. TSM).
-US_ADR_MAP = {
-    "2303": {"adr_ticker": "UMC", "fx_ticker": "TWD=X", "adr_ratio": 5},   # 500 TW shares/contract
-    "2412": {"adr_ticker": "CHT", "fx_ticker": "TWD=X", "adr_ratio": 10},  # 1000 TW shares/contract
-}
+_PRODUCT_CACHE_TTL = 300  # 5 min; add/remove routes also invalidate directly
+_adr_map_cache = {"data": None, "ts": 0.0}
+
+
+def _adr_map():
+    """{code: {adr_ticker, fx_ticker, adr_ratio, name}} from us_option_products, cached."""
+    now = time.time()
+    if _adr_map_cache["data"] is not None and now - _adr_map_cache["ts"] < _PRODUCT_CACHE_TTL:
+        return _adr_map_cache["data"]
+    from services import db_products
+    data = {row["code"]: row for row in db_products.list_us_option_products()}
+    _adr_map_cache["data"] = data
+    _adr_map_cache["ts"] = now
+    return data
+
+
+def invalidate_adr_map_cache():
+    """Called by the add/remove product routes (Phase 5.3) so a change is visible immediately."""
+    _adr_map_cache["data"] = None
 
 
 def contract_tw_shares(stock_code):
     """Taiwan shares controlled by one US option contract for this listing."""
-    return US_CONTRACT_ADRS * US_ADR_MAP[stock_code]["adr_ratio"]
+    return US_CONTRACT_ADRS * _adr_map()[stock_code]["adr_ratio"]
 
 # Full option chain per (stock_code, compute_iv); day-range and type filters
 # are applied per call so one scheduler warm-up serves every filter combo.
@@ -85,7 +96,7 @@ def _premium_series(stock_code, period="3y"):
     The premium already embeds FX (it's baked into the numerator), so its
     distribution captures the *combined* ADR-basis + FX risk of the trade.
     """
-    cfg = US_ADR_MAP[stock_code]
+    cfg = _adr_map()[stock_code]
 
     def daily(t):
         s = yf.Ticker(t).history(period=period)["Close"]
@@ -287,7 +298,7 @@ def adr_premium_stats(stock_code, period="3y"):
     low) with their historical frequency and conditional-mean premium — the
     inputs to the Expected-Value calc in the trade modal.
     """
-    cfg = US_ADR_MAP[stock_code]
+    cfg = _adr_map()[stock_code]
     key = (stock_code, period)
 
     def _with_live(stats):
@@ -364,7 +375,7 @@ def _live_premium_fx(stock_code):
     freshest available Yahoo snapshot. Returns (premium, fx) or None on failure
     so callers can fall back to the last daily close.
     """
-    cfg = US_ADR_MAP.get(stock_code)
+    cfg = _adr_map().get(stock_code)
     if not cfg:
         return None
     try:
@@ -451,10 +462,10 @@ def scrape_yfinance_us_option(stock_code, option_type="All", min_days=1, max_day
     cache-hit path stays warm. Never raises — returns (df, error_or_None, meta),
     mirroring warrant_logic.scrape_cmoney_warrant / options_logic.scrape_tw_option.
     """
-    if stock_code not in US_ADR_MAP:
+    if stock_code not in _adr_map():
         return pd.DataFrame(), f"{stock_code}: no US ADR mapping", {"as_of": None, "cached": False}
 
-    cfg = US_ADR_MAP[stock_code]
+    cfg = _adr_map()[stock_code]
     cache_key = (stock_code, compute_iv, keep_noniv)
 
     t0 = time.time()
@@ -620,7 +631,7 @@ def us_option_last(us_code, opt_type, strike_twd, expiry_iso, fx, adr_ratio):
     strike (× adr_ratio ÷ FX) before matching. Returns None if anything is
     missing so the caller can fall back to a model value.
     """
-    cfg = US_ADR_MAP.get(us_code)
+    cfg = _adr_map().get(us_code)
     if not cfg or not fx or not adr_ratio or strike_twd <= 0:
         return None
     strike_usd = strike_twd * adr_ratio / fx

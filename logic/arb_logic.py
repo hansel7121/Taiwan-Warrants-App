@@ -376,12 +376,12 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
 
     for i, code in enumerate(stock_codes, 1):
         pos = f"({i}/{len(stock_codes)})"
-        if code not in options_logic.COMMODITY_MAP:
+        if code not in options_logic._commodity_map():
             errors.append(f"{code}: no options data available")
             applog.log("ARB", f"{code} {pos} skipped: no options data available")
             continue
 
-        cfg = options_logic.COMMODITY_MAP[code]
+        cfg = options_logic._commodity_map()[code]
         opt_contract_size = cfg["exercise_ratio"]
 
         # No time-value cap and no IV solve on the arb path: a positive price
@@ -465,7 +465,7 @@ def match_warrant_us_option(stock_codes, option_type, max_strike_diff_pct, max_d
 
     for i, code in enumerate(stock_codes, 1):
         pos = f"({i}/{len(stock_codes)})"
-        if code not in us_options_logic.US_ADR_MAP:
+        if code not in us_options_logic._adr_map():
             errors.append(f"{code}: no US ADR mapping")
             applog.log("ARB", f"{code} {pos} skipped: no US ADR mapping")
             continue
@@ -708,16 +708,16 @@ def match_tw_us_option(stock_codes, option_type, max_strike_diff_pct, max_dte_di
 
     for i, code in enumerate(stock_codes, 1):
         pos = f"({i}/{len(stock_codes)})"
-        if code not in options_logic.COMMODITY_MAP:
+        if code not in options_logic._commodity_map():
             errors.append(f"{code}: no Taiwan options")
             applog.log("ARB", f"{code} {pos} skipped: no Taiwan options")
             continue
-        if code not in us_options_logic.US_ADR_MAP:
+        if code not in us_options_logic._adr_map():
             errors.append(f"{code}: no US ADR options")
             applog.log("ARB", f"{code} {pos} skipped: no US ADR options")
             continue
 
-        tw_contract_shares = options_logic.COMMODITY_MAP[code]["exercise_ratio"]  # 2000
+        tw_contract_shares = options_logic._commodity_map()[code]["exercise_ratio"]  # 2000
         us_contract_shares = us_options_logic.contract_tw_shares(code)            # 500 (2303)
 
         # Like US Option Match's warrant leg: don't require a live two-sided

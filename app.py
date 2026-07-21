@@ -201,7 +201,7 @@ def close_quote():
             s = us_options_logic.adr_premium_scenario(us_code, 30)
             out["current_premium"] = s.get("current_premium")
             out["current_fx"] = (s.get("fx") or {}).get("current_fx")
-            out["adr_ratio"] = us_options_logic.US_ADR_MAP.get(us_code, {}).get("adr_ratio")
+            out["adr_ratio"] = us_options_logic._adr_map().get(us_code, {}).get("adr_ratio")
         except Exception:
             pass
 
@@ -479,7 +479,7 @@ def adr_premium():
     data = request.json
     stock_code = data.get("stock_code")
     try:
-        if stock_code not in us_options_logic.US_ADR_MAP:
+        if stock_code not in us_options_logic._adr_map():
             raise RuntimeError(f"{stock_code}: no US ADR mapping")
         return jsonify(us_options_logic.adr_premium_stats(stock_code))
     except Exception as e:
@@ -493,7 +493,7 @@ def adr_premium_scenario():
     stock_code = data.get("stock_code")
     horizon_days = int(data.get("horizon_days", 30) or 30)
     try:
-        if stock_code not in us_options_logic.US_ADR_MAP:
+        if stock_code not in us_options_logic._adr_map():
             raise RuntimeError(f"{stock_code}: no US ADR mapping")
         return jsonify(us_options_logic.adr_premium_scenario(stock_code, horizon_days))
     except Exception as e:

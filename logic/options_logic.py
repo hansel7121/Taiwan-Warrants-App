@@ -14,19 +14,30 @@ R = 0.01875  # Taiwan CBC benchmark rate
 
 TAIFEX_URL = "https://www.taifex.com.tw/cht/3/optDataDown"
 
-COMMODITY_MAP = {
-    "TXO":  {"commodity_ids": ["TXO"],         "ticker": "^TWII",   "exercise_ratio": 50},
-    "2330": {"commodity_ids": ["CDA", "CDO"],   "ticker": "2330.TW", "exercise_ratio": 2000},
-    "2303": {"commodity_ids": ["CCO"],          "ticker": "2303.TW", "exercise_ratio": 2000},
-    "2603": {"commodity_ids": ["CZA", "CZO"],   "ticker": "2603.TW", "exercise_ratio": 2000},
-    "2881": {"commodity_ids": ["CEO"],          "ticker": "2881.TW", "exercise_ratio": 2000},
-    "2882": {"commodity_ids": ["CKO"],          "ticker": "2882.TW", "exercise_ratio": 2000},
-}
-
 # Module-level cache: (commodity_id -> (timestamp, DataFrame))
 _taifex_cache: dict = {}
 _spot_cache: dict = {}
 _CACHE_TTL = 1800  # 30 minutes
+
+_PRODUCT_CACHE_TTL = 300  # 5 min; add/remove routes also invalidate directly
+_commodity_map_cache = {"data": None, "ts": 0.0}
+
+
+def _commodity_map():
+    """{code: {commodity_ids, ticker, exercise_ratio, name}} from tw_option_products, cached."""
+    now = time.time()
+    if _commodity_map_cache["data"] is not None and now - _commodity_map_cache["ts"] < _PRODUCT_CACHE_TTL:
+        return _commodity_map_cache["data"]
+    from services import db_products
+    data = {row["code"]: row for row in db_products.list_tw_option_products()}
+    _commodity_map_cache["data"] = data
+    _commodity_map_cache["ts"] = now
+    return data
+
+
+def invalidate_commodity_map_cache():
+    """Called by the add/remove product routes (Phase 5.3) so a change is visible immediately."""
+    _commodity_map_cache["data"] = None
 
 
 def _live_cache_as_of(stock_codes):
@@ -37,7 +48,7 @@ def _live_cache_as_of(stock_codes):
     """
     ts_list = []
     for code in stock_codes:
-        cfg = COMMODITY_MAP.get(code)
+        cfg = _commodity_map().get(code)
         if not cfg:
             continue
         mis_ts = [
@@ -397,7 +408,7 @@ def _fetch_mis_quotes(cid, kind, force=False):
 def scrape_mis_tw_option(code, compute_iv=True, keep_noniv=False, force=False):
     """Intraday (~20 min delayed) TW option chain from TAIFEX MIS, in the same
     schema as _parse_and_compute so callers are unchanged. Raises on failure."""
-    cfg = COMMODITY_MAP[code]
+    cfg = _commodity_map()[code]
     is_index = code == "TXO"
     kind = "1" if is_index else "4"
     r_free = R
@@ -598,11 +609,11 @@ def scrape_tw_option(
     dfs = []
     errors = []
     for code in stock_codes:
-        if code not in COMMODITY_MAP:
+        if code not in _commodity_map():
             errors.append(f"{code}: not supported")
             applog.log("OPT", f"{code} not supported")
             continue
-        cfg = COMMODITY_MAP[code]
+        cfg = _commodity_map()[code]
         df = None
         # Primary: MIS intraday quotes. Fallback: EOD data-download file.
         try:

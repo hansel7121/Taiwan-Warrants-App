@@ -25,18 +25,10 @@ from apscheduler.triggers.cron import CronTrigger
 
 from services import memlog
 from services import db_market
+from services import db_products
 from logic import warrant_logic
 from logic import options_logic
 from logic import us_options_logic
-
-# Mirror of DEFAULT_STOCKS in templates/index.html — keep the two in sync.
-DEFAULT_WARRANT_STOCKS = [
-    "2330", "2317", "2454", "2382", "3231", "6669", "2376", "3017", "3324",
-    "2308", "3711", "3034", "2379", "3661", "3443", "2603", "3008", "2881",
-    "2882", "3037", "2303", "2886",
-]
-TW_OPTION_CODES = list(options_logic.COMMODITY_MAP)
-US_OPTION_CODES = list(us_options_logic.US_ADR_MAP)
 
 # Superset-with-IV column order the writers align each option leg to before the
 # snapshot write. These MUST match the data columns (minus batch_id) of the
@@ -88,22 +80,16 @@ def _coerce_int_cols(df, cols):
     return df
 
 
-def _custom_stock_codes():
-    """Union of every user's custom-stock codes, from Supabase.
-
-    Returns [] on any failure (incl. unconfigured Supabase) so the refresh
-    jobs keep running against the default universe.
-    """
-    try:
-        from services import db
-        return db.all_custom_stock_codes()
-    except Exception as e:
-        print(f"SCHED: custom stock codes unavailable: {e}", flush=True)
-        return []
-
-
 def warrant_universe():
-    return sorted(set(DEFAULT_WARRANT_STOCKS) | set(_custom_stock_codes()))
+    return [row["code"] for row in db_products.list_warrant_stocks()]
+
+
+def tw_option_codes():
+    return [row["code"] for row in db_products.list_tw_option_products()]
+
+
+def us_option_codes():
+    return [row["code"] for row in db_products.list_us_option_products()]
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +181,7 @@ def sync_warrant():
 def sync_tw_option():
     """Fetch each TW option product (superset-with-IV), align, write one batch."""
     frames = []
-    for code in TW_OPTION_CODES:
+    for code in tw_option_codes():
         try:
             df, err, _meta = options_logic.scrape_tw_option(
                 [code], "All", min_days=0, max_days=365,
@@ -226,7 +212,7 @@ def sync_tw_option():
 def sync_us_option():
     """Fetch each US ADR option chain (superset-with-IV), align, write one batch."""
     frames = []
-    for code in US_OPTION_CODES:
+    for code in us_option_codes():
         try:
             df, err, _meta = us_options_logic.scrape_yfinance_us_option(
                 code, "All", min_days=1, max_days=730,
