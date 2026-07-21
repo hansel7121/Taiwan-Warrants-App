@@ -6,6 +6,7 @@ from logic import us_options_logic
 from services import scheduler
 from services import auth
 from services import db
+from services import db_products
 from services import store
 from logic import arb_logic
 from services.auth import require_auth
@@ -230,16 +231,107 @@ def close_quote():
     return jsonify(out)
 
 
-@app.route("/get_custom_stocks")
+@app.route("/list_warrant_stocks")
 @require_auth
-def get_custom_stocks():
-    return jsonify(db.get_custom_stocks(g.user["id"]))
+def list_warrant_stocks():
+    return jsonify(db_products.list_warrant_stocks())
 
 
-@app.route("/save_custom_stocks", methods=["POST"])
+@app.route("/add_warrant_stock", methods=["POST"])
 @require_auth
-def save_custom_stocks():
-    db.save_custom_stocks(g.user["id"], request.json or [])
+def add_warrant_stock():
+    data = request.json or {}
+    code = (data.get("code") or "").strip()
+    if not code:
+        return jsonify({"error": "code required"}), 400
+    db_products.add_warrant_stock(code, data.get("name"))
+    return jsonify({"ok": True})
+
+
+@app.route("/remove_warrant_stock", methods=["POST"])
+@require_auth
+def remove_warrant_stock():
+    data = request.json or {}
+    code = (data.get("code") or "").strip()
+    if not code:
+        return jsonify({"error": "code required"}), 400
+    db_products.remove_warrant_stock(code)
+    return jsonify({"ok": True})
+
+
+@app.route("/lookup_warrant_stock")
+@require_auth
+def lookup_warrant_stock():
+    code = (request.args.get("code") or "").strip()
+    info = warrant_logic._universe().get(code)
+    return jsonify({"code": code, "name": info.name if info else None})
+
+
+@app.route("/list_tw_option_products")
+@require_auth
+def list_tw_option_products():
+    return jsonify(db_products.list_tw_option_products())
+
+
+@app.route("/add_tw_option_product", methods=["POST"])
+@require_auth
+def add_tw_option_product():
+    data = request.json or {}
+    code = (data.get("code") or "").strip()
+    commodity_ids = data.get("commodity_ids")
+    ticker = (data.get("ticker") or "").strip()
+    exercise_ratio = data.get("exercise_ratio")
+    if not code or not commodity_ids or not ticker or not exercise_ratio:
+        return jsonify({"error": "code, commodity_ids, ticker, exercise_ratio required"}), 400
+    if isinstance(commodity_ids, str):
+        commodity_ids = [c.strip() for c in commodity_ids.split(",") if c.strip()]
+    db_products.add_tw_option_product(code, commodity_ids, ticker, int(exercise_ratio), data.get("name"))
+    options_logic.invalidate_commodity_map_cache()
+    return jsonify({"ok": True})
+
+
+@app.route("/remove_tw_option_product", methods=["POST"])
+@require_auth
+def remove_tw_option_product():
+    data = request.json or {}
+    code = (data.get("code") or "").strip()
+    if not code:
+        return jsonify({"error": "code required"}), 400
+    db_products.remove_tw_option_product(code)
+    options_logic.invalidate_commodity_map_cache()
+    return jsonify({"ok": True})
+
+
+@app.route("/list_us_option_products")
+@require_auth
+def list_us_option_products():
+    return jsonify(db_products.list_us_option_products())
+
+
+@app.route("/add_us_option_product", methods=["POST"])
+@require_auth
+def add_us_option_product():
+    data = request.json or {}
+    code = (data.get("code") or "").strip()
+    adr_ticker = (data.get("adr_ticker") or "").strip()
+    fx_ticker = (data.get("fx_ticker") or "").strip()
+    adr_ratio = data.get("adr_ratio")
+    if not code or not adr_ticker or not fx_ticker or not adr_ratio:
+        return jsonify({"error": "code, adr_ticker, fx_ticker, adr_ratio required"}), 400
+    db_products.add_us_option_product(code, adr_ticker, fx_ticker, float(adr_ratio), data.get("name"))
+    us_options_logic.invalidate_adr_map_cache()
+    return jsonify({"ok": True})
+
+
+@app.route("/remove_us_option_product", methods=["POST"])
+@require_auth
+def remove_us_option_product():
+    data = request.json or {}
+    code = (data.get("code") or "").strip()
+    if not code:
+        return jsonify({"error": "code required"}), 400
+    db_products.remove_us_option_product(code)
+    us_options_logic.invalidate_adr_map_cache()
     return jsonify({"ok": True})
 
 

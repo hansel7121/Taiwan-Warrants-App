@@ -172,30 +172,3 @@ def changed_rows_since(user_id, since_iso=None):
     return r.data or []
 
 
-def get_custom_stocks(user_id):
-    r = _run(
-        lambda c: c.table("custom_stocks").select("stocks").eq("user_id", user_id).execute()
-    )
-    if r.data:
-        return r.data[0].get("stocks") or []
-    return []
-
-
-def save_custom_stocks(user_id, stocks):
-    _run(
-        lambda c: c.table("custom_stocks")
-        .upsert({"user_id": user_id, "stocks": stocks or [], "updated_at": _now()})
-        .execute()
-    )
-    return True
-
-
-def all_custom_stock_codes():
-    """Union of every user's custom-stock codes (for the scheduler's warrant universe)."""
-    r = client().table("custom_stocks").select("stocks").execute()
-    codes = set()
-    for row in (r.data or []):
-        for s in (row.get("stocks") or []):
-            if isinstance(s, dict) and s.get("code"):
-                codes.add(s["code"])
-    return list(codes)
