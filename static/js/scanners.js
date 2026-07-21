@@ -127,7 +127,8 @@ function syncWarrant() {
     document.getElementById("status"),
     document.getElementById("refreshWarrantsBtn"),
     readWarrant,
-    document.getElementById("tableContainer"));
+    document.getElementById("tableContainer"),
+    document.getElementById("readWarrantBtn"));
 }
 
 function renderTable(rows) {
@@ -398,12 +399,28 @@ async function readOption() {
 }
 
 function syncOption() {
-  const kind = _optMarket === "us" ? "us_options" : "tw_options";
+  // Freeze the market this sync targets. readOption() reads the LIVE
+  // _optMarket when it runs, so if the user switches TW<->US mid-sync, this
+  // sync's trailing read must not fire — it would be an unrequested fetch for
+  // whatever market the user has since switched to, clobbering their view.
+  const market = _optMarket;
+  const kind = market === "us" ? "us_options" : "tw_options";
+  const statusEl = document.getElementById("opt-status");
+  const syncingMsg = "Syncing market data… this may take a bit";
   return refreshNow(kind,
-    document.getElementById("opt-status"),
+    statusEl,
     document.getElementById("refreshOptionsBtn"),
-    readOption,
-    document.getElementById("opt-tableContainer"));
+    () => {
+      if (_optMarket !== market) {
+        // User moved to the other market while this sync was running — the
+        // data is safely stored either way; just don't render it here.
+        if (statusEl.textContent === syncingMsg) statusEl.textContent = "";
+        return;
+      }
+      return readOption();
+    },
+    document.getElementById("opt-tableContainer"),
+    document.getElementById("readOptionBtn"));
 }
 
 function renderOptionsTable(rows) {

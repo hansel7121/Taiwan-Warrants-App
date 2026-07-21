@@ -69,7 +69,7 @@
             <input type="number" id="optMinVolume" value="0" min="0" />
           </label>
           <div class="action-group">
-            <button class="primary" onclick="readOption()">Read Options</button>
+            <button class="primary" id="readOptionBtn" onclick="readOption()">Read Options</button>
             <button class="sm" id="refreshOptionsBtn" onclick="syncOption()">Sync now</button>
             <button class="success" id="optDownloadBtn" onclick="downloadOptionsCSV()" style="display:none">
               Download CSV
@@ -154,7 +154,7 @@
           </label>
 
           <div class="action-group">
-            <button class="primary" onclick="readWarrant()">Read Warrants</button>
+            <button class="primary" id="readWarrantBtn" onclick="readWarrant()">Read Warrants</button>
             <button class="sm" id="refreshWarrantsBtn" onclick="syncWarrant()">Sync now</button>
             <button class="success" id="downloadBtn" onclick="downloadCSV()" style="display:none">
               Download CSV

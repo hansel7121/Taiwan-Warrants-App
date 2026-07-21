@@ -95,14 +95,21 @@ setInterval(_tickAges, 30000);
 // synchronous on the backend (blocks until the scrape+store completes), so
 // this is a plain linear sequence — no polling loop: clear the table, await
 // the sync, then do exactly one read to render the result. Always re-enables
-// the button, even on error.
+// the button(s), even on error.
+//
+// readBtn is also disabled for the duration: the "Read" button isn't wired
+// through this function's own request, so without disabling it a manual click
+// mid-sync would race its own read against onDone()'s trailing read, and
+// whichever response landed last would win the render.
 
-async function refreshNow(kind, statusEl, btn, onDone, tableEl) {
+async function refreshNow(kind, statusEl, btn, onDone, tableEl, readBtn) {
   if (!statusEl || !btn) return;
   const origLabel = btn.textContent;
   const wasDisabled = btn.disabled;
+  const readWasDisabled = readBtn ? readBtn.disabled : null;
   btn.disabled = true;
   btn.textContent = "Syncing…";
+  if (readBtn) readBtn.disabled = true;
   statusEl.textContent = "Syncing market data… this may take a bit";
   if (tableEl) tableEl.innerHTML = "";
   try {
@@ -121,6 +128,7 @@ async function refreshNow(kind, statusEl, btn, onDone, tableEl) {
   } finally {
     btn.disabled = wasDisabled;
     btn.textContent = origLabel;
+    if (readBtn) readBtn.disabled = readWasDisabled;
   }
 }
 

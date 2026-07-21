@@ -71,6 +71,7 @@ _TZ_NY = ZoneInfo("America/New_York")
 
 _scheduler = None
 _start_lock = threading.Lock()
+_force_refresh_lock = threading.Lock()  # guards the force_refresh debounce check+set
 _last_run: dict = {}  # job name -> epoch of last completed run
 
 
@@ -313,12 +314,20 @@ def force_refresh(kind):
     """
     if kind not in _FORCE_MAP:
         return {"ok": False, "error": f"unknown kind: {kind}"}
-    now = time.time()
-    if now - _last_run.get(kind, 0) < FORCE_DEBOUNCE_SECONDS:
-        return {"ok": True, "started": [], "skipped": [kind]}
-    # Mark at dispatch, not completion, so a concurrent click debounces
-    # instead of double-fetching.
-    _last_run[kind] = now
+    # The check-then-set below must be atomic: two near-simultaneous requests
+    # for the same kind could otherwise both read a stale _last_run before
+    # either writes it, both slip past the debounce, and both run the scraper
+    # concurrently — racing each other's write_snapshot() for the same
+    # category. The lock only guards this tiny check+mark; the actual
+    # scrape+store runs outside it so different kinds (or the next window's
+    # same kind) are never serialized by it.
+    with _force_refresh_lock:
+        now = time.time()
+        if now - _last_run.get(kind, 0) < FORCE_DEBOUNCE_SECONDS:
+            return {"ok": True, "started": [], "skipped": [kind]}
+        # Mark at dispatch, not completion, so a concurrent click debounces
+        # instead of double-fetching.
+        _last_run[kind] = now
     _FORCE_MAP[kind]()
     return {"ok": True, "started": [kind], "skipped": []}
 
