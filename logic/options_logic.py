@@ -1,7 +1,7 @@
 import io
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 import pandas as pd
 import numpy as np
@@ -29,22 +29,12 @@ _spot_cache: dict = {}
 _CACHE_TTL = 1800  # 30 minutes
 
 
-def data_as_of(stock_codes):
-    """Oldest cache timestamp backing these codes' quotes (epoch), or None.
+def _live_cache_as_of(stock_codes):
+    """Oldest live-cache timestamp (epoch) backing these codes' quotes, or None.
 
     MIS (intraday) entries are checked first since they are the primary
     source; EOD taifex entries only matter when MIS failed.
     """
-    # Snapshot mode: the freshness is the snapshot batch's created_at, returned
-    # as an epoch float so the route's _epoch_iso(...) still works.
-    if db_market.snapshot_enabled():
-        try:
-            iso = db_market.snapshot_as_of("tw_options")
-        except Exception:
-            iso = None
-        if iso:
-            return datetime.fromisoformat(iso).timestamp()
-        return None
     ts_list = []
     for code in stock_codes:
         cfg = COMMODITY_MAP.get(code)
@@ -61,6 +51,23 @@ def data_as_of(stock_codes):
         if eod:
             ts_list.append(eod[0])
     return min(ts_list) if ts_list else None
+
+
+def data_as_of(stock_codes):
+    """Oldest cache timestamp backing these codes' quotes (epoch), or None.
+
+    Snapshot mode: the freshness is the snapshot batch's created_at, returned
+    as an epoch float (still used by /match_warrant_tw_option's as_of calc).
+    """
+    if db_market.snapshot_enabled():
+        try:
+            iso = db_market.snapshot_as_of("tw_options")
+        except Exception:
+            iso = None
+        if iso:
+            return datetime.fromisoformat(iso).timestamp()
+        return None
+    return _live_cache_as_of(stock_codes)
 
 
 def _decode(content):
@@ -528,19 +535,25 @@ def read_tw_option(
     compute_iv=True,
     keep_noniv=False,
 ):
+    """Return (df, error_or_None, meta). Never raises for an expected-empty
+    result (unsupported code, empty snapshot, nothing survived the filter) —
+    mirrors warrant_logic.read_warrant's contract exactly."""
+    if isinstance(stock_codes, str):
+        stock_codes = [stock_codes]
+
     # Snapshot-first read (MARKET_SOURCE=supabase). The stored snapshot is the
     # superset-with-IV; compute_iv=True (scanner) drops non-converged-IV rows,
     # compute_iv=False (arb) keeps the superset. Empty snapshot / read error
-    # falls through to the live path; a non-empty snapshot keeps the live
-    # raise-on-empty contract.
+    # falls through to the live path below.
     if db_market.snapshot_enabled():
-        snap = None
+        snap, as_of = None, None
         try:
-            snap, _as_of = db_market.read_snapshot("tw_options", codes=list(stock_codes))
+            snap, as_of = db_market.read_snapshot("tw_options", codes=list(stock_codes))
         except Exception as e:
             applog.log("OPT", f"supabase read failed ({e}) — falling back to live")
             snap = None
         if snap is not None and not snap.empty:
+            meta = {"as_of": as_of, "cached": True}
             if compute_iv:
                 snap = snap[snap["iv_ask"].notna()]
             else:
@@ -554,12 +567,9 @@ def read_tw_option(
             result = _apply_option_filters(
                 snap, option_type, min_days, max_days, min_leverage, min_volume
             )
-            # Snapshot present but filtered to nothing is a clean empty result,
-            # not a failure — return the (possibly empty) frame so app.py
-            # round-trips an empty result as {"rows": [], "count": 0} instead of
-            # surfacing a hard error (matches warrant_logic's graceful empty
-            # return). raise-on-empty stays only in the live scrape path below.
-            return result
+            if result.empty:
+                return pd.DataFrame(), "No options for requested codes", meta
+            return result, None, meta
 
     return scrape_tw_option(
         stock_codes, option_type, min_days, max_days,
@@ -582,9 +592,8 @@ def scrape_tw_option(
     The scraper half of read_tw_option: always re-fetches from TAIFEX MIS
     (primary) / EOD (fallback) with force=True to bypass the in-process TTL
     caches (_mis_cache / _taifex_cache / _spot_cache), so a manual refresh is
-    guaranteed fresh. Raises RuntimeError only when nothing can be scraped at
-    all (an empty filter result is a real failure to fetch, unchanged from the
-    original live path).
+    guaranteed fresh. Never raises — returns (df, error_or_None, meta), same
+    shape as read_tw_option, mirroring warrant_logic's scrape_cmoney_warrant.
     """
     dfs = []
     errors = []
@@ -620,10 +629,16 @@ def scrape_tw_option(
         if df is not None and not df.empty:
             dfs.append(df)
 
+    as_of = _live_cache_as_of(stock_codes)
+    meta = {
+        "as_of": datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None,
+        "cached": False,
+    }
+
     if not dfs:
         err_msg = "; ".join(errors) if errors else "No data returned"
         applog.log("OPT", f"{','.join(stock_codes)} -> no data: {err_msg}")
-        raise RuntimeError(err_msg)
+        return pd.DataFrame(), err_msg, meta
 
     result = pd.concat(dfs, ignore_index=True)
 
@@ -636,4 +651,6 @@ def scrape_tw_option(
         f"{','.join(stock_codes)} -> {len(result)} rows type={option_type} "
         f"days={min_days}-{max_days}",
     )
-    return result
+    if result.empty:
+        return result, "No options passed filters", meta
+    return result, None, meta

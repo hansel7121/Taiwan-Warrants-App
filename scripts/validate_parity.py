@@ -174,38 +174,30 @@ def main():
         "warrants_arb", lv[0], sp[0], ["warrant_code"]
     )
 
-    # 3. TW options scanner. Live returns empty df on no-data; supabase raises on
-    #    empty — treat both-empty (whether empty-df or raise) as PASS.
-    lv, sp, Raised = _both_try(
-        options_logic.read_tw_option, ["2330"], "All", 0, 365, 0, 0
-    )
-    live_empty = isinstance(lv, Raised) or (hasattr(lv, "empty") and lv.empty)
-    supa_empty = isinstance(sp, Raised) or (hasattr(sp, "empty") and sp.empty)
-    if live_empty and supa_empty:
+    # 3. TW options scanner. Both live and supabase now return (df, error, meta)
+    #    gracefully — both-empty is a legitimate SKIP/PASS, not a raise.
+    def _tw_option_df(*args, **kw):
+        df, _err, _meta = options_logic.read_tw_option(*args, **kw)
+        return df
+
+    lv, sp = both(_tw_option_df, ["2330"], "All", 0, 365, 0, 0)
+    if lv.empty and sp.empty:
         print("[tw_options_scanner] live=empty supa=empty SKIP/PASS (both empty)")
         results["tw_options_scanner"] = True
-    elif isinstance(lv, Raised) or isinstance(sp, Raised):
-        print(f"[tw_options_scanner] FAIL only one side raised "
-              f"(live_raised={isinstance(lv, Raised)} supa_raised={isinstance(sp, Raised)})")
-        results["tw_options_scanner"] = False
     else:
         results["tw_options_scanner"] = compare_frames(
             "tw_options_scanner", lv, sp, ["contract"]
         )
 
     # 4. US options scanner.
-    lv, sp, Raised = _both_try(
-        us_options_logic.read_us_option, "2303", "All", 1, 365
-    )
-    live_empty = isinstance(lv, Raised) or (hasattr(lv, "empty") and lv.empty)
-    supa_empty = isinstance(sp, Raised) or (hasattr(sp, "empty") and sp.empty)
-    if live_empty and supa_empty:
+    def _us_option_df(*args, **kw):
+        df, _err, _meta = us_options_logic.read_us_option(*args, **kw)
+        return df
+
+    lv, sp = both(_us_option_df, ["2303"], "All", 1, 365)
+    if lv.empty and sp.empty:
         print("[us_options_scanner] live=empty supa=empty SKIP/PASS (both empty)")
         results["us_options_scanner"] = True
-    elif isinstance(lv, Raised) or isinstance(sp, Raised):
-        print(f"[us_options_scanner] FAIL only one side raised "
-              f"(live_raised={isinstance(lv, Raised)} supa_raised={isinstance(sp, Raised)})")
-        results["us_options_scanner"] = False
     else:
         results["us_options_scanner"] = compare_frames(
             "us_options_scanner", lv, sp, ["contract"]

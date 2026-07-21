@@ -20,12 +20,8 @@ import threading
 import webbrowser
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 from scipy.interpolate import griddata
-
-
-def _epoch_iso(ts):
-    return datetime.fromtimestamp(ts).isoformat() if ts else None
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
 app = Flask(
@@ -316,17 +312,16 @@ def read_tw_option():
     max_days = int(data.get("max_days", 365))
     min_leverage = float(data.get("min_leverage", 0.0))
     min_volume = int(data.get("min_volume", 0))
-    try:
-        df = options_logic.read_tw_option(
-            stock_codes, option_type, min_days, max_days, min_leverage, min_volume
-        )
-        # Use pandas JSON serialisation so NaN → null (browser JSON.parse rejects bare NaN)
-        rows = json.loads(df.to_json(orient="records"))
-        applog.set_rows(len(df))
-        return jsonify({"rows": rows, "count": len(df), "as_of": _epoch_iso(options_logic.data_as_of(stock_codes))})
-    except Exception as e:
-        applog.log("OPT", f"read_tw_option failed: {e}")
-        return jsonify({"rows": [], "count": 0, "error": str(e)})
+    df, error, meta = options_logic.read_tw_option(
+        stock_codes, option_type, min_days, max_days, min_leverage, min_volume
+    )
+    if error and df.empty:
+        applog.set_rows(0)
+        return jsonify({"rows": [], "count": 0, "error": error, **meta})
+    # Use pandas JSON serialisation so NaN → null (browser JSON.parse rejects bare NaN)
+    rows = json.loads(df.to_json(orient="records"))
+    applog.set_rows(len(df))
+    return jsonify({"rows": rows, "count": len(df), **meta})
 
 
 @app.route("/read_us_option", methods=["POST"])
@@ -338,18 +333,13 @@ def read_us_option():
     min_days = data.get("min_days", 0)
     max_days = data.get("max_days", 365)
     min_volume = data.get("min_volume", 0)
-    try:
-        df = us_options_logic.us_options_scan(stock_codes, option_type, min_days, max_days, min_volume)
-        rows = json.loads(df.to_json(orient="records"))
-        as_of = min(
-            (t for t in (us_options_logic.data_as_of(c) for c in stock_codes) if t),
-            default=None,
-        )
-        applog.set_rows(len(df))
-        return jsonify({"rows": rows, "count": len(df), "as_of": _epoch_iso(as_of)})
-    except Exception as e:
-        applog.log("USOPT", f"scan failed: {e}")
-        return jsonify({"rows": [], "count": 0, "error": str(e)})
+    df, error, meta = us_options_logic.us_options_scan(stock_codes, option_type, min_days, max_days, min_volume)
+    if error and df.empty:
+        applog.set_rows(0)
+        return jsonify({"rows": [], "count": 0, "error": error, **meta})
+    rows = json.loads(df.to_json(orient="records"))
+    applog.set_rows(len(df))
+    return jsonify({"rows": rows, "count": len(df), **meta})
 
 
 @app.route("/read_us_option_csv", methods=["POST"])
@@ -361,10 +351,7 @@ def read_us_option_csv():
     min_days = data.get("min_days", 0)
     max_days = data.get("max_days", 365)
     min_volume = data.get("min_volume", 0)
-    try:
-        df = us_options_logic.us_options_scan(stock_codes, option_type, min_days, max_days, min_volume)
-    except Exception:
-        df = pd.DataFrame()
+    df, _error, _meta = us_options_logic.us_options_scan(stock_codes, option_type, min_days, max_days, min_volume)
     output = io.StringIO()
     df.to_csv(output, index=False)
     output.seek(0)
@@ -385,12 +372,9 @@ def read_tw_option_csv():
     max_days = int(data.get("max_days", 365))
     min_leverage = float(data.get("min_leverage", 0.0))
     min_volume = int(data.get("min_volume", 0))
-    try:
-        df = options_logic.read_tw_option(
-            stock_codes, option_type, min_days, max_days, min_leverage, min_volume
-        )
-    except Exception:
-        df = pd.DataFrame()
+    df, _error, _meta = options_logic.read_tw_option(
+        stock_codes, option_type, min_days, max_days, min_leverage, min_volume
+    )
     output = io.StringIO()
     df.to_csv(output, index=False)
     output.seek(0)
@@ -407,10 +391,9 @@ def iv_surface_options():
     data = request.json
     stock_codes = data.get("stock_codes", ["TXO"])
     option_type = data.get("option_type", "Call")
-    try:
-        df = options_logic.read_tw_option(stock_codes, option_type, min_days=1)
-    except Exception as e:
-        return jsonify({"error": str(e)})
+    df, error, _meta = options_logic.read_tw_option(stock_codes, option_type, min_days=1)
+    if df.empty:
+        return jsonify({"error": error or "No data"})
 
     df = df[df["iv_ask"].notna() & (df["iv_ask"] > 0)]
     if len(df) < 4:
@@ -637,7 +620,8 @@ def match_warrant_tw_option():
             default=None,
         )
         applog.set_rows(len(rows))
-        return jsonify({"rows": rows, "count": len(rows), "as_of": _epoch_iso(as_of)})
+        as_of_iso = datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None
+        return jsonify({"rows": rows, "count": len(rows), "as_of": as_of_iso})
     except Exception as e:
         applog.log("ARB", f"match_warrant_tw_option failed: {e}")
         return jsonify({"rows": [], "count": 0, "error": str(e)})

@@ -12,7 +12,7 @@ from io import BytesIO
 from lxml import etree
 import pandas as pd
 import urllib3
-from datetime import datetime
+from datetime import datetime, timezone
 import numpy as np
 from scipy.stats import norm
 from scipy.optimize import brentq
@@ -829,7 +829,7 @@ def scrape_cmoney_warrant(
 
     cmoney_results, as_of, cached = get_warrant_results(stock_codes, force=True)
     meta = {
-        "as_of": datetime.fromtimestamp(as_of).isoformat() if as_of else None,
+        "as_of": datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None,
         "cached": cached,
     }
 

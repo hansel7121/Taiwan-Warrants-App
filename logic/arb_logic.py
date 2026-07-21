@@ -395,18 +395,17 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
             applog.log("ARB", f"{code} {pos} skipped: {err or 'no warrants'}")
             continue
 
-        try:
-            # PCP pairs a warrant with the OPPOSITE-type option, so the option
-            # fetch must include both types regardless of the warrant filter.
-            opt_type_fetch = "All" if strategy == "pcp" else option_type
-            opt_df = options_logic.read_tw_option([code], opt_type_fetch, min_days=1, compute_iv=False)
-            opt_df = opt_df[opt_df["is_live"]]
-            if min_volume > 0:
-                opt_df = opt_df[opt_df["volume"] >= min_volume]
-        except Exception as e:
-            errors.append(f"{code}: {e}")
-            applog.log("ARB", f"{code} {pos} option fetch failed: {e}")
+        # PCP pairs a warrant with the OPPOSITE-type option, so the option
+        # fetch must include both types regardless of the warrant filter.
+        opt_type_fetch = "All" if strategy == "pcp" else option_type
+        opt_df, opt_err, _meta = options_logic.read_tw_option([code], opt_type_fetch, min_days=1, compute_iv=False)
+        if opt_df.empty:
+            errors.append(f"{code}: {opt_err or 'no options'}")
+            applog.log("ARB", f"{code} {pos} option fetch failed: {opt_err}")
             continue
+        opt_df = opt_df[opt_df["is_live"]]
+        if min_volume > 0:
+            opt_df = opt_df[opt_df["volume"] >= min_volume]
 
         if opt_df.empty:
             errors.append(f"{code}: no live options")
@@ -482,18 +481,17 @@ def match_warrant_us_option(stock_codes, option_type, max_strike_diff_pct, max_d
             applog.log("ARB", f"{code} {pos} skipped: {err or 'no warrants'}")
             continue
 
-        try:
-            # PCP pairs a warrant with the OPPOSITE-type option, so the option
-            # fetch must include both types regardless of the warrant filter.
-            opt_type_fetch = "All" if strategy == "pcp" else option_type
-            opt_df = us_options_logic.read_us_option(code, opt_type_fetch, min_days=1, compute_iv=False)
-            opt_df = opt_df[opt_df["is_live"]]
-            if min_volume > 0:
-                opt_df = opt_df[opt_df["volume"] >= min_volume]
-        except Exception as e:
-            errors.append(f"{code}: {e}")
-            applog.log("ARB", f"{code} {pos} US option fetch failed: {e}")
+        # PCP pairs a warrant with the OPPOSITE-type option, so the option
+        # fetch must include both types regardless of the warrant filter.
+        opt_type_fetch = "All" if strategy == "pcp" else option_type
+        opt_df, opt_err, _meta = us_options_logic.read_us_option([code], opt_type_fetch, min_days=1, compute_iv=False)
+        if opt_df.empty:
+            errors.append(f"{code}: {opt_err or 'no US options'}")
+            applog.log("ARB", f"{code} {pos} US option fetch failed: {opt_err}")
             continue
+        opt_df = opt_df[opt_df["is_live"]]
+        if min_volume > 0:
+            opt_df = opt_df[opt_df["volume"] >= min_volume]
 
         if opt_df.empty:
             errors.append(f"{code}: no live US options")
@@ -722,28 +720,26 @@ def match_tw_us_option(stock_codes, option_type, max_strike_diff_pct, max_dte_di
         tw_contract_shares = options_logic.COMMODITY_MAP[code]["exercise_ratio"]  # 2000
         us_contract_shares = us_options_logic.contract_tw_shares(code)            # 500 (2303)
 
-        try:
-            # Like US Option Match's warrant leg: don't require a live two-sided
-            # quote on the TW option leg — fall back to the last settlement
-            # snapshot so the scan still works when TAIFEX is closed. (Off-hours
-            # prices are stale marks, not executable until the market reopens.)
-            tw_df = options_logic.read_tw_option([code], option_type, min_days=1, compute_iv=False)
-            if min_volume > 0:
-                tw_df = tw_df[tw_df["volume"] >= min_volume]
-        except Exception as e:
-            errors.append(f"{code}: TW options {e}")
-            applog.log("ARB", f"{code} {pos} TW option fetch failed: {e}")
+        # Like US Option Match's warrant leg: don't require a live two-sided
+        # quote on the TW option leg — fall back to the last settlement
+        # snapshot so the scan still works when TAIFEX is closed. (Off-hours
+        # prices are stale marks, not executable until the market reopens.)
+        tw_df, tw_err, _meta = options_logic.read_tw_option([code], option_type, min_days=1, compute_iv=False)
+        if tw_df.empty:
+            errors.append(f"{code}: TW options {tw_err or 'no data'}")
+            applog.log("ARB", f"{code} {pos} TW option fetch failed: {tw_err}")
             continue
+        if min_volume > 0:
+            tw_df = tw_df[tw_df["volume"] >= min_volume]
 
-        try:
-            us_df = us_options_logic.read_us_option(code, option_type, min_days=1, compute_iv=False)
-            us_df = us_df[us_df["is_live"]]
-            if min_volume > 0:
-                us_df = us_df[us_df["volume"] >= min_volume]
-        except Exception as e:
-            errors.append(f"{code}: US options {e}")
-            applog.log("ARB", f"{code} {pos} US option fetch failed: {e}")
+        us_df, us_err, _meta = us_options_logic.read_us_option([code], option_type, min_days=1, compute_iv=False)
+        if us_df.empty:
+            errors.append(f"{code}: US options {us_err or 'no data'}")
+            applog.log("ARB", f"{code} {pos} US option fetch failed: {us_err}")
             continue
+        us_df = us_df[us_df["is_live"]]
+        if min_volume > 0:
+            us_df = us_df[us_df["volume"] >= min_volume]
 
         if tw_df.empty or us_df.empty:
             errors.append(f"{code}: no live options on one leg")

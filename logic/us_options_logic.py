@@ -17,7 +17,7 @@ single spot FX snapshot is used for every conversion.
 """
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -379,30 +379,34 @@ def _live_premium_fx(stock_code):
     return None
 
 
-def read_us_option(stock_code, option_type="All", min_days=1, max_days=365,
+def read_us_option(stock_codes, option_type="All", min_days=1, max_days=365,
                      compute_iv=True, keep_noniv=False):
-    """Return a DataFrame of UMC options priced in TWD per Taiwan share.
+    """Return (df, error_or_None, meta) of UMC options priced in TWD per Taiwan
+    share, for one or more stock codes. Never raises — mirrors read_warrant /
+    read_tw_option's contract.
 
     Columns mirror options_logic.read_tw_option so the same matching code can
     consume it: type, strike, days_to_expiry, bid, ask, iv_bid, iv_ask,
     contract, is_live, plus USD reference fields (strike_usd, fx, adr_price).
+    When multiple codes are passed, each row also carries a "stock_code" column
+    so callers can tell the legs apart (mirrors the Supabase snapshot schema).
     """
-    if stock_code not in US_ADR_MAP:
-        raise RuntimeError(f"{stock_code}: no US ADR mapping")
+    if isinstance(stock_codes, str):
+        stock_codes = [stock_codes]
 
     # Snapshot-first read (MARKET_SOURCE=supabase). The stored snapshot is the
     # superset-with-IV; compute_iv=True (scanner) drops non-converged-IV rows,
-    # compute_iv=False (arb) keeps the superset. _filter_chain preserves the
-    # raise-on-empty-range contract. Empty snapshot / read error falls through
-    # to the live path below; the supabase path never warms _cache.
+    # compute_iv=False (arb) keeps the superset. Empty snapshot / read error
+    # falls through to the live path below; the supabase path never warms _cache.
     if db_market.snapshot_enabled():
-        snap = None
+        snap, as_of = None, None
         try:
-            snap, _as_of = db_market.read_snapshot("us_options", codes=[stock_code])
+            snap, as_of = db_market.read_snapshot("us_options", codes=list(stock_codes))
         except Exception as e:
             applog.log("USOPT", f"supabase read failed ({e}) — falling back to live")
             snap = None
         if snap is not None and not snap.empty:
+            meta = {"as_of": as_of, "cached": True}
             if compute_iv:
                 snap = snap[snap["iv_ask"].notna()]
             else:
@@ -413,11 +417,28 @@ def read_us_option(stock_code, option_type="All", min_days=1, max_days=365,
                 for _c in ("iv_ask", "iv_bid", "delta_calc"):
                     if _c in snap.columns:
                         snap[_c] = np.nan
-            return _filter_chain(snap, option_type, min_days, max_days)
+            result = _apply_us_option_filters(snap, option_type, min_days, max_days)
+            if result.empty:
+                return pd.DataFrame(), "No US options in range", meta
+            return result, None, meta
 
-    return scrape_yfinance_us_option(
-        stock_code, option_type, min_days, max_days, compute_iv, keep_noniv,
-    )
+    dfs, errors, as_ofs = [], [], []
+    for code in stock_codes:
+        df, err, meta = scrape_yfinance_us_option(
+            code, option_type, min_days, max_days, compute_iv, keep_noniv,
+        )
+        if err:
+            errors.append(f"{code}: {err}")
+        if df is not None and not df.empty:
+            dfs.append(df.assign(stock_code=code))
+        if meta.get("as_of"):
+            as_ofs.append(meta["as_of"])
+    combined_meta = {"as_of": min(as_ofs) if as_ofs else None, "cached": False}
+    if not dfs:
+        err_msg = "; ".join(errors) if errors else "No US options in range"
+        return pd.DataFrame(), err_msg, combined_meta
+    result = pd.concat(dfs, ignore_index=True)
+    return result, None, combined_meta
 
 
 def scrape_yfinance_us_option(stock_code, option_type="All", min_days=1, max_days=365,
@@ -427,25 +448,32 @@ def scrape_yfinance_us_option(stock_code, option_type="All", min_days=1, max_day
     The scraper half of read_us_option: always walks the yfinance option
     chain fresh (never short-circuits on the in-process _cache TTL) so a manual
     refresh is guaranteed live, then repopulates _cache so the reader-side
-    cache-hit path stays warm. Same (df) return shape as read_us_option.
+    cache-hit path stays warm. Never raises — returns (df, error_or_None, meta),
+    mirroring warrant_logic.scrape_cmoney_warrant / options_logic.scrape_tw_option.
     """
     if stock_code not in US_ADR_MAP:
-        raise RuntimeError(f"{stock_code}: no US ADR mapping")
+        return pd.DataFrame(), f"{stock_code}: no US ADR mapping", {"as_of": None, "cached": False}
 
     cfg = US_ADR_MAP[stock_code]
-    # The cache holds the FULL chain (all types, all expiries); the requested
-    # option_type/day-range are filter views applied on the way out. The live
-    # scraper never returns from the cache short-circuit (that's the reader's
-    # job) — it always fetches fresh and repopulates _cache below.
     cache_key = (stock_code, compute_iv, keep_noniv)
 
     t0 = time.time()
     adr_ratio = cfg["adr_ratio"]             # ordinary shares per ADR
-    adr = _last_price(cfg["adr_ticker"])     # USD per ADR
-    fx = _last_price(cfg["fx_ticker"])       # TWD per USD
+    try:
+        adr = _last_price(cfg["adr_ticker"])     # USD per ADR
+        fx = _last_price(cfg["fx_ticker"])       # TWD per USD
+    except Exception as e:
+        applog.log("USOPT", f"{stock_code} price fetch failed: {e}")
+        return pd.DataFrame(), str(e), {"as_of": None, "cached": False}
+
+    meta = {
+        "as_of": datetime.fromtimestamp(t0, tz=timezone.utc).isoformat(),
+        "cached": False,
+    }
+
     if adr <= 0 or fx <= 0:
         applog.log("USOPT", f"{stock_code} bad ADR price ({adr}) or FX ({fx})")
-        raise RuntimeError("bad ADR price or FX")
+        return pd.DataFrame(), "bad ADR price or FX", meta
 
     # Underlying value expressed per Taiwan share, in TWD — the same basis the
     # warrant leg uses (so strike_diff_pct etc. are apples-to-apples).
@@ -455,7 +483,7 @@ def scrape_yfinance_us_option(stock_code, option_type="All", min_days=1, max_day
     expiries = tk.options
     if not expiries:
         applog.log("USOPT", f"{stock_code} {cfg['adr_ticker']} no option expiries")
-        raise RuntimeError(f"{cfg['adr_ticker']}: no option expiries")
+        return pd.DataFrame(), f"{cfg['adr_ticker']}: no option expiries", meta
 
     # One yfinance round-trip per expiry, so this walk is the slow part; logging
     # before it starts makes a hang attributable to this stage.
@@ -558,7 +586,7 @@ def scrape_yfinance_us_option(stock_code, option_type="All", min_days=1, max_day
             f"{stock_code} {cfg['adr_ticker']} -> 0 contracts from "
             f"{len(expiries)} expiries in {time.time() - t0:.1f}s",
         )
-        raise RuntimeError("no US options in range")
+        return pd.DataFrame(), "no US options in range", meta
 
     applog.log(
         "USOPT",
@@ -568,15 +596,19 @@ def scrape_yfinance_us_option(stock_code, option_type="All", min_days=1, max_day
     )
     df = pd.DataFrame(rows).sort_values(["days_to_expiry", "strike"]).reset_index(drop=True)
     _cache[cache_key] = (time.time(), df.copy())
-    return _filter_chain(df, option_type, min_days, max_days)
+    filtered = _apply_us_option_filters(df, option_type, min_days, max_days)
+    if filtered.empty:
+        return pd.DataFrame(), "no US options in range", meta
+    return filtered, None, meta
 
 
-def _filter_chain(df, option_type, min_days, max_days):
+def _apply_us_option_filters(df, option_type, min_days, max_days):
+    """Pure filtering (day-range + type). Returns the filtered df, possibly
+    empty. No raise — callers own the empty-case messaging, matching
+    options_logic._apply_option_filters / warrant_logic._apply_warrant_filters."""
     view = df[df["days_to_expiry"].between(int(min_days), int(max_days))]
     if option_type != "All":
         view = view[view["type"] == option_type]
-    if view.empty:
-        raise RuntimeError("no US options in range")
     return view.copy().reset_index(drop=True)
 
 
@@ -616,26 +648,24 @@ def us_options_scan(stock_codes, option_type, min_days, max_days, min_volume):
     Wraps read_us_option (which also carries the TWD-normalized view used by
     the arb finder) and returns the USD-native columns a US options trader
     expects: strike_usd, bid_usd, ask_usd, adr_price (underlying), plus IV /
-    delta / volume / OI.
+    delta / volume / OI. Returns (df, error_or_None, meta) — same contract as
+    the read_X functions it wraps.
     """
-    frames, errors = [], []
-    for code in stock_codes:
-        try:
-            df = read_us_option(
-                code, option_type, min_days=max(1, int(min_days)),
-                max_days=int(max_days), compute_iv=True,
-            )
-            if int(min_volume) > 0:
-                df = df[df["volume"] >= int(min_volume)]
-            if not df.empty:
-                df = df.assign(product=code)
-                frames.append(df)
-        except Exception as e:
-            errors.append(f"{code}: {e}")
-    if not frames:
-        raise RuntimeError("; ".join(errors) if errors else "No data returned")
-    out = pd.concat(frames, ignore_index=True)
+    df, error, meta = read_us_option(
+        stock_codes, option_type, min_days=max(1, int(min_days)),
+        max_days=int(max_days), compute_iv=True,
+    )
+    if df.empty:
+        return pd.DataFrame(), error or "No data returned", meta
+    if int(min_volume) > 0:
+        df = df[df["volume"] >= int(min_volume)]
+    if df.empty:
+        return pd.DataFrame(), "No data returned", meta
+    if "stock_code" in df.columns:
+        df = df.rename(columns={"stock_code": "product"})
+    else:
+        df = df.assign(product=stock_codes[0] if len(stock_codes) == 1 else None)
     cols = ["product", "contract", "type", "strike_usd", "adr_price",
             "days_to_expiry", "bid_usd", "ask_usd", "iv_ask", "iv_bid",
             "delta_calc", "volume", "oi", "fx", "is_live"]
-    return out[[c for c in cols if c in out.columns]]
+    return df[[c for c in cols if c in df.columns]], None, meta

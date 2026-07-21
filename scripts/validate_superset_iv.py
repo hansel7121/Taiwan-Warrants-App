@@ -137,7 +137,9 @@ except Exception as e:
 print("\n=== TW OPTIONS (best-effort) ===")
 try:
     def _opt(civ, keep):
-        df = options_logic.read_tw_option(["2330"], compute_iv=civ, keep_noniv=keep)
+        df, err, _meta = options_logic.read_tw_option(["2330"], compute_iv=civ, keep_noniv=keep)
+        if df.empty:
+            raise RuntimeError(err or "no data")
         return df
 
     try:
@@ -164,9 +166,12 @@ except Exception as e:
 print("\n=== US OPTIONS (best-effort) ===")
 try:
     def _usopt(civ, keep):
-        return us_options_logic.read_us_option(
-            "2303", "All", min_days=1, max_days=730, compute_iv=civ, keep_noniv=keep
+        df, err, _meta = us_options_logic.read_us_option(
+            ["2303"], "All", min_days=1, max_days=730, compute_iv=civ, keep_noniv=keep
         )
+        if df.empty:
+            raise RuntimeError(err or "no data")
+        return df
 
     try:
         A = _usopt(True, False)

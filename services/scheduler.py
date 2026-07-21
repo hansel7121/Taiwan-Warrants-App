@@ -197,7 +197,7 @@ def sync_tw_option():
     frames = []
     for code in TW_OPTION_CODES:
         try:
-            df = options_logic.scrape_tw_option(
+            df, err, _meta = options_logic.scrape_tw_option(
                 [code], "All", min_days=0, max_days=365,
                 compute_iv=True, keep_noniv=True,
             )
@@ -206,6 +206,8 @@ def sync_tw_option():
             print(f"SCHED: tw_option {code} failed: {e}", flush=True)
             continue
         if df is None or df.empty:
+            if err:
+                print(f"SCHED: tw_option {code} empty ({err})", flush=True)
             continue
         df = df.copy()
         df["stock_code"] = code
@@ -226,7 +228,7 @@ def sync_us_option():
     frames = []
     for code in US_OPTION_CODES:
         try:
-            df = us_options_logic.scrape_yfinance_us_option(
+            df, err, _meta = us_options_logic.scrape_yfinance_us_option(
                 code, "All", min_days=1, max_days=730,
                 compute_iv=True, keep_noniv=True,
             )
@@ -234,6 +236,8 @@ def sync_us_option():
             print(f"SCHED: us_option {code} failed: {e}", flush=True)
             continue
         if df is None or df.empty:
+            if err:
+                print(f"SCHED: us_option {code} empty ({err})", flush=True)
             continue
         df = df.copy()
         df["stock_code"] = code
