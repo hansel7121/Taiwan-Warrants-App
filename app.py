@@ -481,8 +481,13 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             if ratio <= 0:
                 continue  # can't size or normalise a warrant with no exercise ratio
             warrant_ask_per_share = round(float(w["ask"]) / ratio, 4)
-            warrant_bid_val = float(w["bid"]) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else float(w["ask"])
+            warrant_bid_live = pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0
+            # Loose marks tolerate the ask-as-bid fallback; an EXECUTABLE sell
+            # does not — nobody lifts a bid that isn't there. Keep both, and let
+            # the tight path below demand the real one.
+            warrant_bid_val = float(w["bid"]) if warrant_bid_live else float(w["ask"])
             warrant_bid_per_share = round(warrant_bid_val / ratio, 4)
+            warrant_bid_real_per_share = round(float(w["bid"]) / ratio, 4) if warrant_bid_live else None
             warrants_needed = round(opt_contract_size / ratio)
             is_put = w["type"] == "Put"
             # IV per leg (matched pair only, cheap) so the modal can mark an OTM
@@ -513,9 +518,21 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                 opt_bid_per_share = round(float(opt["bid"]), 4) if opt_bid_live else None
                 opt_ask_per_share = round(float(opt["ask"]), 4) if opt_ask_live else None
 
-                # Positive tight (executable): opt_bid - warrant_ask > 0
-                # Positive loose: opt_ask - warrant_bid > 0 (mirrors negative formula)
-                # Negative (always loose): opt_bid - warrant_ask < 0
+                # Both directions now honour the loose/tight toggle symmetrically.
+                # Tight = the prices you can actually hit: you LIFT the ask on
+                # whatever you buy and HIT the bid on whatever you sell.
+                # Loose = the optimistic mark (mid-ish), for ranking only.
+                #
+                #   positive (buy warrant / sell option)
+                #     tight: opt_bid  - warrant_ask  > 0
+                #     loose: opt_ask  - warrant_bid  > 0
+                #   negative (buy option / sell warrant)
+                #     tight: opt_ask  - warrant_bid  < 0
+                #     loose: opt_bid  - warrant_ask  < 0
+                #
+                # Negative previously used the loose formula unconditionally,
+                # which priced a BUY at the bid and a SELL at the ask — both
+                # unattainable, so every negative row overstated its edge.
                 if direction == "positive":
                     if positive_loose:
                         if opt_ask_per_share is None:
@@ -532,11 +549,20 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                     if price_diff <= 0:
                         continue
                 else:
-                    if opt_bid_per_share is None:
-                        continue
-                    price_diff = round(opt_bid_per_share - warrant_ask_per_share, 4)
-                    exec_opt = opt_bid_per_share
-                    exec_warrant = warrant_ask_per_share
+                    if positive_loose:
+                        if opt_bid_per_share is None:
+                            continue  # loose negative marks against the option bid
+                        price_diff = round(opt_bid_per_share - warrant_ask_per_share, 4)
+                        exec_opt = opt_bid_per_share
+                        exec_warrant = warrant_ask_per_share
+                    else:
+                        # Executable: buy the option at its ask, sell the warrant
+                        # into its bid. A synthetic bid would fake the proceeds.
+                        if opt_ask_per_share is None or warrant_bid_real_per_share is None:
+                            continue
+                        price_diff = round(opt_ask_per_share - warrant_bid_real_per_share, 4)
+                        exec_opt = opt_ask_per_share
+                        exec_warrant = warrant_bid_real_per_share
                     if price_diff >= 0:
                         continue
 
