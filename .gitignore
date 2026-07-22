@@ -7,7 +7,6 @@ build/
 *.spec
 __pycache__/
 *.pyc
-CLAUDE.md
 
 # user data — never commit / clobber
 portfolio.json
