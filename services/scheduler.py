@@ -335,11 +335,18 @@ def start():
             return _scheduler
         # Single-threaded executor: with max_workers=1 no two pandas-heavy
         # refresh jobs can overlap, which is what keeps the process under
-        # Render's 512 MB cap.
+        # Render's 512 MB cap. That same single worker means jobs due at the
+        # same cron tick queue up behind one another; APScheduler's default
+        # misfire_grace_time (1s) is far shorter than a scrape can take, so a
+        # job second (or third) in the queue gets silently dropped as
+        # "missed" before its turn ever comes up rather than actually
+        # running late. A generous grace window (10 min — comfortably longer
+        # than any single job observed in MEM: logs) lets queued jobs still
+        # fire instead of vanishing.
         sched = BackgroundScheduler(
             daemon=True,
             executors={"default": ThreadPoolExecutor(max_workers=1)},
-            job_defaults={"max_instances": 1, "coalesce": True},
+            job_defaults={"max_instances": 1, "coalesce": True, "misfire_grace_time": 600},
         )
         now = datetime.now()
         # Boot order: cmkey scrape first, since every warrant fetch needs it.
