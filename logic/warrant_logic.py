@@ -93,6 +93,16 @@ def bs_delta(S, K, T, r, sigma, ratio, is_put=False):
     return norm.cdf(d1) * ratio
 
 
+def bs_vega(S, K, T, r, sigma, ratio):
+    """Black-Scholes vega, per 1.00 (=100 vol-points) change in sigma, scaled by
+    the instrument's exercise ratio. Mirrors the frontend `bsVega`. Vega does not
+    depend on call/put, so no is_put arg (unlike bs_price / bs_delta)."""
+    if T <= 0 or sigma <= 0:
+        return 0.0
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    return S * norm.pdf(d1) * np.sqrt(T) * ratio
+
+
 def calc_real_leverage(S, delta, ask):
     if ask <= 0:
         return 0.0

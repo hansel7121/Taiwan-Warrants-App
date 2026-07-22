@@ -756,6 +756,67 @@ def match_warrant_tw_option_csv():
     )
 
 
+def _straddle_params(data):
+    return dict(
+        stock_codes=data.get("stock_codes", ["2330"]),
+        option_type=data.get("option_type", "All"),
+        max_strike_diff_pct=float(data.get("max_strike_diff_pct", 10.0)),
+        max_dte_diff=int(data.get("max_dte_diff", 30)),
+        min_volume=int(data.get("min_volume", 0) or 0),
+        min_iv_edge=float(data.get("min_iv_edge", 1.0)),
+        loose=bool(data.get("loose", False)),
+        short_warrants=bool(data.get("short_warrants", False)),
+        require_dte_cover=bool(data.get("require_dte_cover", True)),
+    )
+
+
+@app.route("/straddle_arbitrage", methods=["POST"])
+@require_auth
+def straddle_arbitrage():
+    p = _straddle_params(request.json)
+    try:
+        df = arb_logic.build_straddle_arb(**p)
+        rows = json.loads(df.to_json(orient="records")) if not df.empty else []
+        as_of = min(
+            (t for t in (warrant_logic.cache_as_of(p["stock_codes"]),
+                         options_logic.data_as_of(p["stock_codes"])) if t),
+            default=None,
+        )
+        applog.set_rows(len(rows))
+        as_of_iso = datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None
+        return jsonify({"rows": rows, "count": len(rows), "as_of": as_of_iso})
+    except Exception as e:
+        applog.log("ARB", f"straddle_arbitrage failed: {e}")
+        return jsonify({"rows": [], "count": 0, "error": str(e)})
+
+
+@app.route("/straddle_arbitrage_csv", methods=["POST"])
+@require_auth
+def straddle_arbitrage_csv():
+    p = _straddle_params(request.json)
+    try:
+        df = arb_logic.build_straddle_arb(**p)
+        # Flatten the nested leg dicts so the CSV is human-readable.
+        flat = []
+        for r in json.loads(df.to_json(orient="records")):
+            row = {k: v for k, v in r.items() if not isinstance(v, dict)}
+            for lk in ("long_call", "long_put", "short_call", "short_put"):
+                lg = r.get(lk) or {}
+                row[f"{lk}"] = f"{lg.get('source')} {lg.get('id')} K{lg.get('K')} {lg.get('dte')}d iv{lg.get('iv')}"
+            flat.append(row)
+        df = pd.DataFrame(flat)
+    except Exception:
+        df = pd.DataFrame()
+    output = io.StringIO()
+    df.to_csv(output, index=False)
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=straddle_arbitrage.csv"},
+    )
+
+
 # RENDER_GIT_* are injected by Render into the running service; absent locally.
 _COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "dev")[:7]
 _BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "dev"

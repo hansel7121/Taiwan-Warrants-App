@@ -242,6 +242,7 @@
           <button id="arb-mode-direct" class="pfsub-btn active" onclick="setArbMode('direct')">Direct Match</button>
           <button id="arb-mode-us" class="pfsub-btn" onclick="setArbMode('us')">US Option Match</button>
           <button id="arb-mode-twus" class="pfsub-btn" onclick="setArbMode('twus')">TW Opt / US Opt</button>
+          <button id="arb-mode-straddle" class="pfsub-btn" onclick="setArbMode('straddle')">Straddle Vol Arb</button>
         </div>
 
         <!-- ── Direct Match sub-tab ── -->
@@ -410,6 +411,62 @@
 
           <div id="twus-status"></div>
           <div id="twus-tableContainer"></div>
+        </div>
+
+        <!-- ── Straddle Vol Arb sub-tab ── -->
+        <div id="arb-sub-straddle" style="display:none">
+          <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-size:14px;font-weight:600;color:var(--text)">Straddle Vol Arb — long cheap-vol package vs short dear option package</span>
+              <button onclick="openStraddleInfo()" title="How does Straddle Vol Arb work?" style="background:none;border:1.5px solid var(--border);border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);font-family:inherit;padding:0;flex-shrink:0">ⓘ</button>
+            </div>
+
+            <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
+              <div class="stock-select">
+                <span>Stock (multi-select)</span>
+                <select id="straddleStockSelect" multiple>
+                </select>
+              </div>
+              <label>Max Strike Diff %
+                <input type="number" id="straddleMaxStrikePct" value="10" step="0.5" min="0" max="40" title="Max strike gap between any two legs (call vs put in a package, and long vs short package), as % of spot"/>
+              </label>
+              <label>Max DTE Diff (days)
+                <input type="number" id="straddleMaxDteDiff" value="30" min="0" max="120"/>
+              </label>
+              <label>Min IV Edge (vol pts)
+                <input type="number" id="straddleMinIvEdge" value="1" step="0.5" min="-100" max="100" title="Short-package IV minus long-package IV, in volatility points. Positive = short vol is dearer than long vol."/>
+              </label>
+              <label>Min Option Volume
+                <input type="number" id="straddleMinVolume" value="0" min="0"/>
+              </label>
+              <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="DEBUG. Prices every leg on its favorable side (buy at bid, write at ask) instead of the executable side. Does not cross the spread — resulting edge is NOT tradeable.">
+                <input type="checkbox" id="straddleLoose" style="width:auto;margin:0"/>
+                Loose prices
+              </label>
+              <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="DEBUG. Lets warrant legs sit on the short side. Only the issuing bank can write Taiwan warrants, so these rows are NOT executable — use to enlarge the short-side pool when the option chain is thin.">
+                <input type="checkbox" id="straddleShortWarrants" style="width:auto;margin:0"/>
+                Allow short warrants
+              </label>
+              <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="DEBUG. Off = allow rows where a short leg outlives the long package, leaving a naked short after long expiry. Keep ON for tradeable results.">
+                <input type="checkbox" id="straddleDteCover" checked style="width:auto;margin:0"/>
+                Require DTE cover
+              </label>
+              <div class="action-group compact">
+                <button class="primary" id="straddleFindBtn" onclick="runStraddle()">Find Straddle Arb</button>
+                <button class="success" id="straddleDownloadBtn" onclick="downloadStraddleCSV()" style="display:none">Download CSV</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="arb-sort-straddle" class="sort-btns">
+            <button onclick="sortStraddleBy('iv_edge_pts', false)">IV Edge ↓</button>
+            <button onclick="sortStraddleBy('net_cash', false)">Net Cash ↓</button>
+            <button onclick="sortStraddleBy('first_expiry', true)">First Expiry ↑</button>
+            <button onclick="sortStraddleBy('k_diff_pct', true)">Strike Gap ↑</button>
+          </div>
+
+          <div id="straddle-status"></div>
+          <div id="straddle-tableContainer"></div>
         </div>
       </main>
     </div>
@@ -668,6 +725,14 @@
           <div id="pf-payoff-chart" style="width:100%;height:340px"></div>
         </div>
         <div id="pf-body"></div>
+      </div>
+    </div>
+
+    <!-- Straddle Vol Arb detail modal -->
+    <div id="straddleModal" onclick="if(event.target===this)closeStraddleModal()" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
+      <div style="max-width:840px;margin:40px auto;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:26px;position:relative">
+        <button onclick="closeStraddleModal()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
+        <div id="straddle-modal-body"></div>
       </div>
     </div>
 
