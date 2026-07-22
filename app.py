@@ -7,6 +7,7 @@ from services import scheduler
 from services import auth
 from services import db
 from services import db_products
+from services import db_suggestions
 from services import store
 from logic import arb_logic
 from services.auth import require_auth
@@ -275,6 +276,23 @@ def lookup_warrant_stock():
     code = (request.args.get("code") or "").strip()
     info = warrant_logic._universe().get(code)
     return jsonify({"code": code, "name": info.name if info else None})
+
+
+@app.route("/list_suggestions")
+@require_auth
+def list_suggestions():
+    return jsonify(db_suggestions.list_active_suggestions())
+
+
+@app.route("/remove_suggestion", methods=["POST"])
+@require_auth
+def remove_suggestion():
+    data = request.json or {}
+    sug_id = (data.get("id") or "").strip()
+    if not sug_id:
+        return jsonify({"error": "id required"}), 400
+    db_suggestions.delete_suggestion(sug_id)
+    return jsonify({"ok": True})
 
 
 @app.route("/list_tw_option_products")
