@@ -12,6 +12,7 @@ market-hours gate. The scheduler registers them wrapped in _job (logging) and,
 for the three intraday data jobs, _gated (skip when the relevant market is
 closed) on a wall-clock 15-minute cron grid.
 """
+import json
 import threading
 import time
 import traceback
@@ -26,9 +27,19 @@ from apscheduler.triggers.cron import CronTrigger
 from services import memlog
 from services import db_market
 from services import db_products
+from services import db_suggestions
+from logic import arb_logic
 from logic import warrant_logic
 from logic import options_logic
 from logic import us_options_logic
+
+# Reuse the Find Arb tab's own defaults (templates/index.html #arbMaxStrikePct
+# / #arbMaxDteDiff), same values app.py's /match_warrant_tw_option route falls
+# back to — the suggest job should surface exactly what a user would see
+# clicking "Warrant vs TW Option" with the page's own defaults, not an
+# invented threshold.
+SUGGEST_MAX_STRIKE_DIFF_PCT = 3.0
+SUGGEST_MAX_DTE_DIFF = 5
 
 # Superset-with-IV column order the writers align each option leg to before the
 # snapshot write. These MUST match the data columns (minus batch_id) of the
@@ -235,6 +246,81 @@ def sync_us_option():
     db_market.write_snapshot("us_options", out)
 
 
+# Direct tab's two strategies -> arb_suggestions arb_type tags, matching the
+# exact mode strings static/js/arb.js already passes to openArbModal(row, mode)
+# at the Find Arb tab (openArbModal(row, "direct") / (row, "pcp")) so the
+# Suggestions sub-tab can route a stored row into that same modal unchanged.
+_SUGGEST_STRATEGIES = (("direct_same_type", "same_type"), ("direct_pcp", "pcp"))
+
+
+def sync_suggestions():
+    """Scan the Direct tab's two strategies, persist positive-edge rows as suggestions.
+
+    Only match_warrant_tw_option (not the US-option or TW/US cross-market
+    matchers) — both legs must be TW-listed so the suggest job's own
+    tw_equity gate (services/scheduler.py:start) actually bounds when a
+    suggested trade is executable. Every row _match_warrants_to_options /
+    _match_warrants_pcp returns is already profitable per its own
+    direction-specific sign convention (that's what "match" means for these
+    functions — same as what the Find Arb tab itself displays); the PCP
+    matcher additionally emits NON-EXECUTABLE debug rows (short-warrant side,
+    executable=False) that must be dropped here since warrants can't be
+    shorted.
+    """
+    codes = sorted(set(warrant_universe()) & set(tw_option_codes()))
+    if not codes:
+        print("SCHED: suggestions: no warrant/tw_option overlap, skipping", flush=True)
+        return
+
+    for arb_type, strategy in _SUGGEST_STRATEGIES:
+        try:
+            df = arb_logic.match_warrant_tw_option(
+                codes, "All", SUGGEST_MAX_STRIKE_DIFF_PCT, SUGGEST_MAX_DTE_DIFF,
+                positive_loose=False, min_volume=0, strategy=strategy,
+            )
+        except RuntimeError as e:
+            print(f"SCHED: suggestions {arb_type} no matches: {e}", flush=True)
+            db_suggestions.mark_stale(arb_type, [])
+            continue
+
+        if strategy == "pcp" and "executable" in df.columns:
+            df = df[df["executable"]]
+        if df.empty:
+            print(f"SCHED: suggestions {arb_type} 0 active (no executable rows)", flush=True)
+            db_suggestions.mark_stale(arb_type, [])
+            continue
+
+        # Each (warrant_code, option_contract) pair yields at most one row per
+        # arb_type: same_type dedupes pairs across its two directions
+        # (arb_logic.py's `seen` set) and pcp keeps only the single executable
+        # side per pair — so this pair is already a stable, deterministic
+        # opportunity identity; no need to also encode strike/expiry/direction.
+        recs = json.loads(df.to_json(orient="records"))
+        rows = []
+        touched_ids = []
+        for row in recs:
+            sug_id = f"{arb_type}:{row['warrant_code']}:{row['option_contract']}"
+            touched_ids.append(sug_id)
+            rows.append({
+                "id": sug_id,
+                "arb_type": arb_type,
+                "legs": row,
+                "price_diff": row["price_diff"],
+                "price_diff_pct": row.get("price_diff_pct"),
+                # The suggest job itself only runs while tw_equity is open
+                # (see the "tw_equity" gate at registration below), and
+                # opt_df was already filtered to is_live rows before either
+                # matcher ran — so both legs are live for every row this job
+                # ever produces. Kept as a field (not hardcoded away) since a
+                # future relaxation of the job's own gate should make this
+                # meaningful again rather than requiring a schema change.
+                "legs_status": {"warrant": "live", "option": "live"},
+            })
+        db_suggestions.upsert_suggestions(rows)
+        db_suggestions.mark_stale(arb_type, touched_ids)
+        print(f"SCHED: suggestions {arb_type} {len(rows)} active", flush=True)
+
+
 # ---------------------------------------------------------------------------
 # Job / gate wrappers used at registration time
 # ---------------------------------------------------------------------------
@@ -281,6 +367,10 @@ def _run_tw_options():
 
 def _run_us_options():
     _job("us_options", sync_us_option)
+
+
+def _run_suggestions():
+    _job("suggestions", sync_suggestions)
 
 
 # "universe" is deliberately separate from the three price kinds above: it's a
@@ -376,6 +466,18 @@ def start():
                       CronTrigger(minute="0,15,30,45"))
         sched.add_job(_gated("us_option", _run_us_options),
                       CronTrigger(minute="0,15,30,45"))
+        # Suggest job offset a couple minutes after the sync grid, not the same
+        # tick: APScheduler doesn't guarantee execution order between
+        # independently-registered jobs due at the same instant even under a
+        # single-worker executor, so an explicit gap is what actually
+        # guarantees sync_warrant/sync_tw_option have finished writing before
+        # this job reads their snapshots. Gated on tw_equity (not tw_option,
+        # which the warrant/option syncs use) — the binding constraint here is
+        # executability: the warrant leg only trades 09:00-13:30 TPE, a
+        # narrower window than TAIFEX's, so a suggestion is useless outside it
+        # even though the option leg itself might still be live.
+        sched.add_job(_gated("tw_equity", _run_suggestions),
+                      CronTrigger(minute="2,17,32,47", timezone=_TZ_TAIPEI))
         sched.start()
         _scheduler = sched
         print("SCHED: started", flush=True)
