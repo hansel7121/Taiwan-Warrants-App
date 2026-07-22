@@ -16,6 +16,17 @@
       <span class="badge">TW</span>
     </header>
 
+    <div id="market-clock" title="Local exchange time + current session">
+      <div class="mc-clocks">
+        <span><b id="mc-pt-time">--:--</b> PT</span>
+        <span><b id="mc-ny-time">--:--</b> ET</span>
+        <span><b id="mc-tw-time">--:--</b> TPE</span>
+      </div>
+      <div class="mc-row" id="mc-row-ny"><span class="mc-lbl">NYSE</span><span class="mc-badge mc-closed" id="mc-ny-st">–</span></div>
+      <div class="mc-row" id="mc-row-tw"><span class="mc-lbl">TWSE</span><span class="mc-badge mc-closed" id="mc-tw-st">–</span></div>
+      <div class="mc-row" id="mc-row-tx"><span class="mc-lbl">TAIFEX opt</span><span class="mc-badge mc-closed" id="mc-tx-st">–</span></div>
+    </div>
+
     <div class="tab-bar">
       <button class="active" onclick="switchTab('options', this)">Options Scanner</button>
       <button onclick="switchTab('scanner', this)">Warrant Scanner</button>
