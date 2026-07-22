@@ -37,9 +37,33 @@
             <!-- Taiwan-listed TAIFEX options -->
             <select id="optionStockSelect" multiple style="height:80px">
             </select>
+            <div class="btn-row" id="twProductBtnRow">
+              <button class="sm" onclick="toggleAddProduct('tw_option')">+ Add Product</button>
+              <button class="sm" onclick="removeSelectedProduct('tw_option')">Remove Selected</button>
+            </div>
+            <div id="addForm_tw_option" class="add-product-form" style="display:none">
+              <input type="text" id="newTwCode" placeholder="Code e.g. 2330" />
+              <input type="text" id="newTwCommodityIds" placeholder="Commodity IDs e.g. CDA,CDO" />
+              <input type="text" id="newTwTicker" placeholder="Yahoo ticker e.g. 2330.TW" />
+              <input type="number" id="newTwExerciseRatio" placeholder="Exercise ratio e.g. 2000" />
+              <input type="text" id="newTwName" placeholder="Name (optional)" />
+              <button class="sm" onclick="addTwOptionProduct()">Confirm</button>
+            </div>
             <!-- US ADR (American) options — hidden until toggled -->
             <select id="optionUsSelect" multiple style="height:80px;display:none">
             </select>
+            <div class="btn-row" id="usProductBtnRow" style="display:none">
+              <button class="sm" onclick="toggleAddProduct('us_option')">+ Add Product</button>
+              <button class="sm" onclick="removeSelectedProduct('us_option')">Remove Selected</button>
+            </div>
+            <div id="addForm_us_option" class="add-product-form" style="display:none">
+              <input type="text" id="newUsCode" placeholder="TW code e.g. 2303" />
+              <input type="text" id="newUsAdrTicker" placeholder="ADR ticker e.g. UMC" />
+              <input type="text" id="newUsFxTicker" placeholder="FX ticker e.g. TWD=X" value="TWD=X" />
+              <input type="number" id="newUsAdrRatio" placeholder="ADR ratio e.g. 5" />
+              <input type="text" id="newUsName" placeholder="Name (optional)" />
+              <button class="sm" onclick="addUsOptionProduct()">Confirm</button>
+            </div>
           </div>
           <label>Option Type
             <select id="optionsType">
@@ -90,12 +114,13 @@
             </select>
             <div class="btn-row">
               <button class="sm" onclick="toggleSelectAll()">Select All</button>
-              <button class="sm" onclick="toggleAddStock()">+ Add Stock</button>
+              <button class="sm" onclick="toggleAddProduct('warrant')">+ Add Stock</button>
+              <button class="sm" onclick="removeSelectedProduct('warrant')">Remove Selected</button>
             </div>
-            <div id="addStockForm" style="display:none">
-              <input type="text" id="newStockCode" placeholder="Code e.g. 2412" />
-              <input type="text" id="newStockName" placeholder="Name e.g. 中華電" />
-              <button class="sm" onclick="addStock()">Confirm</button>
+            <div id="addForm_warrant" class="add-product-form" style="display:none">
+              <input type="text" id="newWarrantCode" placeholder="Code e.g. 2412" oninput="lookupWarrantName()" />
+              <span id="warrantLookupResult" style="font-size:12px;color:var(--muted)"></span>
+              <button class="sm" onclick="addWarrantStock()">Confirm</button>
             </div>
           </div>
 

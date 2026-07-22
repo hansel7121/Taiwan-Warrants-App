@@ -1,11 +1,5 @@
 // Shared: Supabase auth, fetch wrapper, tab nav + view persistence, table helpers.
 
-const DEFAULT_STOCKS = [
-  "2330","2317","2454","2382","3231","6669","2376","3017","3324",
-  "2308","3711","3034","2379","3661","3443","2603","3008","2881",
-  "2882","3037","2303","2886",
-];
-
 // --- Supabase auth bootstrap -------------------------------------------
 
 const SUPABASE_URL = window.SUPABASE_URL;
@@ -207,18 +201,24 @@ function populateProductSelect(selectEl, rows, opts) {
   }
 }
 
+function currentSelection(id) {
+  const el = document.getElementById(id);
+  return el ? Array.from(el.selectedOptions).map(o => o.value) : [];
+}
+
 // Fetch all three product lists and populate every product/stock <select> on
-// the page. Called once from _boot() (portfolio.js). Selects driven by a
-// single list use it directly; arbStockSelect/usStockSelect/twusStockSelect
-// need the intersection of two lists (both legs of that cross-market match
-// need data for the code) — computed client-side since the lists are tiny.
+// the page. Called once from _boot() (portfolio.js), and again after every
+// add/remove (Phase 5.5) so derived selects (the two-list intersections)
+// stay correct. Each select's current selection is preserved across a
+// refresh; the hardcoded fallback only applies the first time (nothing
+// selected yet).
 async function initProductSelects() {
   const [warrants, twOpts, usOpts] = await Promise.all([
     fetchProductList("/list_warrant_stocks"),
     fetchProductList("/list_tw_option_products"),
     fetchProductList("/list_us_option_products"),
   ]);
-  // Exposed for Phase 5.5's add/remove UI to reuse without re-fetching.
+  // Exposed for the add/remove UI to reuse without re-fetching.
   window._productLists = { warrants, twOpts, usOpts };
 
   const codesOf = rows => new Set(rows.map(r => r.code));
@@ -227,13 +227,25 @@ async function initProductSelects() {
   const warrantXUs = warrants.filter(r => usCodes.has(r.code));
   const twXUs = twOpts.filter(r => usCodes.has(r.code));
 
-  populateProductSelect(document.getElementById("stockSelect"), warrants);
-  populateProductSelect(document.getElementById("ivStockSelect"), warrants);
-  populateProductSelect(document.getElementById("optionStockSelect"), twOpts, { selectedCodes: ["TXO"] });
+  const sel = (id, fallback) => {
+    const cur = currentSelection(id);
+    return cur.length ? cur : fallback;
+  };
+
+  populateProductSelect(document.getElementById("stockSelect"), warrants,
+    { selectedCodes: sel("stockSelect", []) });
+  populateProductSelect(document.getElementById("ivStockSelect"), warrants,
+    { selectedCodes: sel("ivStockSelect", []) });
+  populateProductSelect(document.getElementById("optionStockSelect"), twOpts,
+    { selectedCodes: sel("optionStockSelect", ["TXO"]) });
   populateProductSelect(document.getElementById("optionUsSelect"), usOpts,
-    { labelFn: r => r.name || r.code, selectedCodes: ["2303"] });
-  populateProductSelect(document.getElementById("ivOptProduct"), twOpts, { selectFirst: true });
-  populateProductSelect(document.getElementById("arbStockSelect"), warrantXTw, { selectedCodes: ["2330"] });
-  populateProductSelect(document.getElementById("usStockSelect"), warrantXUs, { selectedCodes: ["2303"] });
-  populateProductSelect(document.getElementById("twusStockSelect"), twXUs, { selectedCodes: ["2303"] });
+    { labelFn: r => r.name || r.code, selectedCodes: sel("optionUsSelect", ["2303"]) });
+  populateProductSelect(document.getElementById("ivOptProduct"), twOpts,
+    { selectedCodes: sel("ivOptProduct", []), selectFirst: true });
+  populateProductSelect(document.getElementById("arbStockSelect"), warrantXTw,
+    { selectedCodes: sel("arbStockSelect", ["2330"]) });
+  populateProductSelect(document.getElementById("usStockSelect"), warrantXUs,
+    { selectedCodes: sel("usStockSelect", ["2303"]) });
+  populateProductSelect(document.getElementById("twusStockSelect"), twXUs,
+    { selectedCodes: sel("twusStockSelect", ["2303"]) });
 }

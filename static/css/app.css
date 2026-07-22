@@ -205,13 +205,13 @@ button.success {
 }
 button.success:hover { opacity: 0.85; }
 
-/* ── Add-stock form ── */
-#addStockForm {
+/* ── Add-product form (warrant / TW option / US option) ── */
+.add-product-form {
   flex-direction: column;
   gap: 5px;
   margin-top: 4px;
 }
-#addStockForm input {
+.add-product-form input {
   padding: 5px 8px;
   background: var(--bg);
   border: 1px solid var(--border);
@@ -221,7 +221,7 @@ button.success:hover { opacity: 0.85; }
   font-family: inherit;
   outline: none;
 }
-#addStockForm input:focus { border-color: var(--accent); }
+.add-product-form input:focus { border-color: var(--accent); }
 
 /* ── Sort buttons ── */
 .sort-btns {
