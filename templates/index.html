@@ -170,55 +170,51 @@
     <!-- IV SURFACE TAB -->
     <div id="tab-ivsurface" class="tab-content">
       <main>
-        <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
+        <!-- Sub-tab toggle: Warrants | Options -->
+        <div style="display:flex;gap:6px;border-bottom:1px solid var(--border);margin-bottom:16px">
+          <button id="iv-src-warrants" class="pfsub-btn active" onclick="setIVSource('warrants')">Warrants</button>
+          <button id="iv-src-options" class="pfsub-btn" onclick="setIVSource('options')">Options</button>
+        </div>
 
-          <!-- Source toggle -->
-          <div style="display:flex;gap:6px;border-bottom:1px solid var(--border);margin-bottom:14px">
-            <button id="iv-src-warrants" class="pfsub-btn active" onclick="setIVSource('warrants')">Warrants</button>
-            <button id="iv-src-options" class="pfsub-btn" onclick="setIVSource('options')">Options</button>
+        <!-- Warrants controls -->
+        <div id="iv-warrants-controls" class="filters">
+          <div class="stock-select">
+            <span>Stock (multi-select)</span>
+            <select id="ivStockSelect" multiple>
+            </select>
+            <button class="sm" onclick="toggleSelectAllIV()">Select All</button>
           </div>
-
-          <!-- Warrants controls -->
-          <div id="iv-warrants-controls" style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
-            <div class="stock-select">
-              <span>Stock (multi-select)</span>
-              <select id="ivStockSelect" multiple>
-              </select>
-              <button class="sm" onclick="toggleSelectAllIV()">Select All</button>
-            </div>
-            <label>Option Type
-              <select id="ivOptionType">
-                <option value="All">All</option>
-                <option value="Call">Call</option>
-                <option value="Put">Put</option>
-              </select>
-            </label>
-            <label>Highlight Warrant Code
-              <input type="text" id="highlightCode" placeholder="e.g. 061563" style="width:160px" />
-            </label>
-            <div class="action-group">
-              <button class="primary" onclick="fetchIVSurface()">Plot IV Surface</button>
-            </div>
+          <label>Option Type
+            <select id="ivOptionType">
+              <option value="All">All</option>
+              <option value="Call">Call</option>
+              <option value="Put">Put</option>
+            </select>
+          </label>
+          <label>Highlight Warrant Code
+            <input type="text" id="highlightCode" placeholder="e.g. 061563" style="width:160px" />
+          </label>
+          <div class="action-group">
+            <button class="primary" onclick="fetchIVSurface()">Plot IV Surface</button>
           </div>
+        </div>
 
-          <!-- Options controls -->
-          <div id="iv-options-controls" style="display:none;gap:20px;align-items:flex-end;flex-wrap:wrap">
-            <div class="stock-select">
-              <span>Product</span>
-              <select id="ivOptProduct" size="6">
-              </select>
-            </div>
-            <label>Call / Put
-              <select id="ivOptType">
-                <option value="Call">Call</option>
-                <option value="Put">Put</option>
-              </select>
-            </label>
-            <div class="action-group">
-              <button class="primary" onclick="fetchIVSurfaceOptions()">Plot IV Surface</button>
-            </div>
+        <!-- Options controls -->
+        <div id="iv-options-controls" class="filters" style="display:none">
+          <div class="stock-select">
+            <span>Product</span>
+            <select id="ivOptProduct" size="6">
+            </select>
           </div>
-
+          <label>Call / Put
+            <select id="ivOptType">
+              <option value="Call">Call</option>
+              <option value="Put">Put</option>
+            </select>
+          </label>
+          <div class="action-group">
+            <button class="primary" onclick="fetchIVSurfaceOptions()">Plot IV Surface</button>
+          </div>
         </div>
 
         <div id="iv-status"></div>
