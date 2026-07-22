@@ -37,6 +37,16 @@ app.json.sort_keys = False
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 app.jinja_env.auto_reload = True
 
+# Data routes return large repeated-key JSON tables (~10:1 compressible) and
+# Render's proxy doesn't gzip, so compress responses here. Optional dep — degrade
+# gracefully if it isn't installed in a dev env (flask-compress skips small
+# responses and honors Accept-Encoding on its own).
+try:
+    from flask_compress import Compress
+    Compress(app)
+except ImportError:
+    print("flask-compress not installed; responses served uncompressed")
+
 # Render pings /healthz constantly; static assets are noise too. Neither says
 # anything about what the app is doing, so they stay out of the log.
 _LOG_SKIP_PATHS = {"/healthz", "/favicon.ico"}
