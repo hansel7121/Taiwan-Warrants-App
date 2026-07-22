@@ -124,13 +124,17 @@ main { padding: 20px 24px; }
   font-family: inherit;
   outline: none;
   transition: border-color 0.15s;
-  min-width: 90px;
 }
 .filters input:focus,
 .filters select:focus { border-color: var(--accent); }
-.filters input[type="number"] {
-  width: 70px;
-  min-width: 0;
+.filters input,
+.filters select {
+  width: 120px;
+}
+.filters select {
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
 /* ── Stock multi-select ── */
