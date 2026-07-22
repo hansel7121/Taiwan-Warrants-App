@@ -284,14 +284,15 @@ def _run_us_options():
     _job("us_options", sync_us_option)
 
 
-# No "universe" entry: /refresh is a refresh-prices-now action, and force_refresh
-# ("all") would fire a multi-minute ISIN scrape on every click. The daily job and
-# warrant_logic._ensure_universe_fetch already keep it current. These call the
-# ungated core writers (via _job) so a manual /refresh works regardless of hours.
+# "universe" is deliberately separate from the three price kinds above: it's a
+# multi-minute ISIN scrape, so it's only reachable via its own /sync_universe
+# route (never bundled into a combined "refresh everything" action). It still
+# goes through the same debounced force_refresh dispatch as the others.
 _FORCE_MAP = {
     "warrants": _run_warrants,
     "tw_options": _run_tw_options,
     "us_options": _run_us_options,
+    "universe": _run_universe,
 }
 
 

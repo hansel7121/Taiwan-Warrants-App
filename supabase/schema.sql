@@ -136,7 +136,8 @@ create table if not exists md_warrant_universe (
   code text,
   name text,
   start date,
-  market text
+  market text,
+  type text
 );
 create index if not exists md_warrant_universe_batch_code_idx on md_warrant_universe (batch_id, code);
 

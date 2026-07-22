@@ -1,6 +1,7 @@
 import twstock
 from twstock.codes.fetch import (
     make_row_tuple,
+    ROW,
     TWSE_EQUITIES_URL,
     TPEX_EQUITIES_URL,
 )
@@ -548,7 +549,43 @@ def universe_rows():
             start = datetime.strptime(r.start, "%Y/%m/%d").date().isoformat()
         except (ValueError, TypeError):
             start = None
-        out.append({"code": r.code, "name": r.name, "start": start, "market": r.market})
+        out.append({"code": r.code, "name": r.name, "start": start,
+                     "market": r.market, "type": r.type})
+    return out
+
+
+def _universe_from_supabase():
+    """Reconstruct the merged universe (ROW-shaped) from the Supabase snapshot.
+
+    None if snapshot mode is off, the table is empty, or the read fails — the
+    caller degrades to the bundled twstock snapshot in all of those cases.
+    `start` round-trips through the DB as ISO ('YYYY-MM-DD'); convert back to
+    twstock's native 'YYYY/MM/DD' since _warrant_codes_for parses that format.
+    """
+    try:
+        df, _as_of = db_market.read_snapshot("warrant_universe")
+    except Exception as e:
+        applog.log_once("WARR", f"universe snapshot read failed: {e}",
+                         "universe_snapshot_fail")
+        return None
+    if df.empty:
+        return None
+    if "type" not in df.columns:
+        # Pre-migration snapshot (supabase/migrations/003_universe_type.sql not
+        # yet applied): callers need `.type` to tell warrants from underlyings,
+        # so a snapshot without it is unusable — fall back to bundled twstock.
+        applog.log_once("WARR", "universe snapshot missing 'type' column "
+                                 "(run migration 003) — skipping",
+                         "universe_snapshot_no_type")
+        return None
+    out = {}
+    for row in df.itertuples(index=False):
+        start = row.start
+        try:
+            start = datetime.strptime(str(start)[:10], "%Y-%m-%d").strftime("%Y/%m/%d")
+        except (ValueError, TypeError):
+            start = None
+        out[row.code] = ROW(row.type, row.code, row.name, None, start, row.market, None, None)
     return out
 
 
@@ -589,6 +626,16 @@ def _universe():
             why = "last scrape expired"
         else:
             why = "last scrape failed"
+    if db_market.snapshot_enabled():
+        snap = _universe_from_supabase()
+        if snap:
+            applog.log_once(
+                "WARR",
+                f"universe stale ({why}) — using Supabase snapshot "
+                f"({len(snap)} codes)",
+                "universe_fallback",
+            )
+            return snap
     applog.log_once(
         "WARR",
         f"universe stale ({why}) — using bundled twstock snapshot "

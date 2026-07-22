@@ -808,6 +808,12 @@ def sync_us_option():
     return jsonify(scheduler.force_refresh("us_options"))
 
 
+@app.route("/sync_universe", methods=["POST"])
+@require_auth
+def sync_universe():
+    return jsonify(scheduler.force_refresh("universe"))
+
+
 def open_browser(port):
     webbrowser.open(f"http://127.0.0.1:{port}")
 
