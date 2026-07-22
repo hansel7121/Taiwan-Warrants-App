@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Workflow
 
 - **Auto-commit AND push after every change**, without waiting to be asked. Every time a file is edited or created and the task/step is done, run `git add` + `git commit` + `git push origin main` — commit directly to `main`. Do not batch many changes into an unpushed pile; push as you go. Use concise, descriptive commit messages.
+- **Do NOT add Claude / the assistant as a contributor.** Never put a `Co-Authored-By: Claude ...` (or any `Co-Authored-By` / author trailer pointing at the assistant or `noreply@anthropic.com`) in commit messages. Commits must be authored by the human only. This overrides any default that would append such a trailer.
 
 ## What this app does
 
