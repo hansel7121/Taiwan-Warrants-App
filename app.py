@@ -6,7 +6,7 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = io.StringIO()
 
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 import threading
 import webbrowser
 import warrant_logic
@@ -916,7 +916,11 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
     if not all_rows:
         msg = "; ".join(errors) if errors else "No matches found"
         raise RuntimeError(msg)
+    return _sort_arb_rows(all_rows, strategy)
 
+
+def _sort_arb_rows(all_rows, strategy):
+    """Deterministic ordering shared by the batch and streaming builders."""
     result = pd.DataFrame(all_rows)
     if strategy == "pcp" and "executable" in result.columns:
         # Executable arbs first, then by richest mispricing.
@@ -933,6 +937,46 @@ def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
         else:
             result = result.sort_values("price_diff_pct", ascending=False)
     return result
+
+
+def _iter_arb_build(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
+                    positive_loose=False, min_volume=0, strategy="same_type"):
+    """Same work as _build_arb_df, but a GENERATOR that yields a progress event
+    each time a code finishes (real per-code progress — the pool completes codes
+    one at a time via as_completed), then one terminal 'result' or 'error'
+    event. The row set and ordering are identical to _build_arb_df."""
+    all_rows = []
+    errors = []
+    total = len(stock_codes)
+    done = 0
+    yield {"type": "progress", "done": 0, "total": total}
+
+    max_workers = min(total, 8) or 1
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_arb_rows_for_code, code, option_type, max_strike_diff_pct,
+                        max_dte_diff, positive_loose, min_volume, strategy): code
+            for code in stock_codes
+        }
+        for fut in as_completed(futures):
+            code = futures[fut]
+            try:
+                rows, err = fut.result()
+            except Exception as e:
+                errors.append(f"{code}: {e}")
+            else:
+                if err:
+                    errors.append(err)
+                all_rows.extend(rows)
+            done += 1
+            yield {"type": "progress", "done": done, "total": total}
+
+    if not all_rows:
+        yield {"type": "error", "error": "; ".join(errors) if errors else "No matches found"}
+        return
+    result = _sort_arb_rows(all_rows, strategy)
+    rows = json.loads(result.to_json(orient="records"))
+    yield {"type": "result", "rows": rows, "count": len(rows)}
 
 
 R_FREE = 0.01875
@@ -1734,6 +1778,37 @@ def arb_finder():
         return jsonify({"rows": rows, "count": len(rows)})
     except Exception as e:
         return jsonify({"rows": [], "count": 0, "error": str(e)})
+
+
+@app.route("/arb_finder_stream", methods=["POST"])
+def arb_finder_stream():
+    """Newline-delimited JSON stream: one {'progress'} event per code as it
+    finishes, then a terminal {'result'} or {'error'}. Lets the Direct Match UI
+    render a real progress bar (codes done / total) instead of a spinner."""
+    data = request.json
+    params = dict(
+        stock_codes=data.get("stock_codes", ["2330"]),
+        option_type=data.get("option_type", "All"),
+        max_strike_diff_pct=float(data.get("max_strike_diff_pct", 3.0)),
+        max_dte_diff=int(data.get("max_dte_diff", 5)),
+        positive_loose=bool(data.get("positive_loose", False)),
+        min_volume=int(data.get("min_volume", 0) or 0),
+        strategy=data.get("strategy", "same_type"),
+    )
+
+    def gen():
+        try:
+            for evt in _iter_arb_build(**params):
+                yield json.dumps(evt) + "\n"
+        except Exception as e:
+            yield json.dumps({"type": "error", "error": str(e)}) + "\n"
+
+    return Response(
+        stream_with_context(gen()),
+        mimetype="application/x-ndjson",
+        # Disable proxy/nginx buffering so events arrive as they are produced.
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 @app.route("/arb_finder_csv", methods=["POST"])

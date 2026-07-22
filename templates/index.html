@@ -262,28 +262,24 @@
         min-height: 18px;
       }
 
-      /* ── Indeterminate progress bar (Direct Match arb) ──
-         Backend is a single blocking request, so this is an honest "still
-         working" animation, not a fake percentage. */
+      /* ── Progress bar (Direct Match arb) ──
+         Determinate: fills as codes finish (codes done / total), streamed
+         per-code from /arb_finder_stream. */
       #arb-progress {
         display: none;
-        height: 4px;
+        height: 6px;
         margin: 8px 0;
-        border-radius: 2px;
+        border-radius: 3px;
         background: var(--border);
         overflow: hidden;
       }
       #arb-progress.active { display: block; }
       #arb-progress > .bar {
         height: 100%;
-        width: 35%;
-        border-radius: 2px;
+        width: 0%;
+        border-radius: 3px;
         background: var(--accent);
-        animation: arb-indeterminate 1.1s ease-in-out infinite;
-      }
-      @keyframes arb-indeterminate {
-        0%   { margin-left: -35%; }
-        100% { margin-left: 100%; }
+        transition: width 0.25s ease;
       }
 
       /* ── Table ── */
@@ -2401,28 +2397,62 @@
       async function fetchArbData() {
         const btn = document.getElementById("arbFindBtn");
         const progress = document.getElementById("arb-progress");
-        document.getElementById("arb-status").textContent = "Fetching warrants and options…";
+        const bar = progress.querySelector(".bar");
+        const statusEl = document.getElementById("arb-status");
+        statusEl.textContent = "Fetching warrants and options…";
         document.getElementById("arb-tableContainer").innerHTML = "";
         document.getElementById("arbDownloadBtn").style.display = "none";
-        progress.classList.add("active");   // indeterminate: request in flight
+        bar.style.width = "0%";
+        progress.classList.add("active");
         btn.disabled = true;
-        let data;
+
+        let data = null, streamErr = null;
         try {
-          const res = await fetch("/arb_finder", {
+          const res = await fetch("/arb_finder_stream", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(getArbFilters()),
           });
-          data = await res.json();
+          // Read newline-delimited JSON: a progress event per finished code,
+          // then a terminal result/error event.
+          const reader = res.body.getReader();
+          const dec = new TextDecoder();
+          let buf = "";
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            let nl;
+            while ((nl = buf.indexOf("\n")) >= 0) {
+              const line = buf.slice(0, nl).trim();
+              buf = buf.slice(nl + 1);
+              if (!line) continue;
+              const evt = JSON.parse(line);
+              if (evt.type === "progress") {
+                const pct = evt.total ? Math.round(evt.done / evt.total * 100) : 0;
+                bar.style.width = pct + "%";
+                statusEl.textContent = `Scanning ${evt.done}/${evt.total} underlyings…`;
+              } else if (evt.type === "result") {
+                bar.style.width = "100%";
+                data = evt;
+              } else if (evt.type === "error") {
+                streamErr = evt.error;
+              }
+            }
+          }
         } catch(e) {
-          document.getElementById("arb-status").textContent = "Error: " + e.message;
+          statusEl.textContent = "Error: " + e.message;
           return;
         } finally {
           progress.classList.remove("active");
           btn.disabled = false;
         }
-        if (data.error) {
-          document.getElementById("arb-status").textContent = "Error: " + data.error;
+        if (streamErr) {
+          statusEl.textContent = "Error: " + streamErr;
+          return;
+        }
+        if (!data) {
+          statusEl.textContent = "No response from server.";
           return;
         }
         currentArbData = data.rows;
