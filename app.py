@@ -20,6 +20,7 @@ import subprocess
 import time
 import numpy as np
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from scipy.interpolate import griddata
 
 base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -829,62 +830,88 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
     return rows
 
 
+def _arb_rows_for_code(code, option_type, max_strike_diff_pct, max_dte_diff,
+                       positive_loose, min_volume, strategy):
+    """All arb rows for ONE underlying. Runs the two independent network fetches
+    (warrant book + option chain) concurrently, then matches. Returns
+    (rows, error_str). Pure per-code work so _build_arb_df can fan codes out
+    across threads — the row set is identical to the old serial path."""
+    if code not in options_logic.COMMODITY_MAP:
+        return [], f"{code}: no options data available"
+
+    opt_contract_size = options_logic.COMMODITY_MAP[code]["exercise_ratio"]
+    # PCP pairs a warrant with the OPPOSITE-type option, so the option fetch
+    # must include both types regardless of the warrant filter.
+    opt_type_fetch = "All" if strategy == "pcp" else option_type
+
+    # Warrant fetch and option fetch hit different hosts and neither depends on
+    # the other — overlap them. No time-value cap / IV solve on the arb path.
+    with ThreadPoolExecutor(max_workers=2) as leg_pool:
+        f_warr = leg_pool.submit(
+            warrant_logic.fetch_warrants, [code], option_type, 0, 365, 0, 1e9, 0, False)
+        f_opt = leg_pool.submit(
+            options_logic.fetch_options, [code], opt_type_fetch, min_days=1, compute_iv=False)
+        try:
+            warrant_df, err = f_warr.result()
+        except Exception as e:
+            f_opt.result()  # drain so the pool exits cleanly
+            return [], f"{code}: warrant fetch {e}"
+        try:
+            opt_df = f_opt.result()
+        except Exception as e:
+            return [], f"{code}: {e}"
+
+    if warrant_df.empty:
+        return [], f"{code}: {err or 'no warrants'}"
+
+    # A ONE-SIDED option quote is still a valid arb benchmark: each direction
+    # only ever executes against one side of the option book. Keep anything with
+    # at least one live side; the matcher gates each formula on the side it needs.
+    opt_df = opt_df[opt_df["ask_live"] | opt_df["bid_live"]]
+    if min_volume > 0:
+        opt_df = opt_df[opt_df["volume"] >= min_volume]
+    if opt_df.empty:
+        return [], f"{code}: no live options"
+
+    if strategy == "pcp":
+        rows = _match_warrants_pcp(
+            warrant_df, opt_df, opt_contract_size, max_strike_diff_pct, max_dte_diff,
+            positive_loose=positive_loose,
+        )
+    else:
+        rows = _match_warrants_to_options(
+            warrant_df, opt_df, opt_contract_size, max_strike_diff_pct, max_dte_diff,
+            positive_loose=positive_loose,
+        )
+    return rows, None
+
+
 def _build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
                   positive_loose=False, min_volume=0, strategy="same_type"):
     all_rows = []
     errors = []
 
-    for code in stock_codes:
-        if code not in options_logic.COMMODITY_MAP:
-            errors.append(f"{code}: no options data available")
-            continue
-
-        cfg = options_logic.COMMODITY_MAP[code]
-        opt_contract_size = cfg["exercise_ratio"]
-
-        # No time-value cap and no IV solve on the arb path: a positive price
-        # arb only needs warrant ask + option bid, so nothing should drop a leg
-        # over time value or a non-converging IV.
-        warrant_df, err = warrant_logic.fetch_warrants(
-            [code], option_type, 0, 365, 0, 1e9, 0, compute_iv=False
-        )
-        if warrant_df.empty:
-            errors.append(f"{code}: {err or 'no warrants'}")
-            continue
-
-        try:
-            # PCP pairs a warrant with the OPPOSITE-type option, so the option
-            # fetch must include both types regardless of the warrant filter.
-            opt_type_fetch = "All" if strategy == "pcp" else option_type
-            opt_df = options_logic.fetch_options([code], opt_type_fetch, min_days=1, compute_iv=False)
-            # A ONE-SIDED option quote is still a valid arb benchmark: each
-            # direction only ever executes against one side of the option book
-            # (positive tight sells the bid, positive loose / negative buys the
-            # ask). Requiring is_live (both sides) threw away ~90% of the TW
-            # option universe off-hours. The matcher gates each formula on the
-            # side it actually needs, so keep anything with at least one side.
-            opt_df = opt_df[opt_df["ask_live"] | opt_df["bid_live"]]
-            if min_volume > 0:
-                opt_df = opt_df[opt_df["volume"] >= min_volume]
-        except Exception as e:
-            errors.append(f"{code}: {e}")
-            continue
-
-        if opt_df.empty:
-            errors.append(f"{code}: no live options")
-            continue
-
-        if strategy == "pcp":
-            rows = _match_warrants_pcp(
-                warrant_df, opt_df, opt_contract_size, max_strike_diff_pct, max_dte_diff,
-                positive_loose=positive_loose,
-            )
-        else:
-            rows = _match_warrants_to_options(
-                warrant_df, opt_df, opt_contract_size, max_strike_diff_pct, max_dte_diff,
-                positive_loose=positive_loose,
-            )
-        all_rows.extend(rows)
+    # Codes are independent, and each code is network-bound (~55s serial for 8
+    # codes vs ~5s of actual matching). Fan them out so the wall time collapses
+    # to the slowest single code. Results are concatenated then sorted below, so
+    # completion order does not affect the row set.
+    max_workers = min(len(stock_codes), 8) or 1
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_arb_rows_for_code, code, option_type, max_strike_diff_pct,
+                        max_dte_diff, positive_loose, min_volume, strategy): code
+            for code in stock_codes
+        }
+        for fut in as_completed(futures):
+            code = futures[fut]
+            try:
+                rows, err = fut.result()
+            except Exception as e:
+                errors.append(f"{code}: {e}")
+                continue
+            if err:
+                errors.append(err)
+            all_rows.extend(rows)
 
     if not all_rows:
         msg = "; ".join(errors) if errors else "No matches found"
