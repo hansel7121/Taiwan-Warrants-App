@@ -491,6 +491,7 @@
         <div style="display:flex;gap:6px;border-bottom:1px solid var(--border);margin-bottom:16px">
           <button id="pfsub-btn-pnl"     class="pfsub-btn active" onclick="switchPfSub('pnl', this)">P&amp;L</button>
           <button id="pfsub-btn-history" class="pfsub-btn"        onclick="switchPfSub('history', this)">Trade History</button>
+          <button id="pfsub-btn-suggestions" class="pfsub-btn"    onclick="switchPfSub('suggestions', this)">Suggestions</button>
         </div>
 
         <div id="pfsub-pnl" class="pfsub-content" style="display:block">
@@ -504,6 +505,12 @@
           <p style="font-size:12px;color:var(--muted);margin:0 0 14px">
             Every trade entered from Arb Finder. <b>Realized P&amp;L</b> fills in once the short leg has expired and the trade auto-closes. Click a row for detail.</p>
           <div id="portfolio-tableContainer"></div>
+        </div>
+
+        <div id="pfsub-suggestions" class="pfsub-content" style="display:none">
+          <p style="font-size:12px;color:var(--muted);margin:0 0 14px">
+            Direct Match opportunities found automatically by the background scanner (every 15 min, market hours only). Click a row for the full P&amp;L detail — same view as Arb Finder.</p>
+          <div id="portfolio-suggestionsContainer"></div>
         </div>
       </main>
     </div>

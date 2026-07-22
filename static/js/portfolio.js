@@ -11,6 +11,7 @@ function switchPfSub(sub, btn) {
   document.getElementById("pfsub-" + sub).style.display = "block";
   btn.classList.add("active");
   if (sub === "pnl") renderPnlChart();
+  if (sub === "suggestions") loadSuggestionsOnce();
 }
 
 // The portfolio is loaded lazily on first visit to the Portfolio tab, not
@@ -393,6 +394,72 @@ function renderPortfolio() {
   });
   html += "</tbody></table>";
   c.innerHTML = html;
+}
+
+// ── Suggestions (background scanner output) ─────────────────────────
+// Lazy-loaded on first visit to the sub-tab, same pattern as loadPortfolioOnce.
+
+let suggestionsData = [];
+let _sugLoaded = false;
+
+function loadSuggestionsOnce() {
+  if (_sugLoaded) return;
+  _sugLoaded = true;
+  loadSuggestions();
+}
+
+async function loadSuggestions() {
+  try {
+    const res = await api("/list_suggestions");
+    suggestionsData = await res.json();
+  } catch (e) { suggestionsData = []; }
+  renderSuggestions();
+}
+
+const _ARB_TYPE_LABEL = { direct_same_type: "Call-Call / Put-Put", direct_pcp: "Put-Call Parity" };
+
+function renderSuggestions() {
+  const c = document.getElementById("portfolio-suggestionsContainer");
+  if (!suggestionsData.length) {
+    c.innerHTML = "<p style='padding:16px;color:var(--muted)'>No active suggestions right now. The scanner runs every 15 min during TWSE hours.</p>";
+    return;
+  }
+  const th = "padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;border-bottom:1px solid var(--border);text-align:left";
+  const td = "padding:7px 10px;border-bottom:1px solid var(--border);font-size:12px;vertical-align:top";
+  const sub = "color:var(--muted);font-size:11px";
+  let h = `<table style="width:100%;border-collapse:collapse"><thead><tr>
+    <th style="${th}">Strategy</th><th style="${th}">Trade</th><th style="${th}">Warrant</th><th style="${th}">Option</th>
+    <th style="${th};text-align:right">Edge</th><th style="${th}">Found</th><th style="${th}"></th>
+  </tr></thead><tbody>`;
+  suggestionsData.forEach((s, i) => {
+    const row = s.legs;
+    const legs = String(row.trade || "").split("/").map(x => x.trim()).filter(Boolean);
+    const tradeHtml = legs.map(p =>
+      `<div style="color:${/^(Buy|Long)/i.test(p) ? MARK_LONG : MARK_SHORT};font-size:11px;font-weight:600">${p}</div>`
+    ).join("");
+    const pd = s.price_diff, pct = s.price_diff_pct;
+    const pdCls = pd > 0 ? "put" : "call";
+    const found = new Date(s.first_seen_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    h += `<tr style="cursor:pointer" onclick="openDirectModal(suggestionsData[${i}].legs)" title="Click for the full breakdown">
+      <td style="${td}">${_ARB_TYPE_LABEL[s.arb_type] || s.arb_type}</td>
+      <td style="${td}">${tradeHtml}</td>
+      <td style="${td}">${row.warrant_name || row.warrant_code || ""}<div style="${sub}">K${row.warrant_strike ?? "—"} · ${row.warrant_dte ?? "—"}d</div></td>
+      <td style="${td}">${row.option_contract || ""}<div style="${sub}">K${row.opt_strike ?? "—"} · ${row.opt_dte ?? "—"}d</div></td>
+      <td style="${td};text-align:right"><div class="${pdCls}" style="font-weight:700">${pd == null ? "—" : (pd > 0 ? "+" : "") + Number(pd).toFixed(4)}</div>
+        <div class="${pdCls}" style="font-size:11px">${pct == null ? "" : (pct > 0 ? "+" : "") + Number(pct).toFixed(2) + "%"}</div></td>
+      <td style="${td};${sub}">${found}</td>
+      <td style="${td}"><button class="sm" onclick="event.stopPropagation();removeSuggestion('${s.id.replace(/'/g, "\\'")}')">Remove</button></td>
+    </tr>`;
+  });
+  c.innerHTML = h + "</tbody></table>";
+}
+
+async function removeSuggestion(id) {
+  try {
+    await api("/remove_suggestion", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
+  } catch (e) {}
+  suggestionsData = suggestionsData.filter(s => s.id !== id);
+  renderSuggestions();
 }
 
 function closePortfolioModal() { document.getElementById("portfolioModal").style.display = "none"; }
