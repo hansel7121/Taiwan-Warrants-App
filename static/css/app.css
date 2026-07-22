@@ -143,8 +143,8 @@ main { padding: 20px 24px; }
   text-transform: uppercase;
 }
 .stock-select select {
-  height: 150px;
-  min-width: 210px;
+  height: 140px;
+  min-width: 220px;
   padding: 4px;
   background: var(--bg);
   border: 1px solid var(--border);
@@ -155,13 +155,6 @@ main { padding: 20px 24px; }
   outline: none;
 }
 .stock-select select:focus { border-color: var(--accent); }
-
-/* Size variants for .stock-select boxes whose option count differs from the
-   150px default — was ad-hoc inline style="height:...px" per select. */
-.sel-h-60 { height: 60px; }
-.sel-h-80 { height: 80px; }
-.sel-h-120 { height: 120px; }
-.sel-mw-200 { min-width: 200px; }
 
 .btn-row {
   display: flex;
@@ -332,4 +325,6 @@ tbody tr:last-child td { border-bottom: none; }
   display: flex;
   flex-direction: column;
   gap: 8px;
+  flex-basis: 100%;
+  margin-top: 6px;
 }

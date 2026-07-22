@@ -257,10 +257,8 @@ function setIVSource(src) {
   const isOpt = src === "options";
   document.getElementById("iv-warrants-controls").style.display = isOpt ? "none" : "flex";
   document.getElementById("iv-options-controls").style.display  = isOpt ? "flex" : "none";
-  document.getElementById("iv-src-warrants").style.background = isOpt ? "var(--surface)" : "var(--accent)";
-  document.getElementById("iv-src-warrants").style.color = isOpt ? "var(--muted)" : "#fff";
-  document.getElementById("iv-src-options").style.background  = isOpt ? "var(--accent)" : "var(--surface)";
-  document.getElementById("iv-src-options").style.color  = isOpt ? "#fff" : "var(--muted)";
+  document.getElementById("iv-src-warrants").classList.toggle("active", !isOpt);
+  document.getElementById("iv-src-options").classList.toggle("active", isOpt);
   document.getElementById("iv-plot").innerHTML = "";
   document.getElementById("iv-status").textContent = "";
 }

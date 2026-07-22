@@ -663,8 +663,7 @@ function setArbMode(mode) {
   modes.forEach(m => {
     const active = m === mode;
     const btn = document.getElementById("arb-mode-" + m);
-    btn.style.background = active ? "var(--accent)" : "var(--surface)";
-    btn.style.color = active ? "#fff" : "var(--muted)";
+    btn.classList.toggle("active", active);
     document.getElementById("arb-sub-" + m).style.display = active ? "block" : "none";
   });
 }
