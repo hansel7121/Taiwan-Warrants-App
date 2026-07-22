@@ -37,13 +37,36 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                 (candidates["days_to_expiry"] - w["days_to_expiry"]).abs()
             )
 
-            # Positive: opt_strike >= warrant_strike (buy warrant, sell option)
-            # Negative: opt_strike <= warrant_strike (buy option, sell warrant)
-            strike_filter = (
+            # The residual after pairing two same-type contracts is a vertical
+            # spread; it must be the FAVORABLE one (payoff >= 0 at every spot) so
+            # the entry credit is never clawed back at expiry.
+            #   calls: favorable iff K_short >= K_long (bull call spread)
+            #   puts : favorable iff K_short <= K_long (bear put spread)
+            # Puts invert because a put pays off downward — the short leg must be
+            # the one that starts paying LAST. Positive = buy warrant / sell
+            # option (long leg = warrant); negative flips the comparison.
+            is_put_w = w["type"] == "Put"
+            long_side_is_warrant = direction == "positive"
+            opt_ge_warrant = long_side_is_warrant != is_put_w
+            favorable = (
                 candidates["strike"] >= w["strike"]
-                if direction == "positive"
+                if opt_ge_warrant
                 else candidates["strike"] <= w["strike"]
             )
+            candidates["favorable"] = favorable
+            # Max loss per share of the residual vertical at expiry: zero on the
+            # favorable side (payoff >= 0 everywhere), |Kw - Ko| on the other.
+            candidates["max_loss_per_share"] = np.where(
+                favorable, 0.0, (candidates["strike"] - w["strike"]).abs()
+            )
+            # max_strike_diff_pct bounds that MAX LOSS, not similarity. On the
+            # favorable side the loss is already zero however far the strike sits,
+            # so the cap must not apply there — a deep-OTM option whose per-share
+            # price still beats the warrant is a riskless arb. Only the
+            # unfavorable side, where the spread can be clawed back at expiry,
+            # needs the cap. (The far favorable side is self-policing: as Ko runs
+            # from Kw the option cheapens per share and the price test rejects it.)
+            strike_ok = favorable | (candidates["strike_diff_pct"] <= max_strike_diff_pct)
 
             # Never hold the SHORT leg as the longer-dated one — the long
             # (hedge) leg would expire first, leaving a naked short position.
@@ -57,11 +80,7 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                 bad_dte = (w["days_to_expiry"] - candidates["days_to_expiry"]).clip(lower=0)
                 dte_ok = bad_dte <= max_dte_diff
 
-            candidates = candidates[
-                (candidates["strike_diff_pct"] <= max_strike_diff_pct)
-                & dte_ok
-                & strike_filter
-            ]
+            candidates = candidates[strike_ok & dte_ok]
             if candidates.empty:
                 continue
 
@@ -69,8 +88,13 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             if ratio <= 0:
                 continue  # can't size or normalise a warrant with no exercise ratio
             warrant_ask_per_share = round(float(w["ask"]) / ratio, 4)
-            warrant_bid_val = float(w["bid"]) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else float(w["ask"])
+            warrant_bid_live = pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0
+            # Loose marks tolerate the ask-as-bid fallback; an EXECUTABLE sell
+            # does not — nobody lifts a bid that isn't there. Keep both and let
+            # the tight path below demand the real one.
+            warrant_bid_val = float(w["bid"]) if warrant_bid_live else float(w["ask"])
             warrant_bid_per_share = round(warrant_bid_val / ratio, 4)
+            warrant_bid_real_per_share = round(float(w["bid"]) / ratio, 4) if warrant_bid_live else None
             warrants_needed = round(opt_contract_size / ratio)
             is_put = w["type"] == "Put"
             # IV per leg (matched pair only, cheap) so the modal can mark an OTM
@@ -88,16 +112,35 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             # strike/DTE-closest one — a farther-but-profitable pair must not be
             # hidden behind a closer-but-unprofitable "best".
             for _, opt in candidates.iterrows():
-                if pd.isna(opt.get("ask")) or float(opt["ask"]) <= 0:
+                # Each arb direction executes against only ONE side of the option
+                # book, so a one-sided quote is still a valid benchmark. This fork
+                # emits only is_live (not ask_live/bid_live), so derive per-side
+                # liveness inline from the raw bid/ask — the missing side arrives
+                # settlement-backfilled and is not an executable price. Each
+                # formula below then requires the side it actually trades.
+                opt_ask_live = pd.notna(opt.get("ask")) and float(opt.get("ask") or 0) > 0
+                opt_bid_live = pd.notna(opt.get("bid")) and float(opt.get("bid") or 0) > 0
+                if not (opt_ask_live or opt_bid_live):
                     continue
-                opt_bid_per_share = round(float(opt["bid"]), 4) if pd.notna(opt.get("bid")) and float(opt.get("bid", 0)) > 0 else None
-                opt_ask_per_share = round(float(opt["ask"]), 4)
+                opt_bid_per_share = round(float(opt["bid"]), 4) if opt_bid_live else None
+                opt_ask_per_share = round(float(opt["ask"]), 4) if opt_ask_live else None
 
-                # Positive tight (executable): opt_bid - warrant_ask > 0
-                # Positive loose: opt_ask - warrant_bid > 0 (mirrors negative formula)
-                # Negative (always loose): opt_bid - warrant_ask < 0
+                # Both directions honour the loose/tight toggle symmetrically.
+                # Tight = the prices you can actually hit: LIFT the ask on whatever
+                # you buy, HIT the bid on whatever you sell. Loose = the optimistic
+                # (favorable-side) mark, for ranking only.
+                #   positive (buy warrant / sell option)
+                #     tight: opt_bid  - warrant_ask  > 0
+                #     loose: opt_ask  - warrant_bid  > 0
+                #   negative (buy option / sell warrant)
+                #     tight: opt_ask  - warrant_bid  < 0   (real warrant bid only)
+                #     loose: opt_bid  - warrant_ask  < 0
+                # Negative previously used the loose formula unconditionally, which
+                # priced a BUY at the bid and a SELL at the ask — both unattainable.
                 if direction == "positive":
                     if positive_loose:
+                        if opt_ask_per_share is None:
+                            continue  # loose positive marks against the option ask
                         price_diff = round(opt_ask_per_share - warrant_bid_per_share, 4)
                         exec_opt = opt_ask_per_share
                         exec_warrant = warrant_bid_per_share
@@ -110,11 +153,21 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                     if price_diff <= 0:
                         continue
                 else:
-                    if opt_bid_per_share is None:
-                        continue
-                    price_diff = round(opt_bid_per_share - warrant_ask_per_share, 4)
-                    exec_opt = opt_bid_per_share
-                    exec_warrant = warrant_ask_per_share
+                    if positive_loose:
+                        if opt_bid_per_share is None:
+                            continue  # loose negative marks against the option bid
+                        price_diff = round(opt_bid_per_share - warrant_ask_per_share, 4)
+                        exec_opt = opt_bid_per_share
+                        exec_warrant = warrant_ask_per_share
+                    else:
+                        # Executable: buy the option at its ask, sell the warrant
+                        # into its bid. A synthetic (ask-as-bid) warrant bid would
+                        # fake the proceeds, so demand the REAL one.
+                        if opt_ask_per_share is None or warrant_bid_real_per_share is None:
+                            continue
+                        price_diff = round(opt_ask_per_share - warrant_bid_real_per_share, 4)
+                        exec_opt = opt_ask_per_share
+                        exec_warrant = warrant_bid_real_per_share
                     if price_diff >= 0:
                         continue
 
@@ -139,11 +192,12 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                 if pd.notna(opt.get("iv_bid")):
                     opt_iv = round(float(opt["iv_bid"]), 4)
                 else:
-                    _omid = None
-                    if pd.notna(opt.get("bid")) and pd.notna(opt.get("ask")) and float(opt["bid"]) > 0 and float(opt["ask"]) > 0:
-                        _omid = (float(opt["bid"]) + float(opt["ask"])) / 2
-                    elif pd.notna(opt.get("ask")) and float(opt["ask"]) > 0:
-                        _omid = float(opt["ask"])
+                    # Mark off the LIVE side(s) only — a settlement-backfilled
+                    # side would put a stale price into the IV solve.
+                    if opt_bid_per_share is not None and opt_ask_per_share is not None:
+                        _omid = (opt_bid_per_share + opt_ask_per_share) / 2
+                    else:
+                        _omid = opt_ask_per_share if opt_ask_per_share is not None else opt_bid_per_share
                     _oiv = warrant_logic.implied_vol(
                         _omid, float(opt["underlying_price"]), float(opt["strike"]),
                         int(opt["days_to_expiry"]) / 365.0, options_logic.R, 1.0, is_put) if _omid else None
@@ -162,6 +216,12 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                     "warrant_strike": w["strike"],
                     "opt_strike": round(float(opt["strike"]), 2),
                     "strike_diff_pct": round(float(opt["strike_diff_pct"]), 2),
+                    # Favorable residual = the vertical pays >= 0 at every spot, so
+                    # the entry credit is never clawed back: a true (riskless) arb.
+                    # Otherwise the credit is at risk up to max_loss_per_share
+                    # (per underlying share, before exercise-ratio sizing).
+                    "riskless": bool(opt["favorable"]),
+                    "max_loss_per_share": round(float(opt["max_loss_per_share"]), 4),
                     "warrants_needed": warrants_needed,
                     "board_lots": board_lots_needed,
                     "warrant_depth_lots": warrant_depth_lots,
@@ -440,7 +500,14 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
             ["executable", "price_diff_pct"], ascending=[False, False]
         )
     elif "price_diff_pct" in result.columns:
-        result = result.sort_values("price_diff_pct", ascending=False)
+        if "riskless" in result.columns:
+            # True arbs (residual vertical never clawed back at expiry) outrank
+            # capped-loss pairs regardless of headline edge.
+            result = result.sort_values(
+                ["riskless", "price_diff_pct"], ascending=[False, False]
+            )
+        else:
+            result = result.sort_values("price_diff_pct", ascending=False)
     return result
 
 
@@ -529,7 +596,14 @@ def match_warrant_us_option(stock_codes, option_type, max_strike_diff_pct, max_d
             ["executable", "price_diff_pct"], ascending=[False, False]
         )
     elif "price_diff_pct" in result.columns:
-        result = result.sort_values("price_diff_pct", ascending=False)
+        if "riskless" in result.columns:
+            # True arbs (residual vertical never clawed back at expiry) outrank
+            # capped-loss pairs regardless of headline edge.
+            result = result.sort_values(
+                ["riskless", "price_diff_pct"], ascending=[False, False]
+            )
+        else:
+            result = result.sort_values("price_diff_pct", ascending=False)
     return result
 
 
