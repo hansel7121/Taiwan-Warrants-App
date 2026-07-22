@@ -144,8 +144,16 @@ function renderPfPayoff(t, curP, curFx) {
   traces.push({ x: [S0], y: [markPnl], mode: "markers", name: "Current spot",
     marker: { color: "white", size: 7 },
     hovertemplate: "Current spot %{x:,.0f}<br>P&L: %{y:+,.0f} NT$<extra></extra>" });
+  // Saved positions are always long-warrant / short-option (the executable
+  // direction), so the warrant strike is the leg held and the option strike
+  // the leg owed. Mark both, plus spot, via the shared helper.
+  const _pfMk = payoffStrikeMarks([
+    { K: Kw, label: "Long W", dir: 1 },
+    { K: Ko, label: "Short O", dir: -1 },
+  ], S0);
   wrap.style.display = "block";
   Plotly.react(chart, traces, {
+    shapes: _pfMk.shapes, annotations: _pfMk.annotations,
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
     font: { color: "#8b90a0", size: 11 },
     xaxis: { title: `Spot (NT$) — ${r.warrant_name || ""}`, gridcolor: "#252836", zerolinecolor: "#252836", tickformat: "," },

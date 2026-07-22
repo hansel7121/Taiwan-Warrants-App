@@ -84,49 +84,7 @@ async function matchWarrantUsOption() {
 // IV is no longer computed for arb — hide those columns everywhere.
 
 function renderUsTable(rows) {
-  const container = document.getElementById("us-tableContainer");
-  if (!rows.length) {
-    container.innerHTML = "<p style='padding:16px;color:var(--muted)'>No matches found. Try relaxing the thresholds.</p>";
-    return;
-  }
-  const cols = visCols(rows[0]);
-  let html = "<table><thead><tr>";
-  cols.forEach((c, i) => {
-    const arrow = usSortCol === i ? (usSortAsc ? " ▲" : " ▼") : "";
-    html += `<th onclick="sortUsByIndex(${i})">${colLabel(c)}${arrow}</th>`;
-  });
-  html += "</tr></thead><tbody>";
-  rows.forEach((row, ri) => {
-    const typeCls = row.type === "Call" ? "call" : "put";
-    html += `<tr style="cursor:pointer" onclick="openUsModal(currentUsData[${ri}])" title="Click to view trade breakdown">`;
-    cols.forEach(c => {
-      let val = row[c] === null ? "—" : row[c];
-      if (c === "type") {
-        val = `<span class="${typeCls}">${val}</span>`;
-      } else if ((c === "price_diff_pct" || c === "price_diff") && row[c] !== null) {
-        const cls = row[c] > 0 ? "put" : "call";
-        val = `<span class="${cls}">${val}${c === "price_diff_pct" ? "%" : ""}</span>`;
-      }
-      html += `<td>${val}</td>`;
-    });
-    html += "</tr>";
-  });
-  html += "</tbody></table>";
-  container.innerHTML = html;
-}
-
-function sortUsByIndex(colIndex) {
-  if (!currentUsData.length) return;
-  const key = visCols(currentUsData[0])[colIndex];
-  if (usSortCol === colIndex) usSortAsc = !usSortAsc;
-  else { usSortCol = colIndex; usSortAsc = true; }
-  currentUsData.sort((a, b) => {
-    const av = a[key], bv = b[key];
-    if (av === null) return 1; if (bv === null) return -1;
-    if (typeof av === "number") return usSortAsc ? av - bv : bv - av;
-    return usSortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
-  });
-  renderUsTable(currentUsData);
+  renderCompactArbTable("us-tableContainer", rows, "us", "currentUsData");
 }
 
 function sortUsBy(key, asc) {
@@ -235,45 +193,7 @@ async function matchTwUsOption() {
 }
 
 function renderTwUsTable(rows) {
-  const container = document.getElementById("twus-tableContainer");
-  if (!rows.length) {
-    container.innerHTML = "<p style='padding:16px;color:var(--muted)'>No matches found. Try relaxing the thresholds.</p>";
-    return;
-  }
-  const cols = visCols(rows[0]);
-  let html = "<table><thead><tr>";
-  cols.forEach((c, i) => {
-    const arrow = twusSortCol === i ? (twusSortAsc ? " ▲" : " ▼") : "";
-    html += `<th onclick="sortTwUsByIndex(${i})">${colLabel(c)}${arrow}</th>`;
-  });
-  html += "</tr></thead><tbody>";
-  rows.forEach((row, ri) => {
-    const typeCls = row.type === "Call" ? "call" : "put";
-    html += `<tr style="cursor:pointer" onclick="openTwUsModal(currentTwUsData[${ri}])" title="Click to view trade breakdown + scenario">`;
-    cols.forEach(c => {
-      let val = row[c] === null ? "—" : row[c];
-      if (c === "type") val = `<span class="${typeCls}">${val}</span>`;
-      else if (c === "price_diff_pct" && row[c] !== null) val = `<span class="put">${val}%</span>`;
-      html += `<td>${val}</td>`;
-    });
-    html += "</tr>";
-  });
-  html += "</tbody></table>";
-  container.innerHTML = html;
-}
-
-function sortTwUsByIndex(colIndex) {
-  if (!currentTwUsData.length) return;
-  const key = visCols(currentTwUsData[0])[colIndex];
-  if (twusSortCol === colIndex) twusSortAsc = !twusSortAsc;
-  else { twusSortCol = colIndex; twusSortAsc = true; }
-  currentTwUsData.sort((a, b) => {
-    const av = a[key], bv = b[key];
-    if (av === null) return 1; if (bv === null) return -1;
-    if (typeof av === "number") return twusSortAsc ? av - bv : bv - av;
-    return twusSortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
-  });
-  renderTwUsTable(currentTwUsData);
+  renderCompactArbTable("twus-tableContainer", rows, "twus", "currentTwUsData");
 }
 
 function sortTwUsBy(key, asc) {
@@ -721,67 +641,101 @@ async function fetchArbData() {
   renderArbTable(currentArbData);
 }
 
-function renderArbTable(rows) {
-  const container = document.getElementById("arb-tableContainer");
+// ── Compact arb result table (shared by Direct / US / TW-US) ───────────
+// Five decision columns. Everything trimmed — both sides of every quote,
+// depth counts, contract sizes, IV — is still reachable: click the row for
+// the full modal, or hit Download CSV, which exports every field.
+// Each mode names its two legs and where its strike/DTE fields live, since
+// TW/US rows carry tw_option_*/us_option_* while Direct/US carry warrant_*/opt_*.
+const ARB_TBL = {
+  direct: { open: "openDirectModal", legA: "Warrant",   legB: "TW Option",
+            aName: "warrant_name", aK: "warrant_strike", aD: "warrant_dte",
+            bName: "option_contract", bK: "opt_strike", bD: "opt_dte" },
+  us:     { open: "openUsModal",     legA: "Warrant",   legB: "US Option",
+            aName: "warrant_name", aK: "warrant_strike", aD: "warrant_dte",
+            bName: "option_contract", bK: "opt_strike", bD: "opt_dte" },
+  twus:   { open: "openTwUsModal",   legA: "TW Option", legB: "US Option",
+            aName: "tw_option_name", aK: "tw_option_strike", aD: "tw_option_dte",
+            bName: "us_option_contract", bK: "us_option_strike", bD: "us_option_dte" },
+};
+const _n = (v, d = 2) => v == null ? "—"
+  : Number(v).toLocaleString(undefined, { maximumFractionDigits: d });
+
+function renderCompactArbTable(containerId, rows, mode, arrName) {
+  const cfg = ARB_TBL[mode];
+  const c = document.getElementById(containerId);
   if (!rows.length) {
-    container.innerHTML = "<p style='padding:16px;color:var(--muted)'>No matches found. Try relaxing the thresholds.</p>";
+    c.innerHTML = "<p style='padding:16px;color:var(--muted)'>No matches found. Try relaxing the thresholds.</p>";
     return;
   }
-  const cols = visCols(rows[0]);
-  let html = "<table><thead><tr>";
-  cols.forEach((c, i) => {
-    const arrow = arbSortCol === i ? (arbSortAsc ? " ▲" : " ▼") : "";
-    html += `<th onclick="sortArbByIndex(${i})">${colLabel(c)}${arrow}</th>`;
+  const th = "padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;border-bottom:1px solid var(--border);text-align:left";
+  const td = "padding:7px 10px;border-bottom:1px solid var(--border);font-size:12px;vertical-align:top";
+  const sub = "color:var(--muted);font-size:11px";
+  let h = `<table style="width:100%;border-collapse:collapse"><thead><tr>
+    <th style="${th}">Trade</th><th style="${th}">${cfg.legA}</th><th style="${th}">${cfg.legB}</th>
+    <th style="${th};text-align:right">Edge</th><th style="${th};text-align:right">Size</th>
+  </tr></thead><tbody>`;
+
+  rows.forEach((r, i) => {
+    // "Buy Warrant / Sell Option" and "Long TW / Short US" both split on the
+    // slash into a bought leg and a sold leg — colour them by side.
+    const legs = String(r.trade || "").split("/").map(s => s.trim()).filter(Boolean);
+    const tradeHtml = legs.map(p =>
+      `<div style="color:${/^(Buy|Long)/i.test(p) ? MARK_LONG : MARK_SHORT};font-size:11px;font-weight:600">${p}</div>`
+    ).join("");
+    const dbg = r.executable === false
+      ? `<div style="${sub};color:var(--call)">debug</div>` : "";
+
+    const tCls = r.type === "Call" ? "call" : "put";
+    const typeTag = `<span class="${tCls}" style="font-weight:600">${r.type || ""}</span>`;
+    const legCell = (title, K, dte) =>
+      `<div style="font-weight:600">${title}</div>
+       <div style="${sub}">K${_n(K)} · ${dte == null ? "—" : dte + "d"}</div>`;
+
+    // Colour each figure by its own sign. In TW/US mode price_diff is the parity
+    // gap while price_diff_pct is the entry credit, so the two genuinely disagree
+    // in sign and must not share a class.
+    const pd = r.price_diff, pct = r.price_diff_pct;
+    const pdCls = pd > 0 ? "put" : "call";
+    const pctCls = pct > 0 ? "put" : "call";
+    const credit = r.entry_credit != null
+      ? `<div style="${sub}">${r.entry_credit >= 0 ? "+" : ""}${_n(r.entry_credit, 0)} NT$</div>` : "";
+
+    // Size = the quantity that actually has to be executed, plus whether the
+    // best price level holds enough resting size to fill it.
+    let sizeMain, sizeSub, fillOk;
+    if (mode === "twus") {
+      sizeMain = `${_n(r.tw_contracts, 0)} 口`;
+      sizeSub = `${_n(r.us_contracts, 0)} US`;
+      fillOk = r.tw_fillable;
+    } else {
+      sizeMain = `${_n(r.board_lots, 3)} 張`;
+      sizeSub = r.warrant_depth_lots != null ? `depth ${_n(r.warrant_depth_lots, 0)}` : "";
+      fillOk = r.fillable;
+    }
+    const fillTag = fillOk == null ? ""
+      : fillOk ? `<span class="put" style="font-weight:600">✓</span>`
+               : `<span class="call" style="font-weight:600">✗</span>`;
+
+    h += `<tr style="cursor:pointer" onclick="${cfg.open}(${arrName}[${i}])" title="Click for the full breakdown">
+      <td style="${td}">${tradeHtml}${dbg}</td>
+      <td style="${td}">${typeTag} ${legCell(r[cfg.aName] || r.warrant_code || "", r[cfg.aK], r[cfg.aD])}</td>
+      <td style="${td}">${legCell(r[cfg.bName] || "", r[cfg.bK], r[cfg.bD])}</td>
+      <td style="${td};text-align:right">
+        <div class="${pdCls}" style="font-weight:700">${pd == null ? "—" : (pd > 0 ? "+" : "") + _n(pd, 4)}</div>
+        <div class="${pctCls}" style="font-size:11px">${pct == null ? "" : (pct > 0 ? "+" : "") + _n(pct) + "%"}</div>
+        ${credit}
+      </td>
+      <td style="${td};text-align:right">
+        <div style="font-weight:600;${fillOk === false ? "color:var(--call)" : ""}">${sizeMain} ${fillTag}</div>
+        <div style="${sub}">${sizeSub}</div>
+      </td></tr>`;
   });
-  html += "</tr></thead><tbody>";
-  rows.forEach((row, ri) => {
-    const typeCls = row.type === "Call" ? "call" : "put";
-    html += `<tr style="cursor:pointer" onclick="openDirectModal(currentArbData[${ri}])" title="Click to view trade breakdown">`;
-    cols.forEach(c => {
-      let val = row[c] === null ? "—" : row[c];
-      if (c === "type") {
-        val = `<span class="${typeCls}">${val}</span>`;
-      } else if (c === "fillable") {
-        // Enough resting size at the quoted price to fill board_lots?
-        val = row[c]
-          ? `<span class="put" style="font-weight:600">✓</span>`
-          : `<span class="call" style="font-weight:600">✗</span>`;
-      } else if (c === "board_lots") {
-        // Red when the needed size exceeds the best-level depth.
-        val = row.fillable === false
-          ? `<span class="call" style="font-weight:600">${val}</span>`
-          : val;
-      } else if (c === "executable") {
-        val = row[c]
-          ? `<span class="put" style="font-weight:600">exec</span>`
-          : `<span style="color:var(--muted)">debug</span>`;
-      } else if (c === "price_diff_pct" && row[c] !== null) {
-        const cls = row[c] > 0 ? "put" : "call";
-        val = `<span class="${cls}">${val}%</span>`;
-      } else if (c === "price_diff" && row[c] !== null) {
-        const cls = row[c] > 0 ? "put" : "call";
-        val = `<span class="${cls}">${val}</span>`;
-      }
-      html += `<td>${val}</td>`;
-    });
-    html += "</tr>";
-  });
-  html += "</tbody></table>";
-  container.innerHTML = html;
+  c.innerHTML = h + "</tbody></table>";
 }
 
-function sortArbByIndex(colIndex) {
-  if (!currentArbData.length) return;
-  const key = visCols(currentArbData[0])[colIndex];
-  if (arbSortCol === colIndex) arbSortAsc = !arbSortAsc;
-  else { arbSortCol = colIndex; arbSortAsc = true; }
-  currentArbData.sort((a, b) => {
-    const av = a[key], bv = b[key];
-    if (av === null) return 1; if (bv === null) return -1;
-    if (typeof av === "number") return arbSortAsc ? av - bv : bv - av;
-    return arbSortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
-  });
-  renderArbTable(currentArbData);
+function renderArbTable(rows) {
+  renderCompactArbTable("arb-tableContainer", rows, "direct", "currentArbData");
 }
 
 function sortArbBy(key, asc) {
@@ -1004,35 +958,17 @@ function openStraddleModal(r) {
     return acc + l.dir * CS * (val - l.px_per_share);
   }, 0);
   const ys = xs.map(x => Math.round(payoff(x)));
-  // Mark every strike so the kinks are identifiable, coloured by side:
-  // green = a leg you own, red = a leg you owe.
-  const GRN = "#4ade80", RED = "#f87171";
-  const strikeShapes = legs.map(l => ({
-    type: "line", x0: l.K, x1: l.K, yref: "paper", y0: 0, y1: 1,
-    line: { color: l.dir > 0 ? GRN : RED, width: 1, dash: "dot" },
-  }));
-  const strikeNotes = legs.map((l, i) => ({
-    x: l.K, yref: "paper", y: 1 - (i % 2) * 0.09, yanchor: "top",
-    text: `${l.side[0]}${l.type[0]} ${l.K}`, showarrow: false,
-    font: { size: 9, color: l.dir > 0 ? GRN : RED },
-    bgcolor: "rgba(13,15,22,0.85)", borderpad: 2,
-  }));
+  // Mark every strike so the kinks are identifiable — green a leg you own,
+  // red one you owe — via the shared payoff-chart helper.
+  const _sMk = payoffStrikeMarks(
+    legs.map(l => ({ K: l.K, label: `${l.side[0]}${l.type[0]}`, dir: l.dir })), S);
   document.getElementById("straddleModal").style.display = "block";
   Plotly.react("straddle-payoff-chart", [
     { x: [lo, hi], y: [0, 0], mode: "lines", line: { color: "rgba(255,255,255,0.15)", dash: "dash", width: 1 }, showlegend: false, hoverinfo: "skip" },
     { x: xs, y: ys, mode: "lines", line: { color: "#4f8ef7", width: 2 }, hovertemplate: "spot %{x:.0f}<br>P&L %{y:+,.0f} NT$<extra></extra>", showlegend: false },
     { x: [S], y: [Math.round(payoff(S))], mode: "markers", marker: { color: "#fff", size: 7 }, hovertemplate: "spot now %{x:.0f}<br>P&L %{y:+,.0f} NT$<extra></extra>", showlegend: false },
   ], {
-    shapes: [
-      { type: "line", x0: S, x1: S, yref: "paper", y0: 0, y1: 1,
-        line: { color: "rgba(255,255,255,0.35)", width: 1 } },
-      ...strikeShapes,
-    ],
-    annotations: [
-      { x: S, yref: "paper", y: 1, yanchor: "bottom", text: `spot ${S}`,
-        showarrow: false, font: { size: 9, color: "#c8ccd8" } },
-      ...strikeNotes,
-    ],
+    shapes: _sMk.shapes, annotations: _sMk.annotations,
     paper_bgcolor: "#13161f", plot_bgcolor: "#0d0f16",
     font: { color: "#8b90a0", family: "Inter,system-ui,sans-serif", size: 11 },
     xaxis: { title: "underlying at first expiry", gridcolor: "#252836", zerolinecolor: "#252836" },
@@ -1614,7 +1550,14 @@ function renderPcpChart(dte) {
     hovertemplate:"Current spot: %{x:,.0f}<br>P&L: %{y:+,.0f} NT$<extra></extra>",
   };
 
+  // dir > 0 means the warrant is the long leg and the option the short one.
+  const _mk = payoffStrikeMarks([
+    { K: Kw, label: `${dir > 0 ? "Long" : "Short"} W`, dir: dir },
+    { K: Ko, label: `${dir > 0 ? "Short" : "Long"} O`, dir: -dir },
+  ], S0);
+
   Plotly.react("pcp-pnl-chart", [...zeroLine, expiryTrace, spotTrace], {
+    shapes: _mk.shapes, annotations: _mk.annotations,
     paper_bgcolor:"#13161f", plot_bgcolor:"#0d0f16",
     font:{color:"#8b90a0",family:"Inter,system-ui,sans-serif",size:12},
     xaxis:{title:`Spot Price (NT$) — ${row.warrant_name}`,gridcolor:"#252836",zerolinecolor:"#252836",tickformat:","},

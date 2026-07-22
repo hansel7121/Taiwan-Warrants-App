@@ -295,7 +295,9 @@
           </div>
 
           <div id="arb-sort-direct" class="sort-btns">
+            <button onclick="sortArbBy('price_diff', false)">Price Diff ↓</button>
             <button onclick="sortArbBy('price_diff_pct', false)">Price Diff % ↓</button>
+            <button onclick="sortArbBy('opt_dte', true)">Opt DTE ↑</button>
             <button onclick="sortArbBy('dte_diff', true)">DTE Diff ↑</button>
             <button onclick="sortArbBy('strike_diff_pct', true)">Strike Diff ↑</button>
           </div>
@@ -354,7 +356,9 @@
           </div>
 
           <div class="sort-btns">
+            <button onclick="sortUsBy('price_diff', false)">Price Diff ↓</button>
             <button onclick="sortUsBy('price_diff_pct', false)">Price Diff % ↓</button>
+            <button onclick="sortUsBy('opt_dte', true)">Opt DTE ↑</button>
             <button onclick="sortUsBy('dte_diff', true)">DTE Diff ↑</button>
             <button onclick="sortUsBy('strike_diff_pct', true)">Strike Diff ↑</button>
           </div>
@@ -405,6 +409,8 @@
           <div class="sort-btns">
             <button onclick="sortTwUsBy('price_diff_pct', false)">Credit % ↓</button>
             <button onclick="sortTwUsBy('entry_credit', false)">Entry Credit ↓</button>
+            <button onclick="sortTwUsBy('price_diff', false)">Parity Gap ↓</button>
+            <button onclick="sortTwUsBy('us_option_dte', true)">US DTE ↑</button>
             <button onclick="sortTwUsBy('strike_diff_pct', true)">Strike Diff ↑</button>
             <button onclick="sortTwUsBy('dte_diff', true)">DTE Diff ↑</button>
           </div>
