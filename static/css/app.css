@@ -161,6 +161,12 @@ main { padding: 20px 24px; }
   font-size: 13px;
   font-family: inherit;
   outline: none;
+  /* The `size` attribute on the element (not just this CSS height) is what
+     actually matters here: without it, some browsers render a multi-select
+     taller than its option count in a mode where mouse-wheel scroll inside
+     the box doesn't work at all — only dragging the native scrollbar thumb
+     does. Setting `size` puts it in the normal scrollable-listbox mode. */
+  overflow-y: auto;
 }
 .stock-select select:focus { border-color: var(--accent); }
 

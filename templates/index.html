@@ -46,7 +46,7 @@
           <div class="stock-select">
             <span>Product</span>
             <!-- Taiwan-listed TAIFEX options -->
-            <select id="optionStockSelect" multiple>
+            <select id="optionStockSelect" multiple size="6">
             </select>
             <div class="btn-row" id="twProductBtnRow">
               <button class="sm" onclick="toggleAddProduct('tw_option')">+ Add Product</button>
@@ -61,7 +61,7 @@
               <button class="sm" onclick="addTwOptionProduct()">Confirm</button>
             </div>
             <!-- US ADR (American) options — hidden until toggled -->
-            <select id="optionUsSelect" multiple style="display:none">
+            <select id="optionUsSelect" multiple size="6" style="display:none">
             </select>
             <div class="btn-row" id="usProductBtnRow" style="display:none">
               <button class="sm" onclick="toggleAddProduct('us_option')">+ Add Product</button>
@@ -121,7 +121,7 @@
         <div class="filters">
           <div class="stock-select">
             <span>Stock (multi-select)</span>
-            <select id="stockSelect" multiple>
+            <select id="stockSelect" multiple size="6">
             </select>
             <div class="btn-row">
               <button class="sm" onclick="toggleSelectAll()">Select All</button>
@@ -192,7 +192,7 @@
         <div id="iv-warrants-controls" class="filters">
           <div class="stock-select">
             <span>Stock (multi-select)</span>
-            <select id="ivStockSelect" multiple>
+            <select id="ivStockSelect" multiple size="6">
             </select>
             <button class="sm" onclick="toggleSelectAllIV()">Select All</button>
           </div>
@@ -256,7 +256,7 @@
             <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
               <div class="stock-select" id="arb-stock-select-wrap">
                 <span>Stock (multi-select)</span>
-                <select id="arbStockSelect" multiple>
+                <select id="arbStockSelect" multiple size="6">
                 </select>
               </div>
               <label>Strategy
@@ -317,7 +317,7 @@
             <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
               <div class="stock-select">
                 <span>Stock</span>
-                <select id="usStockSelect" multiple>
+                <select id="usStockSelect" multiple size="6">
                 </select>
               </div>
               <label>Strategy
@@ -378,7 +378,7 @@
             <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
               <div class="stock-select">
                 <span>Stock</span>
-                <select id="twusStockSelect" multiple>
+                <select id="twusStockSelect" multiple size="6">
                 </select>
               </div>
               <label>Option Type
@@ -430,7 +430,7 @@
             <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
               <div class="stock-select">
                 <span>Stock (multi-select)</span>
-                <select id="straddleStockSelect" multiple>
+                <select id="straddleStockSelect" multiple size="6">
                 </select>
               </div>
               <label>Max Strike Diff %
