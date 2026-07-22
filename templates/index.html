@@ -35,7 +35,7 @@
           <div class="stock-select">
             <span>Product</span>
             <!-- Taiwan-listed TAIFEX options -->
-            <select id="optionStockSelect" multiple style="height:80px">
+            <select id="optionStockSelect" multiple class="sel-h-80">
             </select>
             <div class="btn-row" id="twProductBtnRow">
               <button class="sm" onclick="toggleAddProduct('tw_option')">+ Add Product</button>
@@ -50,7 +50,7 @@
               <button class="sm" onclick="addTwOptionProduct()">Confirm</button>
             </div>
             <!-- US ADR (American) options — hidden until toggled -->
-            <select id="optionUsSelect" multiple style="height:80px;display:none">
+            <select id="optionUsSelect" multiple class="sel-h-80" style="display:none">
             </select>
             <div class="btn-row" id="usProductBtnRow" style="display:none">
               <button class="sm" onclick="toggleAddProduct('us_option')">+ Add Product</button>
@@ -207,10 +207,11 @@
 
           <!-- Options controls -->
           <div id="iv-options-controls" style="display:none;gap:20px;align-items:flex-end;flex-wrap:wrap">
-            <label>Product
+            <div class="stock-select">
+              <span>Product</span>
               <select id="ivOptProduct">
               </select>
-            </label>
+            </div>
             <label>Call / Put
               <select id="ivOptType">
                 <option value="Call">Call</option>
@@ -259,7 +260,7 @@
             <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
               <div class="stock-select" id="arb-stock-select-wrap">
                 <span>Stock (multi-select)</span>
-                <select id="arbStockSelect" multiple style="height:120px;min-width:200px">
+                <select id="arbStockSelect" multiple class="sel-h-120 sel-mw-200">
                 </select>
               </div>
               <label>Strategy
@@ -318,7 +319,7 @@
             <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
               <div class="stock-select">
                 <span>Stock</span>
-                <select id="usStockSelect" multiple style="height:80px;min-width:200px">
+                <select id="usStockSelect" multiple class="sel-h-80 sel-mw-200">
                 </select>
               </div>
               <label>Strategy
@@ -377,7 +378,7 @@
             <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
               <div class="stock-select">
                 <span>Stock</span>
-                <select id="twusStockSelect" multiple style="height:60px;min-width:200px">
+                <select id="twusStockSelect" multiple class="sel-h-60 sel-mw-200">
                 </select>
               </div>
               <label>Option Type

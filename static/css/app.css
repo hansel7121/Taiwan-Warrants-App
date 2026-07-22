@@ -156,6 +156,18 @@ main { padding: 20px 24px; }
 }
 .stock-select select:focus { border-color: var(--accent); }
 
+/* ivOptProduct is a genuine single-select dropdown, not a scrollable
+   multi-option listbox — override the tall default height while keeping
+   every other .stock-select box style (border, padding, font, radius). */
+#ivOptProduct { height: auto; min-width: 200px; }
+
+/* Size variants for .stock-select boxes whose option count differs from the
+   150px default — was ad-hoc inline style="height:...px" per select. */
+.sel-h-60 { height: 60px; }
+.sel-h-80 { height: 80px; }
+.sel-h-120 { height: 120px; }
+.sel-mw-200 { min-width: 200px; }
+
 .btn-row {
   display: flex;
   gap: 6px;
