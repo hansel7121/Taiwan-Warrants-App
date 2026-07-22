@@ -84,7 +84,7 @@
           <label>Min Volume
             <input type="number" id="optMinVolume" value="0" min="0" />
           </label>
-          <div class="action-group">
+          <div class="action-group compact">
             <button class="primary" id="readOptionBtn" onclick="readOption()">Read Options</button>
             <button class="sm" id="refreshOptionsBtn" onclick="syncOption()">Sync now</button>
             <button class="success" id="optDownloadBtn" onclick="downloadOptionsCSV()" style="display:none">
@@ -147,7 +147,7 @@
             <input type="number" id="minVolume" value="0" min="0" />
           </label>
 
-          <div class="action-group">
+          <div class="action-group compact">
             <button class="primary" id="readWarrantBtn" onclick="readWarrant()">Read Warrants</button>
             <button class="sm" id="refreshWarrantsBtn" onclick="syncWarrant()">Sync now</button>
             <button class="success" id="downloadBtn" onclick="downloadCSV()" style="display:none">
@@ -179,7 +179,7 @@
           </div>
 
           <!-- Warrants controls -->
-          <div id="iv-warrants-controls" class="filters">
+          <div id="iv-warrants-controls" style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
             <div class="stock-select">
               <span>Stock (multi-select)</span>
               <select id="ivStockSelect" multiple>
@@ -202,7 +202,7 @@
           </div>
 
           <!-- Options controls -->
-          <div id="iv-options-controls" class="filters" style="display:none">
+          <div id="iv-options-controls" style="display:none;gap:20px;align-items:flex-end;flex-wrap:wrap">
             <div class="stock-select">
               <span>Product</span>
               <select id="ivOptProduct" size="6">

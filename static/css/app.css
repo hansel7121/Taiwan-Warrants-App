@@ -128,6 +128,10 @@ main { padding: 20px 24px; }
 }
 .filters input:focus,
 .filters select:focus { border-color: var(--accent); }
+.filters input[type="number"] {
+  width: 70px;
+  min-width: 0;
+}
 
 /* ── Stock multi-select ── */
 .stock-select {
@@ -327,4 +331,8 @@ tbody tr:last-child td { border-bottom: none; }
   gap: 8px;
   flex-basis: 100%;
   margin-top: 6px;
+}
+.action-group.compact {
+  flex-basis: auto;
+  margin-top: 0;
 }
