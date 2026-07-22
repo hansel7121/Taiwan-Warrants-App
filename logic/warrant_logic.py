@@ -117,6 +117,188 @@ def implied_vol(price, S, K, T, r, ratio, is_put=False):
         return np.nan
 
 
+def implied_vol_vec(price, S, K, T, r, ratio, is_put):
+    """Vectorized implied_vol. Mirrors the scalar ``implied_vol`` exactly (after
+    round(...,4)): NaN where price<=0, T<=0, or price<=intrinsic; otherwise the
+    Black-Scholes IV in [1e-6, 10].
+
+    All args are numpy arrays (or broadcastable). The easy 99% are solved by a
+    single array Newton-Raphson sweep; any row that fails to converge, hits a
+    bound, or whose residual is not tight enough falls back to the scalar
+    ``implied_vol`` (brentq) in a short loop — so the hard cases agree with the
+    scalar solver bit-for-bit and the common cases go ~10x+ faster.
+    """
+    price = np.asarray(price, dtype=float)
+    S = np.asarray(S, dtype=float)
+    K = np.asarray(K, dtype=float)
+    T = np.asarray(T, dtype=float)
+    r = np.asarray(r, dtype=float)
+    ratio = np.asarray(ratio, dtype=float)
+    is_put = np.asarray(is_put, dtype=bool)
+    price, S, K, T, r, ratio, is_put = np.broadcast_arrays(
+        price, S, K, T, r, ratio, is_put
+    )
+    shape = price.shape
+    out = np.full(shape, np.nan)
+    pf = np.ascontiguousarray(price, dtype=float).ravel()
+    Sf = np.ascontiguousarray(S, dtype=float).ravel()
+    Kf = np.ascontiguousarray(K, dtype=float).ravel()
+    Tf = np.ascontiguousarray(T, dtype=float).ravel()
+    rf = np.ascontiguousarray(r, dtype=float).ravel()
+    ratf = np.ascontiguousarray(ratio, dtype=float).ravel()
+    ipf = np.ascontiguousarray(is_put, dtype=bool).ravel()
+
+    # intrinsic matches the scalar exactly: put=max(0,(K-S)*ratio),
+    # call=max(0,(S-K)*ratio). NaN unless price>0, T>0 and price>intrinsic.
+    with np.errstate(all="ignore"):
+        intrinsic = np.where(
+            ipf,
+            np.maximum(0.0, (Kf - Sf) * ratf),
+            np.maximum(0.0, (Sf - Kf) * ratf),
+        )
+        valid = (pf > 0) & (Tf > 0) & (pf > intrinsic)
+    idx = np.where(valid)[0]
+    if idx.size == 0:
+        return out
+
+    p = pf[idx]; s = Sf[idx]; k = Kf[idx]; t = Tf[idx]
+    rr = rf[idx]; rt = ratf[idx]; ip = ipf[idx]
+    sqrtT = np.sqrt(t)
+    logSK = np.log(s / k)
+
+    def _model_and_vega(sig):
+        d1 = (logSK + (rr + 0.5 * sig * sig) * t) / (sig * sqrtT)
+        d2 = d1 - sig * sqrtT
+        disc = np.exp(-rr * t)
+        call = rt * (s * norm.cdf(d1) - k * disc * norm.cdf(d2))
+        put = rt * (k * disc * norm.cdf(-d2) - s * norm.cdf(-d1))
+        m = np.where(ip, put, call)
+        vega = rt * s * sqrtT * norm.pdf(d1)
+        return m, vega
+
+    sig = np.full(idx.size, 0.5)
+    with np.errstate(all="ignore"):
+        for _ in range(50):
+            sig = np.clip(sig, 1e-6, 10.0)
+            m, vega = _model_and_vega(sig)
+            diff = m - p
+            if np.all(np.abs(diff) < 1e-10):
+                break
+            vega = np.where(np.abs(vega) < 1e-12, 1e-12, vega)
+            sig = np.clip(sig - diff / vega, 1e-6, 10.0)
+        m, vega_final = _model_and_vega(sig)
+        resid = np.abs(m - p)
+        # Scale-free vega: vega/(ratio*S) = sqrt(T)*pdf(d1). O(0.01-0.5) for a
+        # well-conditioned root, ~1e-9 in flat deep-ITM/OTM bands where bs_price
+        # is numerically insensitive to sigma over a wide range.
+        norm_vega = np.abs(vega_final) / (rt * s)
+
+    # Accept Newton only where it MUST agree with brentq after round(...,4):
+    #   * price residual is tight (< 1e-9), and
+    #   * the root is well-conditioned — norm_vega > 1e-6, so bs_price genuinely
+    #     moves with sigma near the root. In flat/degenerate regions (deep ITM/
+    #     OTM, price≈intrinsic) the residual can hit exactly 0 across a wide
+    #     sigma band, so brentq and Newton settle on different points; those rows
+    #     fall back to the scalar brentq and thus match the scalar solver
+    #     exactly. Empirically this leaves only genuine .00005 rounding-boundary
+    #     ties (|sigma diff| < 1e-6), which round identically in all tested cases.
+    #   * sigma strictly inside the bracket (bound-pinned rows go to brentq too).
+    accept = (
+        (resid < 1e-9)
+        & (norm_vega > 1e-6)
+        & (sig > 1e-6)
+        & (sig < 10.0)
+    )
+    res = np.full(idx.size, np.nan)
+    res[accept] = sig[accept]
+    for j in np.where(~accept)[0]:
+        res[j] = implied_vol(
+            float(p[j]), float(s[j]), float(k[j]), float(t[j]),
+            float(rr[j]), float(rt[j]), bool(ip[j]),
+        )
+    # Rounding-edge safety for the IV column itself: any Newton-accepted row
+    # whose round(...,4) could flip between Newton's ~exact root and brentq's
+    # (root within ~1e-6 of a .00005 boundary) is re-solved with the scalar
+    # brentq, so the returned array rounds bit-identically to the scalar solver.
+    res = _refine_iv_for_rounding(res, p, s, k, t, rr, rt, ip)
+    out.flat[idx] = res
+    return out
+
+
+def bs_delta_vec(S, K, T, r, sigma, ratio, is_put):
+    """Vectorized bs_delta. Same semantics as the scalar: 0.0 where T<=0 or
+    sigma<=0; NaN propagates where sigma is NaN with T>0 (matching the scalar,
+    whose ``sigma<=0`` guard is False for NaN so it computes NaN)."""
+    S = np.asarray(S, dtype=float)
+    K = np.asarray(K, dtype=float)
+    T = np.asarray(T, dtype=float)
+    r = np.asarray(r, dtype=float)
+    sigma = np.asarray(sigma, dtype=float)
+    ratio = np.asarray(ratio, dtype=float)
+    is_put = np.asarray(is_put, dtype=bool)
+    S, K, T, r, sigma, ratio, is_put = np.broadcast_arrays(
+        S, K, T, r, sigma, ratio, is_put
+    )
+    zero_mask = (T <= 0) | (sigma <= 0)
+    with np.errstate(all="ignore"):
+        d1 = (np.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * np.sqrt(T))
+        val = np.where(is_put, (norm.cdf(d1) - 1.0) * ratio, norm.cdf(d1) * ratio)
+    return np.where(zero_mask, 0.0, val)
+
+
+def _refine_iv_for_rounding(iv, price, S, K, T, r, ratio, is_put,
+                            check_delta=False, check_leverage=False,
+                            lev_price=None, eps=5e-6):
+    """Guarantee bit-exact parity of the 4-dp-rounded IV/delta/leverage columns
+    against the scalar brentq path.
+
+    ``iv`` is a vectorized-Newton result (NaN where unconverged). Newton's root
+    is ~machine-precise and brentq's is within ~1e-6 of the true root, so
+    |iv_newton - iv_brentq| < eps. For any row whose rounded IV (and optionally
+    delta / leverage, computed exactly as the call site does) is UNCHANGED as iv
+    moves across [iv-eps, iv+eps], both solvers must yield identical rounded
+    columns. Only rows sitting on a rounding edge (the output flips within that
+    window) are recomputed with the exact scalar brentq, so they match the
+    scalar path bit-for-bit. This keeps the fast Newton path for the ~98% of
+    rounding-stable rows while removing every derived-column boundary flip.
+    """
+    iv = np.array(iv, dtype=float)
+    n = iv.shape[0]
+    price = np.broadcast_to(np.asarray(price, dtype=float), (n,))
+    S = np.broadcast_to(np.asarray(S, dtype=float), (n,))
+    K = np.broadcast_to(np.asarray(K, dtype=float), (n,))
+    T = np.broadcast_to(np.asarray(T, dtype=float), (n,))
+    r = np.broadcast_to(np.asarray(r, dtype=float), (n,))
+    ratio = np.broadcast_to(np.asarray(ratio, dtype=float), (n,))
+    is_put = np.broadcast_to(np.asarray(is_put, dtype=bool), (n,))
+    lev_price = price if lev_price is None else np.broadcast_to(
+        np.asarray(lev_price, dtype=float), (n,))
+
+    finite = ~np.isnan(iv)
+    if not finite.any():
+        return iv
+    with np.errstate(all="ignore"):
+        lo = np.clip(iv - eps, 1e-6, 10.0)
+        hi = np.clip(iv + eps, 1e-6, 10.0)
+        unstable = np.round(lo, 4) != np.round(hi, 4)
+        if check_delta or check_leverage:
+            d_lo = bs_delta_vec(S, K, T, r, lo, ratio, is_put)
+            d_hi = bs_delta_vec(S, K, T, r, hi, ratio, is_put)
+            if check_delta:
+                unstable |= np.round(d_lo, 4) != np.round(d_hi, 4)
+            if check_leverage:
+                lev_lo = S * np.abs(d_lo) / lev_price
+                lev_hi = S * np.abs(d_hi) / lev_price
+                unstable |= np.round(lev_lo, 4) != np.round(lev_hi, 4)
+    unstable &= finite
+    out = iv.copy()
+    for j in np.where(unstable)[0]:
+        out[j] = implied_vol(float(price[j]), float(S[j]), float(K[j]),
+                             float(T[j]), float(r[j]), float(ratio[j]),
+                             bool(is_put[j]))
+    return out
+
+
 def _fetch_cmoney_key_http():
     """Scrape the cmkey token out of the warrantsquery page HTML.
 
@@ -266,8 +448,13 @@ def get_cmoney_prices(codes):
 
 def build_warrant_df(cmoney_results, compute_iv=True, keep_noniv=False):
     r_free_default = 0.02
-    rows = []
 
+    # Pass 1: parse + pre-filter each warrant into a base row WITHOUT the IV
+    # solve, collecting the pricing inputs in parallel arrays. The scalar solve
+    # was the dominant cost; deferring it lets one vectorized sweep replace
+    # thousands of per-row brentq calls.
+    rows = []
+    a_ask = []; a_bid = []; a_S = []; a_K = []; a_T = []; a_r = []; a_ratio = []; a_put = []
     for code, data in cmoney_results.items():
         try:
             w = data["Warrant"]
@@ -300,38 +487,6 @@ def build_warrant_df(cmoney_results, compute_iv=True, keep_noniv=False):
 
             T = days_to_expiry / 365.0
 
-            if compute_iv:
-                iv_ask = implied_vol(
-                    ask, underlying_price, strike, T, r_free, exercise_ratio, is_put
-                )
-                iv_bid = (
-                    implied_vol(bid, underlying_price, strike, T, r_free, exercise_ratio, is_put)
-                    if bid > 0
-                    else np.nan
-                )
-
-                if np.isnan(iv_ask):
-                    # keep_noniv (superset-with-IV mode): keep the row instead of
-                    # dropping it, with every IV-derived metric NaN — mirrors the
-                    # compute_iv=False null assignment for this one row so the row
-                    # SET equals the superset while converged rows still carry IV.
-                    if not keep_noniv:
-                        continue
-                    iv_ask = iv_bid = calc_delta = calc_leverage = np.nan
-                else:
-                    if np.isnan(iv_bid):
-                        iv_bid = iv_ask
-
-                    calc_delta = bs_delta(
-                        underlying_price, strike, T, r_free, iv_ask, exercise_ratio, is_put
-                    )
-                    calc_leverage = calc_real_leverage(underlying_price, abs(calc_delta), ask)
-            else:
-                # Arb finder does not use IV/delta/leverage — skip the solve so a
-                # leg is never dropped just because IV wouldn't converge, and no
-                # time is wasted on it.
-                iv_ask = iv_bid = calc_delta = calc_leverage = np.nan
-
             if is_put:
                 intrinsic = max(0, strike - underlying_price) * exercise_ratio
                 time_value = (ask / exercise_ratio) + underlying_price - strike
@@ -360,18 +515,74 @@ def build_warrant_df(cmoney_results, compute_iv=True, keep_noniv=False):
                     if underlying_price > 0
                     else 0,
                     "time_value_am": round(time_value_am, 4),
-                    "iv_ask": round(iv_ask, 4),
-                    "iv_bid": round(iv_bid, 4),
-                    "delta_calc": round(calc_delta, 4),
-                    "leverage_calc": round(calc_leverage, 4),
+                    # IV-derived metrics filled in below (positions fixed here so
+                    # the column order stays COL_ORDER regardless of solve path).
+                    "iv_ask": np.nan,
+                    "iv_bid": np.nan,
+                    "delta_calc": np.nan,
+                    "leverage_calc": np.nan,
                 }
             )
+            a_ask.append(ask); a_bid.append(bid); a_S.append(underlying_price)
+            a_K.append(strike); a_T.append(T); a_r.append(r_free)
+            a_ratio.append(exercise_ratio); a_put.append(is_put)
         except Exception:
             continue
 
     if not rows:
         return pd.DataFrame(columns=COL_ORDER)
-    return pd.DataFrame(rows)[COL_ORDER]
+
+    # Pass 2: one vectorized IV/delta/leverage solve over all surviving rows,
+    # then the per-row post-logic (bid->ask fallback, keep_noniv, drop) applied
+    # as array ops. round(...,4) is done element-wise with the builtin so the
+    # rounding is byte-identical to the scalar path.
+    n = len(rows)
+    ask_arr = np.array(a_ask); bid_arr = np.array(a_bid); S_arr = np.array(a_S)
+    K_arr = np.array(a_K); T_arr = np.array(a_T); r_arr = np.array(a_r)
+    ratio_arr = np.array(a_ratio); put_arr = np.array(a_put, dtype=bool)
+
+    if compute_iv:
+        iv_ask = implied_vol_vec(ask_arr, S_arr, K_arr, T_arr, r_arr, ratio_arr, put_arr)
+        # Re-solve any row whose rounded delta OR leverage (both derived from the
+        # unrounded iv_ask, exactly as the scalar path does) could flip between
+        # Newton's and brentq's root, so those columns match the scalar path
+        # bit-for-bit. Leverage denominator is the ask price.
+        iv_ask = _refine_iv_for_rounding(
+            iv_ask, ask_arr, S_arr, K_arr, T_arr, r_arr, ratio_arr, put_arr,
+            check_delta=True, check_leverage=True, lev_price=ask_arr,
+        )
+        bid_price = np.where(bid_arr > 0, bid_arr, np.nan)
+        iv_bid = implied_vol_vec(bid_price, S_arr, K_arr, T_arr, r_arr, ratio_arr, put_arr)
+        converged = ~np.isnan(iv_ask)
+        # iv_bid falls back to iv_ask on converged rows where bid IV is NaN.
+        iv_bid = np.where(converged & np.isnan(iv_bid), iv_ask, iv_bid)
+        delta = bs_delta_vec(S_arr, K_arr, T_arr, r_arr, iv_ask, ratio_arr, put_arr)
+        with np.errstate(all="ignore"):
+            leverage = S_arr * np.abs(delta) / ask_arr  # ask>0 guaranteed above
+        # Non-converged rows carry all-NaN IV metrics (drop or keep_noniv).
+        iv_bid = np.where(converged, iv_bid, np.nan)
+        delta = np.where(converged, delta, np.nan)
+        leverage = np.where(converged, leverage, np.nan)
+        keep = converged if not keep_noniv else np.ones(n, dtype=bool)
+    else:
+        # Arb finder does not use IV/delta/leverage — skip the solve entirely.
+        iv_ask = iv_bid = delta = leverage = np.full(n, np.nan)
+        keep = np.ones(n, dtype=bool)
+
+    final_rows = []
+    for i in range(n):
+        if not keep[i]:
+            continue
+        d = rows[i]
+        d["iv_ask"] = round(float(iv_ask[i]), 4)
+        d["iv_bid"] = round(float(iv_bid[i]), 4)
+        d["delta_calc"] = round(float(delta[i]), 4)
+        d["leverage_calc"] = round(float(leverage[i]), 4)
+        final_rows.append(d)
+
+    if not final_rows:
+        return pd.DataFrame(columns=COL_ORDER)
+    return pd.DataFrame(final_rows)[COL_ORDER]
 
 
 # ── Warrant result cache ─────────────────────────────────────────────────────

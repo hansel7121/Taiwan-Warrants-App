@@ -24,7 +24,10 @@ import yfinance as yf
 
 from services import applog
 from services import db_market
-from logic.warrant_logic import implied_vol, bs_delta, calc_real_leverage
+from logic.warrant_logic import (
+    implied_vol, bs_delta, calc_real_leverage,
+    implied_vol_vec, bs_delta_vec, _refine_iv_for_rounding,
+)
 
 # One US option contract covers 100 ADRs. The number of ordinary (Taiwan)
 # shares per ADR ("adr_ratio") is per-listing, so contract size in Taiwan
@@ -518,57 +521,84 @@ def scrape_yfinance_us_option(stock_code, option_type="All", min_days=1, max_day
             failed_exp += 1
             continue
 
+        conv = fx / adr_ratio  # USD/ADR -> TWD/Taiwan-share
+        T = dte / 365.0
         for is_put, leg in ((False, chain.calls), (True, chain.puts)):
             opt_type = "Put" if is_put else "Call"
-            for _, o in leg.iterrows():
-                K_usd = float(o.get("strike", np.nan))
-                bid_usd = float(o.get("bid", np.nan) or np.nan)
-                ask_usd = float(o.get("ask", np.nan) or np.nan)
-                last_usd = float(o.get("lastPrice", np.nan) or np.nan)
-                if not np.isfinite(K_usd) or K_usd <= 0:
+            if leg is None or len(leg) == 0:
+                continue
+
+            # Vectorized replacement for the per-leg iterrows() loop. yfinance
+            # returns each leg as a DataFrame already, so pull the columns into
+            # numpy arrays and process the whole leg at once.
+            def _col(name):
+                if name in leg.columns:
+                    return pd.to_numeric(leg[name], errors="coerce").to_numpy(dtype=float)
+                return np.full(len(leg), np.nan)
+
+            K_usd = _col("strike")
+            with np.errstate(all="ignore"):
+                # float(x or np.nan): 0 -> NaN, everything else unchanged.
+                bid_usd = np.where(_col("bid") == 0, np.nan, _col("bid"))
+                ask_usd = np.where(_col("ask") == 0, np.nan, _col("ask"))
+                last_usd = np.where(_col("lastPrice") == 0, np.nan, _col("lastPrice"))
+
+            vol_raw = leg["volume"].to_numpy() if "volume" in leg.columns \
+                else np.full(len(leg), np.nan)
+            oi_raw = leg["openInterest"].to_numpy() if "openInterest" in leg.columns \
+                else np.full(len(leg), np.nan)
+
+            with np.errstate(all="ignore"):
+                kok = np.isfinite(K_usd) & (K_usd > 0)
+                ask_live = np.isfinite(ask_usd) & (ask_usd > 0)
+                bid_live = np.isfinite(bid_usd) & (bid_usd > 0)
+                is_live = ask_live & bid_live
+                a_usd = np.where(ask_live, ask_usd, last_usd)
+                b_usd = np.where(bid_live, bid_usd, last_usd)
+                aok = np.isfinite(a_usd) & (a_usd > 0)
+            pre = kok & aok
+
+            m = len(leg)
+            adr_arr = np.full(m, float(adr))
+            T_arr = np.full(m, T)
+            if compute_iv:
+                # IV in native USD/ADR space (scale-free).
+                iv_ask = implied_vol_vec(a_usd, adr_arr, K_usd, T_arr, R_US, 1.0, is_put)
+                with np.errstate(all="ignore"):
+                    b_for = np.where(np.isfinite(b_usd) & (b_usd > 0), b_usd, np.nan)
+                iv_bid = implied_vol_vec(b_for, adr_arr, K_usd, T_arr, R_US, 1.0, is_put)
+                ask_conv = ~np.isnan(iv_ask)
+                fbk = np.isnan(iv_ask) & ~np.isnan(iv_bid)
+                iv_ask = np.where(fbk, iv_bid, iv_ask)
+                # Delta boundary refinement (no leverage column here); re-solve
+                # on the same USD price the scalar path used for iv_ask.
+                price_for_ivask = np.where(ask_conv, a_usd, b_for)
+                iv_ask = _refine_iv_for_rounding(
+                    iv_ask, price_for_ivask, adr_arr, K_usd, T_arr, R_US, 1.0, is_put,
+                    check_delta=True,
+                )
+                converged = ~np.isnan(iv_ask)
+                delta = bs_delta_vec(adr_arr, K_usd, T_arr, R_US, iv_ask, 1.0, is_put)
+                iv_bid = np.where(converged, iv_bid, np.nan)
+                delta = np.where(converged, delta, np.nan)
+                iv_keep = converged if not keep_noniv else np.ones(m, dtype=bool)
+            else:
+                # Arb finder does not use IV/delta — skip the solve.
+                iv_ask = iv_bid = delta = np.full(m, np.nan)
+                iv_keep = np.ones(m, dtype=bool)
+
+            keep = pre & iv_keep
+            exp_lbl = exp_ts.strftime("%b%y")
+            for j in range(m):
+                if not keep[j]:
                     continue
-
-                ask_live = np.isfinite(ask_usd) and ask_usd > 0
-                bid_live = np.isfinite(bid_usd) and bid_usd > 0
-                is_live = ask_live and bid_live
-
-                # Fall back to last trade when a side is missing.
-                a_usd = ask_usd if ask_live else last_usd
-                b_usd = bid_usd if bid_live else last_usd
-                if not (np.isfinite(a_usd) and a_usd > 0):
-                    continue
-
-                T = dte / 365.0
-                if compute_iv:
-                    # IV in native USD/ADR space (scale-free).
-                    iv_ask = implied_vol(a_usd, adr, K_usd, T, R_US, 1.0, is_put)
-                    iv_bid = (
-                        implied_vol(b_usd, adr, K_usd, T, R_US, 1.0, is_put)
-                        if np.isfinite(b_usd) and b_usd > 0
-                        else np.nan
-                    )
-                    if np.isnan(iv_ask) and not np.isnan(iv_bid):
-                        iv_ask = iv_bid
-                    if np.isnan(iv_ask):
-                        # keep_noniv (superset-with-IV mode): keep the row with
-                        # all IV-derived metrics NaN instead of dropping it.
-                        if not keep_noniv:
-                            continue
-                        iv_ask = iv_bid = delta = np.nan
-                    else:
-                        delta = bs_delta(adr, K_usd, T, R_US, iv_ask, 1.0, is_put)
-                else:
-                    # Arb finder does not use IV/delta — skip the solve so an
-                    # option is never dropped just because IV wouldn't converge.
-                    iv_ask = iv_bid = delta = np.nan
-
-                conv = fx / adr_ratio  # USD/ADR -> TWD/Taiwan-share
-                strike_twd = K_usd * conv
-                ask_twd = a_usd * conv
-                bid_twd = (b_usd * conv) if (np.isfinite(b_usd) and b_usd > 0) else np.nan
-
-                contract = f"{'P' if is_put else 'C'}{K_usd:g} {exp_ts.strftime('%b%y')} (US)"
-
+                Kx = K_usd[j]; ax = a_usd[j]; bx = b_usd[j]
+                bok = np.isfinite(bx) and bx > 0
+                strike_twd = Kx * conv
+                ask_twd = ax * conv
+                bid_twd = (bx * conv) if bok else np.nan
+                ivb = iv_bid[j]
+                contract = f"{'P' if is_put else 'C'}{float(Kx):g} {exp_lbl} (US)"
                 rows.append({
                     "contract": contract,
                     "type": opt_type,
@@ -577,16 +607,16 @@ def scrape_yfinance_us_option(stock_code, option_type="All", min_days=1, max_day
                     "days_to_expiry": dte,
                     "bid": round(bid_twd, 4) if np.isfinite(bid_twd) else None,
                     "ask": round(ask_twd, 4),
-                    "iv_ask": round(float(iv_ask), 4),
-                    "iv_bid": round(float(iv_bid), 4) if np.isfinite(iv_bid) else None,
-                    "delta_calc": round(float(delta), 4),
-                    "volume": int(o["volume"]) if pd.notna(o.get("volume")) else 0,
-                    "oi": int(o["openInterest"]) if pd.notna(o.get("openInterest")) else 0,
-                    "is_live": bool(is_live),
+                    "iv_ask": round(float(iv_ask[j]), 4),
+                    "iv_bid": round(float(ivb), 4) if np.isfinite(ivb) else None,
+                    "delta_calc": round(float(delta[j]), 4),
+                    "volume": int(vol_raw[j]) if pd.notna(vol_raw[j]) else 0,
+                    "oi": int(oi_raw[j]) if pd.notna(oi_raw[j]) else 0,
+                    "is_live": bool(is_live[j]),
                     # USD reference (for display / auditing)
-                    "strike_usd": round(K_usd, 4),
-                    "bid_usd": round(b_usd, 4) if (np.isfinite(b_usd) and b_usd > 0) else None,
-                    "ask_usd": round(a_usd, 4),
+                    "strike_usd": round(float(Kx), 4),
+                    "bid_usd": round(float(bx), 4) if bok else None,
+                    "ask_usd": round(float(ax), 4),
                     "adr_price": round(adr, 4),
                     "fx": round(fx, 4),
                 })

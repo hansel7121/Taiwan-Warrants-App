@@ -8,7 +8,10 @@ import numpy as np
 import yfinance as yf
 from services import applog
 from services import db_market
-from logic.warrant_logic import implied_vol, bs_delta, calc_real_leverage
+from logic.warrant_logic import (
+    implied_vol, bs_delta, calc_real_leverage,
+    implied_vol_vec, bs_delta_vec, _refine_iv_for_rounding,
+)
 
 R = 0.01875  # Taiwan CBC benchmark rate
 
@@ -244,71 +247,99 @@ def _parse_and_compute(raw_df, underlying_price, exercise_ratio, compute_iv=True
     ]
 
     S = underlying_price
+
+    # Vectorized replacement for the old per-row iterrows() loop. Pull the
+    # pricing columns into numpy arrays, apply the same pre-skip mask, run one
+    # IV/delta/leverage solve, then build the output records from array values
+    # (no iterrows / Series-per-row) preserving every skip, fallback, rounding
+    # and None-vs-NaN semantic of the original.
+    K_arr = df["strike"].to_numpy(dtype=float)
+    dte_arr = df["days_to_expiry"].to_numpy()
+    T_arr = dte_arr / 365.0
+    put_arr = (df["type"].to_numpy() == "Put")
+    raw_ask = df["ask"].to_numpy(dtype=float)
+    raw_bid = df["bid"].to_numpy(dtype=float)
+    with np.errstate(all="ignore"):
+        ask_arr = np.where(~np.isnan(raw_ask) & (raw_ask > 0), raw_ask, np.nan)
+        bid_arr = np.where(~np.isnan(raw_bid) & (raw_bid > 0), raw_bid, np.nan)
+    type_arr = df["type"].to_numpy()
+    vol_arr = df["volume"].to_numpy()
+    oi_arr = df["oi"].to_numpy()
+    live_arr = df["is_live"].to_numpy()
+    exp_list = list(df["expiry_date"])
+
+    # Pre-skip: T<=0 or S<=0 or K<=0 or ask NaN drops the row unconditionally.
+    with np.errstate(all="ignore"):
+        pre = (T_arr > 0) & (S > 0) & (K_arr > 0) & ~np.isnan(ask_arr)
+
+    n = len(df)
+    if compute_iv:
+        S_arr = np.full(n, float(S))
+        iv_ask = implied_vol_vec(ask_arr, S_arr, K_arr, T_arr, R, 1.0, put_arr)
+        iv_bid = implied_vol_vec(bid_arr, S_arr, K_arr, T_arr, R, 1.0, put_arr)
+        ask_conv = ~np.isnan(iv_ask)
+        fb = np.isnan(iv_ask) & ~np.isnan(iv_bid)
+        iv_ask = np.where(fb, iv_bid, iv_ask)
+        # Delta/leverage boundary refinement: re-solve on the SAME price the
+        # scalar path used for iv_ask — ask where the ask solve converged, else
+        # the bid (fallback rows) — so brentq re-solves the correct root. The
+        # leverage denominator stays the ask price.
+        price_for_ivask = np.where(ask_conv, ask_arr, bid_arr)
+        iv_ask = _refine_iv_for_rounding(
+            iv_ask, price_for_ivask, S_arr, K_arr, T_arr, R, 1.0, put_arr,
+            check_delta=True, check_leverage=True, lev_price=ask_arr,
+        )
+        converged = ~np.isnan(iv_ask)
+        delta = bs_delta_vec(S_arr, K_arr, T_arr, R, iv_ask, 1.0, put_arr)
+        with np.errstate(all="ignore"):
+            leverage = float(S) * np.abs(delta) / ask_arr  # ask>0 on kept rows
+        # No iv_bid->iv_ask fallback here (matches scalar); non-converged rows
+        # carry all-NaN IV metrics.
+        iv_bid = np.where(converged, iv_bid, np.nan)
+        delta = np.where(converged, delta, np.nan)
+        leverage = np.where(converged, leverage, np.nan)
+        iv_keep = converged if not keep_noniv else np.ones(n, dtype=bool)
+    else:
+        iv_ask = iv_bid = delta = leverage = np.full(n, np.nan)
+        iv_keep = np.ones(n, dtype=bool)
+
+    keep = pre & iv_keep
+
     rows = []
-    for _, row in df.iterrows():
-        K = row["strike"]
-        T = row["days_to_expiry"] / 365.0
-        is_put = row["type"] == "Put"
-        ask = float(row["ask"]) if pd.notna(row["ask"]) and row["ask"] > 0 else np.nan
-        bid = float(row["bid"]) if pd.notna(row["bid"]) and row["bid"] > 0 else np.nan
-
-        if T <= 0 or S <= 0 or K <= 0 or np.isnan(ask):
+    for i in range(n):
+        if not keep[i]:
             continue
-
-        if compute_iv:
-            iv_ask = implied_vol(ask, S, K, T, R, 1.0, is_put)
-            iv_bid = (
-                implied_vol(bid, S, K, T, R, 1.0, is_put)
-                if not np.isnan(bid)
-                else np.nan
-            )
-            if np.isnan(iv_ask) and not np.isnan(iv_bid):
-                iv_ask = iv_bid
-            if np.isnan(iv_ask):
-                # keep_noniv (superset-with-IV mode): keep the row with all
-                # IV-derived metrics NaN instead of dropping it, mirroring the
-                # compute_iv=False null assignment for this one row.
-                if not keep_noniv:
-                    continue
-                iv_ask = iv_bid = delta = leverage = np.nan
-            else:
-                delta = bs_delta(S, K, T, R, iv_ask, 1.0, is_put)
-                leverage = calc_real_leverage(S, abs(delta), ask)
-        else:
-            # Arb finder does not use IV/delta/leverage — skip the solve so an
-            # option is never dropped just because IV wouldn't converge.
-            iv_ask = iv_bid = delta = leverage = np.nan
-
+        K = K_arr[i]
+        is_put = bool(put_arr[i])
+        ask = ask_arr[i]
+        bid = bid_arr[i]
+        ivb = iv_bid[i]
+        lev = leverage[i]
         intrinsic = max(0, K - S) if is_put else max(0, S - K)
         time_value_am = round(ask - intrinsic, 2)
-
-        expiry_label = (
-            row["expiry_date"].strftime("%b%y")
-            if pd.notna(row["expiry_date"])
-            else ""
-        )
+        exp = exp_list[i]
+        expiry_label = exp.strftime("%b%y") if pd.notna(exp) else ""
         contract = f"{'P' if is_put else 'C'}{int(K)} {expiry_label}"
-
         rows.append(
             {
                 "contract": contract,
-                "type": row["type"],
+                "type": type_arr[i],
                 "underlying_price": round(S, 2),
-                "ask": round(ask, 2),
-                "bid": round(bid, 2) if not np.isnan(bid) else None,
-                "days_to_expiry": int(row["days_to_expiry"]),
+                "ask": round(float(ask), 2),
+                "bid": round(float(bid), 2) if not np.isnan(bid) else None,
+                "days_to_expiry": int(dte_arr[i]),
                 "strike": int(K),
                 "exercise_ratio": exercise_ratio,
-                "volume": int(row["volume"]),
-                "oi": int(row["oi"]),
+                "volume": int(vol_arr[i]),
+                "oi": int(oi_arr[i]),
                 "time_value_am": time_value_am,
-                "iv_ask": round(iv_ask, 4),
-                "iv_bid": round(iv_bid, 4) if not np.isnan(iv_bid) else None,
-                "delta_calc": round(delta, 4),
-                "leverage_calc": round(leverage, 4)
-                if not np.isnan(leverage)
+                "iv_ask": round(float(iv_ask[i]), 4),
+                "iv_bid": round(float(ivb), 4) if not np.isnan(ivb) else None,
+                "delta_calc": round(float(delta[i]), 4),
+                "leverage_calc": round(float(lev), 4)
+                if not np.isnan(lev)
                 else None,
-                "is_live": bool(row["is_live"]),
+                "is_live": bool(live_arr[i]),
             }
         )
 
@@ -432,7 +463,11 @@ def scrape_mis_tw_option(code, compute_iv=True, keep_noniv=False, force=False):
 
     today = pd.Timestamp.today().normalize()
     quote_time = ""
+    # Pass 1: keep the (non-pandas) dict-parsing loop, but defer the IV solve —
+    # build each row with placeholder IV metrics in position and collect the
+    # pricing inputs in parallel arrays.
     rows = []
+    a_ask = []; a_bid = []; a_K = []; a_T = []; a_put = []
     for q in all_q:
         sym = q.get("SymbolID", "")
         if not sym.endswith("-O"):
@@ -468,23 +503,6 @@ def scrape_mis_tw_option(code, compute_iv=True, keep_noniv=False, force=False):
         T = dte / 365.0
         quote_time = q.get("CTime") or quote_time
 
-        if compute_iv:
-            iv_ask = implied_vol(ask, spot, K, T, r_free, ratio, is_put)
-            iv_bid = implied_vol(bid, spot, K, T, r_free, ratio, is_put) if pd.notna(bid) else np.nan
-            if np.isnan(iv_ask) and not np.isnan(iv_bid):
-                iv_ask = iv_bid
-            if np.isnan(iv_ask):
-                # keep_noniv (superset-with-IV mode): keep the row with all
-                # IV-derived metrics NaN instead of dropping it.
-                if not keep_noniv:
-                    continue
-                iv_ask = iv_bid = delta = leverage = np.nan
-            else:
-                delta = bs_delta(spot, K, T, r_free, iv_ask, ratio, is_put)
-                leverage = calc_real_leverage(spot, abs(delta), ask)
-        else:
-            iv_ask = iv_bid = delta = leverage = np.nan
-
         intrinsic = max(0, K - spot) if is_put else max(0, spot - K)
         time_value_am = round(ask - intrinsic, 4)
         # Full expiry date + weekly tag (blank = monthly / 3rd-Wed) so weeklies
@@ -504,16 +522,65 @@ def scrape_mis_tw_option(code, compute_iv=True, keep_noniv=False, force=False):
             "volume": int(_mis_num(q.get("CTotalVolume")) or 0) if pd.notna(_mis_num(q.get("CTotalVolume"))) else 0,
             "oi": int(_mis_num(q.get("OpenInterest")) or 0) if pd.notna(_mis_num(q.get("OpenInterest"))) else 0,
             "time_value_am": time_value_am,
-            "iv_ask": round(iv_ask, 4) if pd.notna(iv_ask) else None,
-            "iv_bid": round(iv_bid, 4) if pd.notna(iv_bid) else None,
-            "delta_calc": round(delta, 4) if pd.notna(delta) else None,
-            "leverage_calc": round(leverage, 4) if pd.notna(leverage) else None,
+            # IV metrics filled in below (positions fixed for stable columns).
+            "iv_ask": None,
+            "iv_bid": None,
+            "delta_calc": None,
+            "leverage_calc": None,
             "is_live": is_live,
             "quote_time": quote_time,
         })
-    if not rows:
+        a_ask.append(ask); a_bid.append(bid if pd.notna(bid) else np.nan)
+        a_K.append(K); a_T.append(T); a_put.append(is_put)
+
+    # Pass 2: one vectorized IV/delta/leverage solve, then the per-row fallback,
+    # keep_noniv drop and None/rounding semantics as array ops.
+    n = len(rows)
+    ask_arr = np.array(a_ask, dtype=float); bid_arr = np.array(a_bid, dtype=float)
+    K_arr = np.array(a_K, dtype=float); T_arr = np.array(a_T, dtype=float)
+    put_arr = np.array(a_put, dtype=bool)
+    spot_arr = np.full(n, float(spot))
+
+    if compute_iv:
+        iv_ask = implied_vol_vec(ask_arr, spot_arr, K_arr, T_arr, r_free, ratio, put_arr)
+        iv_bid = implied_vol_vec(bid_arr, spot_arr, K_arr, T_arr, r_free, ratio, put_arr)
+        ask_conv = ~np.isnan(iv_ask)
+        fb = np.isnan(iv_ask) & ~np.isnan(iv_bid)
+        iv_ask = np.where(fb, iv_bid, iv_ask)
+        # Re-solve delta/leverage boundary rows on the same price the scalar path
+        # used for iv_ask (ask, or bid on fallback rows); leverage denom is ask.
+        price_for_ivask = np.where(ask_conv, ask_arr, bid_arr)
+        iv_ask = _refine_iv_for_rounding(
+            iv_ask, price_for_ivask, spot_arr, K_arr, T_arr, r_free, ratio, put_arr,
+            check_delta=True, check_leverage=True, lev_price=ask_arr,
+        )
+        converged = ~np.isnan(iv_ask)
+        delta = bs_delta_vec(spot_arr, K_arr, T_arr, r_free, iv_ask, ratio, put_arr)
+        with np.errstate(all="ignore"):
+            leverage = float(spot) * np.abs(delta) / ask_arr  # ask>0 on kept rows
+        iv_bid = np.where(converged, iv_bid, np.nan)
+        delta = np.where(converged, delta, np.nan)
+        leverage = np.where(converged, leverage, np.nan)
+        keep = converged if not keep_noniv else np.ones(n, dtype=bool)
+    else:
+        iv_ask = iv_bid = delta = leverage = np.full(n, np.nan)
+        keep = np.ones(n, dtype=bool)
+
+    final = []
+    for i in range(n):
+        if not keep[i]:
+            continue
+        d = rows[i]
+        iva = iv_ask[i]; ivb = iv_bid[i]; dlt = delta[i]; lev = leverage[i]
+        d["iv_ask"] = round(float(iva), 4) if pd.notna(iva) else None
+        d["iv_bid"] = round(float(ivb), 4) if pd.notna(ivb) else None
+        d["delta_calc"] = round(float(dlt), 4) if pd.notna(dlt) else None
+        d["leverage_calc"] = round(float(lev), 4) if pd.notna(lev) else None
+        final.append(d)
+
+    if not final:
         raise RuntimeError("MIS: no decodable contracts")
-    return pd.DataFrame(rows)
+    return pd.DataFrame(final)
 
 
 def _apply_option_filters(result, option_type, min_days, max_days, min_leverage,
