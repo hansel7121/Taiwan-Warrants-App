@@ -196,6 +196,36 @@ function syncWarrant() {
     document.getElementById("readWarrantBtn"));
 }
 
+// Dedicated handler for the slow universe re-scrape. Unlike syncWarrant()
+// this does NOT go through refreshNow(): the route isn't in that helper's
+// routeMap, the wording is about listed securities (not prices), and there's
+// no price table to re-read afterward. The /sync_universe route runs
+// synchronously and blocks until the scrape+store completes, so the POST
+// resolving means the sync is done. Mirrors refreshNow's UX: disable the
+// button while in flight, re-enable + restore on completion, surface errors.
+async function syncUniverse() {
+  const statusEl = document.getElementById("status");
+  const btn = document.getElementById("syncUniverseBtn");
+  if (!btn) return;
+  const origLabel = btn.textContent;
+  const wasDisabled = btn.disabled;
+  btn.disabled = true;
+  btn.textContent = "Syncing…";
+  if (statusEl) statusEl.textContent = "Re-scraping listed securities… this takes a few minutes";
+  try {
+    await api("/sync_universe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (statusEl) statusEl.textContent = "Universe updated — listed securities re-scraped.";
+  } catch (e) {
+    if (statusEl) statusEl.textContent = "Universe sync failed: " + (e && e.message ? e.message : e);
+  } finally {
+    btn.disabled = wasDisabled;
+    btn.textContent = origLabel;
+  }
+}
+
 function renderTable(rows) {
   if (!rows.length) {
     document.getElementById("tableContainer").innerHTML = "<p style='padding:16px;color:var(--muted)'>No results.</p>";

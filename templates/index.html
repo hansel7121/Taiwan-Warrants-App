@@ -150,6 +150,7 @@
           <div class="action-group compact">
             <button class="primary" id="readWarrantBtn" onclick="readWarrant()">Read Warrants</button>
             <button class="sm" id="refreshWarrantsBtn" onclick="syncWarrant()">Sync now</button>
+            <button class="sm" id="syncUniverseBtn" onclick="syncUniverse()" title="Re-scrape all TWSE/TPEx listed securities (~3-5 min) — updates which warrants exist and their listing dates. Separate from the price sync above.">Sync Universe</button>
             <button class="success" id="downloadBtn" onclick="downloadCSV()" style="display:none">
               Download CSV
             </button>
