@@ -55,7 +55,6 @@ US_OPTION_INT_COLS = ["days_to_expiry", "volume", "oi"]
 
 REFRESH_MINUTES = 15
 CMKEY_MINUTES = 45
-UNIVERSE_HOURS = 24
 FORCE_DEBOUNCE_SECONDS = 60
 
 _TZ_TAIPEI = ZoneInfo("Asia/Taipei")
@@ -357,8 +356,13 @@ def start():
         # the first warrant refresh resolves against the fresh ISIN listing rather
         # than the stale bundled snapshot (it waits on the multi-minute scrape;
         # requests meanwhile fetch-on-miss off the fallback).
-        sched.add_job(_run_universe, "interval", hours=UNIVERSE_HOURS,
-                      next_run_time=now + timedelta(seconds=5))
+        #
+        # Fixed daily 07:00 TPE (before TWSE's 09:00 open) rather than an
+        # interval-since-boot: an interval trigger's wall-clock time drifts with
+        # every process restart (Render redeploy, OOM restart, local dev
+        # restart), so the listing could go stale for a day if a restart lands
+        # right after that day's already-completed run.
+        sched.add_job(_run_universe, CronTrigger(hour=7, minute=0, timezone=_TZ_TAIPEI))
         sched.add_job(_gated("tw_equity", _run_warrants),
                       CronTrigger(minute="0,15,30,45"))
         sched.add_job(_gated("tw_option", _run_tw_options),
