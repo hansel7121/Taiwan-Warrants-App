@@ -176,11 +176,33 @@ create table if not exists us_option_products (
   created_at timestamptz default now()
 );
 
+-- Automated Direct-Arb scanner output (scheduler.py:sync_suggestions), same
+-- server-only RLS pattern as the tables above. id is a deterministic string
+-- built from (arb_type, sorted leg codes, strikes, expiry/contract,
+-- direction) so re-finding the same opportunity next cycle upserts the same
+-- row instead of creating a duplicate. status has no 'dismissed' value —
+-- user-initiated removal is a hard delete (services/db_suggestions.py),
+-- since the next scan cycle would just re-upsert the same id anyway.
+create table if not exists arb_suggestions (
+  id text primary key,
+  arb_type text not null,
+  legs jsonb not null,
+  price_diff numeric not null,
+  price_diff_pct numeric,
+  legs_status jsonb not null,
+  first_seen_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  status text not null default 'active',
+  created_at timestamptz default now()
+);
+create index if not exists arb_suggestions_status_idx on arb_suggestions (status, last_seen_at desc);
+
 alter table warrant_stocks enable row level security;
 alter table tw_option_products enable row level security;
 alter table us_option_products enable row level security;
+alter table arb_suggestions enable row level security;
 
-grant all on warrant_stocks, tw_option_products, us_option_products to service_role;
+grant all on warrant_stocks, tw_option_products, us_option_products, arb_suggestions to service_role;
 
 alter table md_batches enable row level security;
 alter table md_warrants enable row level security;
