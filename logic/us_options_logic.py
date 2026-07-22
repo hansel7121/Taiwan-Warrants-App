@@ -17,6 +17,7 @@ single spot FX snapshot is used for every conversion.
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
@@ -510,18 +511,43 @@ def scrape_yfinance_us_option(stock_code, option_type="All", min_days=1, max_day
     today = pd.Timestamp.now().normalize()
     rows = []
     failed_exp = 0
+
+    # Compute dte per expiry and drop dte<1 BEFORE fetching so dead-on-arrival
+    # expiries never spend a round-trip. Keep the survivors in the original
+    # expiries order — the pre-sort frame must be assembled in that order so the
+    # output is byte-identical to the sequential version (the final
+    # sort_values is stable, so identical tie order is preserved).
+    fetchable = []
     for exp in expiries:
         exp_ts = pd.Timestamp(exp)
         dte = int((exp_ts - today).days)
         if dte < 1:
             continue
+        fetchable.append((exp, exp_ts, dte))
+
+    # Fetch the option chains concurrently. tk.option_chain issues an
+    # independent HTTPS GET per expiry (via requests under the hood), which is
+    # the dominant cost; a small pool overlaps those round-trips. yfinance's
+    # per-call HTTP is effectively independent for distinct expiries, and the
+    # shared-Ticker + small-pool pattern is the widely used idiom — a per-call
+    # lock would serialize the fetch and defeat the point. max_workers=5 keeps
+    # us polite to Yahoo. Results are gathered here (unordered) then processed
+    # below strictly in `fetchable` order for deterministic output.
+    def _fetch(exp):
         try:
-            chain = tk.option_chain(exp)
+            return tk.option_chain(exp)
         except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        chains = list(pool.map(_fetch, [exp for exp, _ts, _dte in fetchable]))
+
+    conv = fx / adr_ratio  # USD/ADR -> TWD/Taiwan-share
+    for (exp, exp_ts, dte), chain in zip(fetchable, chains):
+        if chain is None:
             failed_exp += 1
             continue
 
-        conv = fx / adr_ratio  # USD/ADR -> TWD/Taiwan-share
         T = dte / 365.0
         for is_put, leg in ((False, chain.calls), (True, chain.puts)):
             opt_type = "Put" if is_put else "Call"
