@@ -285,6 +285,17 @@ def sync_suggestions():
 
         if strategy == "pcp" and "executable" in df.columns:
             df = df[df["executable"]]
+        elif strategy == "same_type" and {"trade", "riskless"} <= set(df.columns):
+            # Risk-free only. match_warrant_tw_option still emits (a) the
+            # non-executable short-warrant direction and (b) the UNFAVORABLE
+            # capped-loss side, which its strike gate admits within
+            # max_strike_diff_pct (arb_logic.py: strike_ok = favorable | within-cap).
+            # A suggestion must be a true arb, so keep only the long-warrant /
+            # short-option side on the FAVORABLE strike: residual vertical pays
+            # >= 0 at every spot (option strike above the warrant's for calls /
+            # below for puts), priced richer per share (price_diff>0) and shorter
+            # dated (opt_dte <= warrant_dte, already enforced for this direction).
+            df = df[(df["trade"] == "Buy Warrant / Sell Option") & df["riskless"]]
         if df.empty:
             print(f"SCHED: suggestions {arb_type} 0 active (no executable rows)", flush=True)
             db_suggestions.mark_stale(arb_type, [])

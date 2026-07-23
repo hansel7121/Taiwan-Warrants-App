@@ -39,3 +39,10 @@ def list_active_suggestions():
 
 def delete_suggestion(id):
     db._run(lambda c: c.table("arb_suggestions").delete().eq("id", id).execute())
+
+
+def clear_active_suggestions():
+    """Delete every currently-active suggestion (the rows the tab shows). The
+    scanner re-populates still-live arbs on its next run, so this only clears
+    the current view — a fresh opportunity reappears within one scan window."""
+    db._run(lambda c: c.table("arb_suggestions").delete().eq("status", "active").execute())

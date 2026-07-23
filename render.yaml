@@ -15,12 +15,14 @@ services:
       # balloon RSS. Harmless on non-glibc platforms.
       - key: MALLOC_ARENA_MAX
         value: "2"
-      # Phase 2 cutover (staged). ENABLE_SCHEDULER turns on the background
-      # refresh jobs that WRITE Supabase market snapshots (gated to each
-      # market's trading hours, on a wall-clock 15-min cron grid). Off for now:
-      # step 5b turns readers on first, without the recurring background writes.
+      # ENABLE_SCHEDULER turns on the in-process background jobs that refresh
+      # Supabase market snapshots AND run the Direct-Arb suggestions scan, on a
+      # wall-clock 15-min cron grid gated to each market's trading hours. ON:
+      # the server fetches and populates the Suggestions tab on its own, without
+      # depending on a local run. Single-worker executor keeps it under the
+      # starter instance's 512 MB.
       - key: ENABLE_SCHEDULER
-        value: "0"
+        value: "1"
       # Step 5b: readers now serve the Supabase snapshots (falling back to a
       # live fetch on empty/error/unconfigured). With ENABLE_SCHEDULER off,
       # snapshots are only as fresh as the last manual write (e.g. a validation
