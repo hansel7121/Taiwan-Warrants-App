@@ -203,7 +203,7 @@ def build_straddle_arb(stock_codes, option_type, max_strike_diff_pct, max_dte_di
             if opt_df.empty:
                 errors.append(f"{code}: {oerr or 'no options'}")
                 continue
-            opt_df = opt_df[opt_df["is_live"]]
+            opt_df = opt_df[opt_df["ask_live"] | opt_df["bid_live"]]
             if min_volume > 0:
                 opt_df = opt_df[opt_df["volume"] >= min_volume]
         except Exception as e:
@@ -422,13 +422,14 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             # hidden behind a closer-but-unprofitable "best".
             for _, opt in candidates.iterrows():
                 # Each arb direction executes against only ONE side of the option
-                # book, so a one-sided quote is still a valid benchmark. This fork
-                # emits only is_live (not ask_live/bid_live), so derive per-side
-                # liveness inline from the raw bid/ask — the missing side arrives
-                # settlement-backfilled and is not an executable price. Each
-                # formula below then requires the side it actually trades.
-                opt_ask_live = pd.notna(opt.get("ask")) and float(opt.get("ask") or 0) > 0
-                opt_bid_live = pd.notna(opt.get("bid")) and float(opt.get("bid") or 0) > 0
+                # book, so a one-sided quote is still a valid benchmark. The chain
+                # now carries per-side liveness flagged BEFORE the settlement/last
+                # fallback backfilled the missing side, so read them directly —
+                # opt["ask"]/["bid"] are post-fallback and can't tell a genuine
+                # quote from a stale settlement mark. Each formula below then
+                # requires the side it actually trades.
+                opt_ask_live = bool(opt.get("ask_live", False))
+                opt_bid_live = bool(opt.get("bid_live", False))
                 if not (opt_ask_live or opt_bid_live):
                     continue
                 opt_bid_per_share = round(float(opt["bid"]), 4) if opt_bid_live else None
@@ -639,8 +640,11 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
             Ko = float(opt["strike"])
             To = int(opt["days_to_expiry"]) / 365.0
             bond_pv = round(Ko * float(np.exp(-r * To)), 4)
-            opt_bid_ps = round(float(opt["bid"]), 4) if pd.notna(opt.get("bid")) and float(opt.get("bid", 0)) > 0 else None
-            opt_ask_ps = round(float(opt["ask"]), 4) if pd.notna(opt.get("ask")) and float(opt.get("ask", 0)) > 0 else None
+            # Gate on per-side liveness flagged BEFORE the settlement/last
+            # fallback: opt["bid"]/["ask"] are post-fallback, so a missing side
+            # carries a stale settlement mark that is not an executable price.
+            opt_bid_ps = round(float(opt["bid"]), 4) if bool(opt.get("bid_live", False)) else None
+            opt_ask_ps = round(float(opt["ask"]), 4) if bool(opt.get("ask_live", False)) else None
 
             # Option-leg IV (display only) — use the OPTION's put/call flag.
             is_put_opt = opp == "Put"
@@ -772,7 +776,7 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
             errors.append(f"{code}: {opt_err or 'no options'}")
             applog.log("ARB", f"{code} {pos} option fetch failed: {opt_err}")
             continue
-        opt_df = opt_df[opt_df["is_live"]]
+        opt_df = opt_df[opt_df["ask_live"] | opt_df["bid_live"]]
         if min_volume > 0:
             opt_df = opt_df[opt_df["volume"] >= min_volume]
 
@@ -865,7 +869,7 @@ def match_warrant_us_option(stock_codes, option_type, max_strike_diff_pct, max_d
             errors.append(f"{code}: {opt_err or 'no US options'}")
             applog.log("ARB", f"{code} {pos} US option fetch failed: {opt_err}")
             continue
-        opt_df = opt_df[opt_df["is_live"]]
+        opt_df = opt_df[opt_df["ask_live"] | opt_df["bid_live"]]
         if min_volume > 0:
             opt_df = opt_df[opt_df["volume"] >= min_volume]
 

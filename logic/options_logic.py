@@ -266,6 +266,8 @@ def _parse_and_compute(raw_df, underlying_price, exercise_ratio, compute_iv=True
     vol_arr = df["volume"].to_numpy()
     oi_arr = df["oi"].to_numpy()
     live_arr = df["is_live"].to_numpy()
+    ask_live_arr = df["ask_live"].to_numpy()
+    bid_live_arr = df["bid_live"].to_numpy()
     exp_list = list(df["expiry_date"])
 
     # Pre-skip: T<=0 or S<=0 or K<=0 or ask NaN drops the row unconditionally.
@@ -340,6 +342,8 @@ def _parse_and_compute(raw_df, underlying_price, exercise_ratio, compute_iv=True
                 if not np.isnan(lev)
                 else None,
                 "is_live": bool(live_arr[i]),
+                "ask_live": bool(ask_live_arr[i]),
+                "bid_live": bool(bid_live_arr[i]),
             }
         )
 
@@ -491,6 +495,8 @@ def scrape_mis_tw_option(code, compute_iv=True, keep_noniv=False, force=False):
         last = _mis_num(q.get("CLastPrice"))
         settle = _mis_num(q.get("SettlementPrice"))
         is_live = bool(pd.notna(bid) and pd.notna(ask))
+        ask_live = bool(pd.notna(ask) and ask > 0)
+        bid_live = bool(pd.notna(bid) and bid > 0)
         # Fall back ask -> last -> settle so a leg is never dropped off-hours.
         if pd.isna(ask):
             ask = last if pd.notna(last) else settle
@@ -528,6 +534,8 @@ def scrape_mis_tw_option(code, compute_iv=True, keep_noniv=False, force=False):
             "delta_calc": None,
             "leverage_calc": None,
             "is_live": is_live,
+            "ask_live": ask_live,
+            "bid_live": bid_live,
             "quote_time": quote_time,
         })
         a_ask.append(ask); a_bid.append(bid if pd.notna(bid) else np.nan)
