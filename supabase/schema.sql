@@ -100,6 +100,8 @@ create table if not exists md_tw_options (
   delta_calc double precision,
   leverage_calc double precision,
   is_live boolean,
+  ask_live boolean,
+  bid_live boolean,
   quote_time text
 );
 create index if not exists md_tw_options_batch_stock_idx on md_tw_options (batch_id, stock_code);
@@ -122,6 +124,8 @@ create table if not exists md_us_options (
   volume integer,
   oi integer,
   is_live boolean,
+  ask_live boolean,
+  bid_live boolean,
   strike_usd double precision,
   bid_usd double precision,
   ask_usd double precision,

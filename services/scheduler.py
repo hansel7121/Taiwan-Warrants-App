@@ -49,12 +49,13 @@ TW_OPTION_COLS = [
     "stock_code", "source", "contract", "type", "underlying_price", "ask", "bid",
     "days_to_expiry", "strike", "exercise_ratio", "bid_size", "ask_size",
     "volume", "oi", "time_value_am", "iv_ask", "iv_bid", "delta_calc",
-    "leverage_calc", "is_live", "quote_time",
+    "leverage_calc", "is_live", "ask_live", "bid_live", "quote_time",
 ]
 US_OPTION_COLS = [
     "stock_code", "contract", "type", "underlying_price", "strike",
     "days_to_expiry", "bid", "ask", "iv_ask", "iv_bid", "delta_calc", "volume",
-    "oi", "is_live", "strike_usd", "bid_usd", "ask_usd", "adr_price", "fx",
+    "oi", "is_live", "ask_live", "bid_live", "strike_usd", "bid_usd", "ask_usd",
+    "adr_price", "fx",
 ]
 
 # Columns typed `integer` in supabase/schema.sql. keep_noniv=True leaves NaNs in

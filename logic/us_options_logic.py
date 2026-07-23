@@ -639,6 +639,8 @@ def scrape_yfinance_us_option(stock_code, option_type="All", min_days=1, max_day
                     "volume": int(vol_raw[j]) if pd.notna(vol_raw[j]) else 0,
                     "oi": int(oi_raw[j]) if pd.notna(oi_raw[j]) else 0,
                     "is_live": bool(is_live[j]),
+                    "ask_live": bool(ask_live[j]),
+                    "bid_live": bool(bid_live[j]),
                     # USD reference (for display / auditing)
                     "strike_usd": round(float(Kx), 4),
                     "bid_usd": round(float(bx), 4) if bok else None,
@@ -734,5 +736,5 @@ def us_options_scan(stock_codes, option_type, min_days, max_days, min_volume):
         df = df.assign(product=stock_codes[0] if len(stock_codes) == 1 else None)
     cols = ["product", "contract", "type", "strike_usd", "adr_price",
             "days_to_expiry", "bid_usd", "ask_usd", "iv_ask", "iv_bid",
-            "delta_calc", "volume", "oi", "fx", "is_live"]
+            "delta_calc", "volume", "oi", "fx", "is_live", "ask_live", "bid_live"]
     return df[[c for c in cols if c in df.columns]], None, meta
