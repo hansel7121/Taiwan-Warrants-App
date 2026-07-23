@@ -4,7 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Workflow
 
-- **Auto-commit AND push after every change**, without waiting to be asked. Every time a file is edited or created and the task/step is done, run `git add` + `git commit` + `git push origin main` — commit directly to `main`. Do not batch many changes into an unpushed pile; push as you go. Use concise, descriptive commit messages.
+- **Never commit or push directly to `main`.** Two people work on this repo; direct pushes to `main` from multiple people is what causes conflicts.
+- Before starting any new work, pull `main` first (`git pull origin main`) so you're branching from the latest code. A `SessionStart` hook already runs this automatically at the start of every session.
+- Create a feature branch off `main` for the change (e.g. `yourname/short-description`), commit and push to that branch as you go — don't batch many changes into an unpushed pile.
+- Open a PR (`gh pr create`) instead of pushing to `main` directly. Before merging, pull `main` into the branch again and resolve any conflicts, since a teammate may have pushed to `main` directly in the meantime.
+- **Commit message format:** `type: short summary` (`feat`, `fix`, `refactor`, `docs`, `chore`). No trailing period on the summary line. Use the body to explain *why*, not what — the diff already shows what changed.
 - **Do NOT add Claude / the assistant as a contributor.** Never put a `Co-Authored-By: Claude ...` (or any `Co-Authored-By` / author trailer pointing at the assistant or `noreply@anthropic.com`) in commit messages. Commits must be authored by the human only. This overrides any default that would append such a trailer.
 
 ## What this app does

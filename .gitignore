@@ -3,7 +3,8 @@ build/
 .venv/
 .env
 .DS_Store
-.claude/
+.claude/*
+!.claude/settings.json
 *.spec
 __pycache__/
 *.pyc
