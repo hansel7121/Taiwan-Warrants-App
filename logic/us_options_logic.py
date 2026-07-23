@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import yfinance as yf
+from statsmodels.tsa.stattools import adfuller
 
 from services import applog
 from services import db_market
@@ -293,6 +294,40 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
     }
 
 
+def _adf_test(series):
+    """Augmented Dickey-Fuller unit-root test + AR(1) half-life on the premium
+    LEVEL series. ADF null = unit root (random walk, NOT mean-reverting); a low
+    p-value (< 0.05) rejects it => the premium is stationary / mean-reverting,
+    which is the whole thesis of the ADR-basis trade. Half-life = trading days
+    for a premium deviation to decay halfway back to its mean.
+
+    Returns all fields as None (with a `reason`) for a degenerate/short series
+    rather than raising, mirroring how the regime stats fall back to 0.0.
+    """
+    x = np.asarray(series, dtype=float)
+    x = x[np.isfinite(x)]
+    out = {"stat": None, "pvalue": None, "nobs": int(len(x)), "usedlag": None,
+           "crit": {}, "half_life": None, "stationary": None, "reason": None}
+    if len(x) < 30:
+        out["reason"] = "too few observations (need >= 30)"
+        return out
+    try:
+        stat, pval, usedlag, nobs, crit, _ = adfuller(x, autolag="AIC")
+    except Exception as e:
+        out["reason"] = f"adfuller failed: {e}"
+        return out
+    out.update({"stat": float(stat), "pvalue": float(pval), "usedlag": int(usedlag),
+                "nobs": int(nobs), "crit": {k: float(v) for k, v in crit.items()},
+                "stationary": bool(pval < 0.05)})
+    # AR(1) half-life via OLS of the level on its own lag: p_t = a + phi*p_{t-1}.
+    # Mean-reversion requires 0 < phi < 1; then half_life = -ln2 / ln(phi).
+    # phi <= 0 or phi >= 1 => not mean-reverting => half_life stays None.
+    phi = float(np.polyfit(x[:-1], x[1:], 1)[0])
+    if 0.0 < phi < 1.0:
+        out["half_life"] = float(-np.log(2.0) / np.log(phi))
+    return out
+
+
 def adr_premium_stats(stock_code, period="3y"):
     """Historical ADR-vs-local premium series + regime probabilities.
 
@@ -337,6 +372,7 @@ def adr_premium_stats(stock_code, period="3y"):
         "latest_premium": float(prem.iloc[-1]),
         "mean_premium": float(prem.mean()),
         "std_premium": float(prem.std()),
+        "adf": _adf_test(prem.values),          # unit-root test: is the premium mean-reverting?
         "threshold": PREM_THRESHOLD,
         "dates": [d.strftime("%Y-%m-%d") for d in df.index],
         "premium_pct": [round(float(x) * 100, 3) for x in prem],
