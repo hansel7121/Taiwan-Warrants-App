@@ -462,6 +462,16 @@ async function removeSuggestion(id) {
   renderSuggestions();
 }
 
+async function clearSuggestions() {
+  if (!suggestionsData.length) return;
+  if (!confirm(`Delete all ${suggestionsData.length} suggestion(s)? The scanner re-populates still-live arbs on its next run.`)) return;
+  try {
+    await api("/clear_suggestions", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  } catch (e) {}
+  suggestionsData = [];
+  renderSuggestions();
+}
+
 function closePortfolioModal() { document.getElementById("portfolioModal").style.display = "none"; }
 
 async function openPortfolioDetail(id) {

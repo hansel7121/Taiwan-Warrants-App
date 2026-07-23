@@ -295,6 +295,13 @@ def remove_suggestion():
     return jsonify({"ok": True})
 
 
+@app.route("/clear_suggestions", methods=["POST"])
+@require_auth
+def clear_suggestions():
+    db_suggestions.clear_active_suggestions()
+    return jsonify({"ok": True})
+
+
 @app.route("/list_tw_option_products")
 @require_auth
 def list_tw_option_products():
