@@ -242,6 +242,61 @@ function renderHomeAttention() {
        <div class="home-atxt"><b>${it.title}</b><div class="home-m">${it.msg}</div></div></div>`).join("");
 }
 
+// ── Direct Match: run the same scan the Arb Finder does, inline ──────
+// Reuses the /match_warrant_tw_option route and arb.js's renderCompactArbTable,
+// so a row here behaves exactly like one on the Arb Finder tab (click opens the
+// Direct Match modal). Rows land in the scrollable results cell below.
+let homeArbData = [];
+
+function toggleHomeStock(el) { el.classList.toggle("on"); }
+
+function _homeSelectedStocks() {
+  return Array.from(document.querySelectorAll("#home-stocks .home-schip.on")).map(e => e.dataset.code);
+}
+
+async function runHomeScan() {
+  const status = document.getElementById("home-arb-status");
+  const results = document.getElementById("home-arb-results");
+  const btn = document.getElementById("home-scan-btn");
+  const codes = _homeSelectedStocks();
+  if (!codes.length) { status.textContent = "Pick at least one stock."; return; }
+  status.textContent = "Scanning " + codes.length + " stock" + (codes.length === 1 ? "" : "s") + "…";
+  results.innerHTML = `<p class="home-empty">Fetching warrants and options…</p>`;
+  btn.disabled = true;
+  let data;
+  try {
+    const res = await api("/match_warrant_tw_option", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        stock_codes: codes, option_type: "All",
+        max_strike_diff_pct: parseFloat(document.getElementById("home-arb-strike").value) || 3,
+        max_dte_diff: parseInt(document.getElementById("home-arb-dte").value) || 5,
+        min_volume: 0, positive_loose: false, strategy: "same_type",
+      }),
+    });
+    data = await res.json();
+  } catch (e) {
+    btn.disabled = false; status.textContent = "Error: " + e.message;
+    results.innerHTML = `<p class="home-empty">Scan failed. Try again.</p>`;
+    return;
+  }
+  btn.disabled = false;
+  if (data.error) {
+    status.textContent = "";
+    results.innerHTML = `<p class="home-empty">No matches: ${data.error}</p>`;
+    return;
+  }
+  homeArbData = data.rows || [];
+  const asOf = data.as_of ? " · as of " + new Date(data.as_of).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "";
+  status.textContent = `${homeArbData.length} matched pair${homeArbData.length === 1 ? "" : "s"}${asOf}`;
+  if (!homeArbData.length) {
+    results.innerHTML = `<p class="home-empty">No matches. Try widening the strike / DTE gaps.</p>`;
+    return;
+  }
+  // Same compact table the Arb Finder renders; rows open openDirectModal(homeArbData[i]).
+  renderCompactArbTable("home-arb-results", homeArbData, "direct", "homeArbData");
+}
+
 // ── Scanner / market freshness line ──────────────────────────────────
 function renderHomeScan() {
   const el = document.getElementById("home-scan");
