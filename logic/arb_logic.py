@@ -738,6 +738,180 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
     return rows
 
 
+def _match_butterflies(warrant_df, opt_df, opt_contract_size, positive_loose=False):
+    """Convexity (butterfly) arb: LONG two warrant wings + SHORT 2x an option body.
+
+    A same-type butterfly across three strikes K1 < x < K2 pays off >= 0 at every
+    spot yet can be entered for a NET CREDIT when the chain violates convexity
+    (the body is too dear relative to the wings). Neither Direct Match (a single
+    2-leg vertical vs its own bound) nor PCP (single-strike parity) can see this —
+    the mispricing lives in the RELATIONSHIP between two adjacent verticals, i.e.
+    the second difference of price across three strikes.
+
+    Construction (per the spec):
+      - Wings  = two LONG warrants at K1 and K2 (warrants can't be shorted, and a
+        fly's wings are long anyway). One cheapest warrant is taken per strike.
+      - Body   = SHORT 2 contracts of the single most-expensive-to-sell OPTION
+        whose strike sits strictly between the wings (K1 < x < K2). Shorting 2x
+        the body flattens both tails, so the payoff is bounded on both ends.
+      - Cover  = the short body must expire no later than the SHORTER-dated wing,
+        so both long wings are still alive to cover assignment on the body. The
+        wings then carry residual time value (>= intrinsic), so pricing the floor
+        at pure intrinsic is conservative.
+
+    Sizing is anchored to the body: short 2 contracts = 2 * opt_contract_size
+    shares, and each wing is bought to opt_contract_size underlying shares
+    (warrants_needed = opt_contract_size / exercise_ratio), so the per-underlying-
+    share weights are the classic 1 : -2 : 1.
+
+    Executable (tight) prices: BUY wings @ ask, SELL body @ bid.
+    ``positive_loose`` (DEBUG, mirrors Direct Match) prices the FAVORABLE side —
+    BUY wings @ bid, SELL body @ ask — which does not cross the spread and is not
+    tradeable; it only enlarges the candidate pool to confirm wiring.
+
+    Terminal payoff floor per underlying share (intrinsic, all same type):
+        credit_ps      = 2*body_ps - wing_lo_ps - wing_hi_ps
+        tail (call)    = 2*x - K1 - K2      (flat far-upside level)
+        tail (put)     = K1 + K2 - 2*x      (flat far-downside level)
+        worst_payoff   = min(0, tail)       (the other tail is 0)
+        guaranteed_ps  = worst_payoff + credit_ps
+    The row is a locked arb iff guaranteed_ps > 0; only such rows are emitted.
+    """
+    rows = []
+    M = int(opt_contract_size)   # underlying shares the structure is scaled to
+
+    for typ in ("Call", "Put"):
+        is_call = typ == "Call"
+        warr = warrant_df[warrant_df["type"] == typ]
+        opts = opt_df[opt_df["type"] == typ]
+        if warr.empty or opts.empty:
+            continue
+
+        # Collapse warrants to the single cheapest-to-BUY wing per strike.
+        # buy side = ask (tight) / bid (loose); price per underlying share.
+        wings = {}
+        for _, w in warr.iterrows():
+            ratio = float(w["exercise_ratio"] or 0)
+            ask = float(w["ask"] or 0) if pd.notna(w.get("ask")) else 0.0
+            bid = float(w["bid"] or 0) if pd.notna(w.get("bid")) else 0.0
+            if ratio <= 0 or ask <= 0:
+                continue
+            if positive_loose and bid <= 0:
+                continue
+            buy_raw = bid if positive_loose else ask
+            buy_ps = round(buy_raw / ratio, 6)
+            K = round(float(w["strike"]), 4)
+            cur = wings.get(K)
+            if cur is None or buy_ps < cur["buy_ps"]:
+                wings[K] = {
+                    "K": K, "buy_ps": buy_ps, "ratio": ratio,
+                    "ask": ask, "bid": bid if bid > 0 else None,
+                    "dte": int(w["days_to_expiry"]),
+                    "code": str(w["warrant_code"]), "name": w["warrant_name"],
+                    "depth_lots": int(w.get("ask_qty") or 0),
+                    "S": float(w["underlying_price"]),
+                }
+
+        # Sellable body options: sell side = bid (tight) / ask (loose).
+        bodies = []
+        for _, o in opts.iterrows():
+            bid = float(o["bid"] or 0) if pd.notna(o.get("bid")) else 0.0
+            ask = float(o["ask"] or 0) if pd.notna(o.get("ask")) else 0.0
+            sell_raw = ask if positive_loose else bid
+            if sell_raw <= 0:
+                continue
+            bodies.append({
+                "K": round(float(o["strike"]), 4), "sell_ps": round(sell_raw, 6),
+                "bid": bid if bid > 0 else None, "ask": ask if ask > 0 else None,
+                "dte": int(o["days_to_expiry"]),
+                "contract": str(o["contract"]),
+                "vol": int(o.get("volume") or 0),
+                "S": float(o["underlying_price"]),
+            })
+        if len(wings) < 2 or not bodies:
+            continue
+
+        strikes = sorted(wings)
+        for a in range(len(strikes)):
+            for b in range(a + 1, len(strikes)):
+                w1, w2 = wings[strikes[a]], wings[strikes[b]]
+                K1, K2 = w1["K"], w2["K"]
+                dte_cap = min(w1["dte"], w2["dte"])
+                # Most-expensive-to-sell body strictly between the wings, expiring
+                # no later than the shorter-dated wing.
+                cands = [bd for bd in bodies
+                         if K1 < bd["K"] < K2 and bd["dte"] <= dte_cap]
+                if not cands:
+                    continue
+                body = max(cands, key=lambda bd: bd["sell_ps"])
+                x = body["K"]
+
+                credit_ps = round(2 * body["sell_ps"] - w1["buy_ps"] - w2["buy_ps"], 6)
+                tail = (2 * x - K1 - K2) if is_call else (K1 + K2 - 2 * x)
+                worst_payoff_ps = min(0.0, tail)
+                guaranteed_ps = round(worst_payoff_ps + credit_ps, 6)
+                if guaranteed_ps <= 0:
+                    continue  # not a locked arb — skip
+
+                max_loss_ps = round(max(0.0, -guaranteed_ps), 6)
+                wing_lo_units = round(M / w1["ratio"])
+                wing_hi_units = round(M / w2["ratio"])
+                lo_lots = round(wing_lo_units / 1000, 4)
+                hi_lots = round(wing_hi_units / 1000, 4)
+                lo_fill = w1["depth_lots"] >= lo_lots
+                hi_fill = w2["depth_lots"] >= hi_lots
+                cost_basis_ps = w1["buy_ps"] + w2["buy_ps"]
+                S = w1["S"]
+
+                rows.append({
+                    "underlying_code": None,  # set by caller
+                    "type": typ,
+                    "trade": "Long Wings / Short 2x Body",
+                    "underlying_price": round(S, 4),
+                    # wings (long warrants)
+                    "wing_lo_code": w1["code"], "wing_lo_name": w1["name"],
+                    "wing_lo_strike": K1, "wing_lo_dte": w1["dte"],
+                    "wing_lo_ratio": w1["ratio"], "wing_lo_ask": round(w1["ask"], 4),
+                    "wing_lo_bid": (round(w1["bid"], 4) if w1["bid"] else None),
+                    "wing_lo_ps": round(w1["buy_ps"], 4),
+                    "wing_lo_units": wing_lo_units, "wing_lo_lots": lo_lots,
+                    "wing_lo_depth_lots": w1["depth_lots"], "wing_lo_fillable": bool(lo_fill),
+                    "wing_hi_code": w2["code"], "wing_hi_name": w2["name"],
+                    "wing_hi_strike": K2, "wing_hi_dte": w2["dte"],
+                    "wing_hi_ratio": w2["ratio"], "wing_hi_ask": round(w2["ask"], 4),
+                    "wing_hi_bid": (round(w2["bid"], 4) if w2["bid"] else None),
+                    "wing_hi_ps": round(w2["buy_ps"], 4),
+                    "wing_hi_units": wing_hi_units, "wing_hi_lots": hi_lots,
+                    "wing_hi_depth_lots": w2["depth_lots"], "wing_hi_fillable": bool(hi_fill),
+                    # body (short 2 option contracts)
+                    "mid_contract": body["contract"], "mid_strike": x,
+                    "mid_dte": body["dte"], "mid_contract_size": M,
+                    "mid_bid": body["bid"], "mid_ask": body["ask"],
+                    "mid_ps": round(body["sell_ps"], 4), "mid_contracts": 2,
+                    "mid_volume": body["vol"],
+                    # economics (per underlying share)
+                    "credit_ps": round(credit_ps, 4),
+                    "tail_ps": round(float(tail), 4),
+                    "worst_payoff_ps": round(worst_payoff_ps, 4),
+                    "guaranteed_ps": round(guaranteed_ps, 4),
+                    "max_loss_per_share": max_loss_ps,
+                    # totals (NT$; structure scaled to M underlying shares)
+                    "net_credit": round(credit_ps * M, 0),
+                    "guaranteed_profit": round(guaranteed_ps * M, 0),
+                    "max_loss": round(max_loss_ps * M, 0),
+                    "riskless": True,
+                    "fillable": bool(lo_fill and hi_fill),
+                    "board_lots": round(lo_lots + hi_lots, 4),
+                    # headline edge for the compact table
+                    "price_diff": round(guaranteed_ps, 4),
+                    "price_diff_pct": (round(guaranteed_ps / cost_basis_ps * 100, 2)
+                                       if cost_basis_ps > 0 else None),
+                    "loose_prices": bool(positive_loose),
+                })
+
+    return rows
+
+
 def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
                   positive_loose=False, min_volume=0, strategy="same_type"):
     all_rows = []
@@ -764,9 +938,10 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
             applog.log("ARB", f"{code} {pos} skipped: {err or 'no warrants'}")
             continue
 
-        # PCP pairs a warrant with the OPPOSITE-type option, so the option
-        # fetch must include both types regardless of the warrant filter.
-        opt_type_fetch = "All" if strategy == "pcp" else option_type
+        # PCP pairs a warrant with the OPPOSITE-type option; butterfly pairs each
+        # type against its own body option. Both want the full chain regardless of
+        # the warrant filter, so fetch every type and filter downstream.
+        opt_type_fetch = "All" if strategy in ("pcp", "butterfly") else option_type
         opt_df, opt_err, _meta = options_logic.read_tw_option([code], opt_type_fetch, min_days=1, compute_iv=False)
         if opt_df.empty:
             errors.append(f"{code}: {opt_err or 'no options'}")
@@ -786,11 +961,18 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
                 warrant_df, opt_df, opt_contract_size, max_strike_diff_pct, max_dte_diff,
                 positive_loose=positive_loose,
             )
+        elif strategy == "butterfly":
+            rows = _match_butterflies(
+                warrant_df, opt_df, opt_contract_size, positive_loose=positive_loose,
+            )
         else:
             rows = _match_warrants_to_options(
                 warrant_df, opt_df, opt_contract_size, max_strike_diff_pct, max_dte_diff,
                 positive_loose=positive_loose,
             )
+        for r in rows:
+            if r.get("underlying_code") is None:
+                r["underlying_code"] = code
         applog.log(
             "ARB",
             f"{code} {pos} warrants={len(warrant_df)} options={len(opt_df)} "

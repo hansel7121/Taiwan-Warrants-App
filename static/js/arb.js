@@ -661,10 +661,16 @@ async function fetchArbData() {
     return;
   }
   currentArbData = data.rows;
-  const pcp = document.getElementById("arbStrategy").value === "pcp";
-  document.getElementById("arb-status").textContent = (pcp
-    ? `${data.count} PCP pairs — executable: long warrant / short synthetic; non-executable (debug): short warrant / long synthetic`
-    : `${data.count} matched pairs — positive price_diff: buy warrant / sell option; negative: buy option / sell warrant`) + asOfLabel(data);
+  const strat = document.getElementById("arbStrategy").value;
+  const looseTag = document.getElementById("arbPositiveLoose").checked
+    ? " · ⚠ LOOSE prices (favorable side, NOT executable — debug)" : "";
+  const statusTxt =
+    strat === "pcp"
+      ? `${data.count} PCP pairs — executable: long warrant / short synthetic; non-executable (debug): short warrant / long synthetic`
+    : strat === "butterfly"
+      ? `${data.count} butterfly arbs — long two warrant wings + short 2× an option body between them; every row is a locked convexity arb (guaranteed floor > 0)`
+      : `${data.count} matched pairs — positive price_diff: buy warrant / sell option; negative: buy option / sell warrant`;
+  document.getElementById("arb-status").textContent = statusTxt + looseTag + asOfLabel(data);
   document.getElementById("arbDownloadBtn").style.display = "inline-block";
   renderArbTable(currentArbData);
 }
@@ -763,7 +769,62 @@ function renderCompactArbTable(containerId, rows, mode, arrName) {
 }
 
 function renderArbTable(rows) {
+  if (document.getElementById("arbStrategy").value === "butterfly") {
+    renderButterflyTable("arb-tableContainer", rows, "currentArbData");
+    return;
+  }
   renderCompactArbTable("arb-tableContainer", rows, "direct", "currentArbData");
+}
+
+// ── Butterfly (convexity) result table ─────────────────────────────────
+// Three legs (two long warrant wings + short 2x an option body), so it needs
+// its own columns rather than the shared 2-leg compact renderer. Click a row
+// for the full 3-leg breakdown + payoff floor (openButterflyModal).
+function renderButterflyTable(containerId, rows, arrName) {
+  const c = document.getElementById(containerId);
+  if (!rows.length) {
+    c.innerHTML = "<p style='padding:16px;color:var(--muted)'>No butterfly arbs found. Convexity breaks are rare in liquid chains — try more underlyings, or enable Loose prices (debug) to check wiring.</p>";
+    return;
+  }
+  const th = "padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;border-bottom:1px solid var(--border);text-align:left";
+  const td = "padding:7px 10px;border-bottom:1px solid var(--border);font-size:12px;vertical-align:top";
+  const sub = "color:var(--muted);font-size:11px";
+  let h = `<table style="width:100%;border-collapse:collapse"><thead><tr>
+    <th style="${th}">Type</th><th style="${th}">Long wings (warrants)</th>
+    <th style="${th}">Short body (option ×2)</th>
+    <th style="${th};text-align:right">Guaranteed edge</th>
+    <th style="${th};text-align:right">Size</th>
+  </tr></thead><tbody>`;
+
+  rows.forEach((r, i) => {
+    const tCls = r.type === "Call" ? "call" : "put";
+    const dbg = r.loose_prices
+      ? `<div style="${sub};color:var(--call)">loose (debug)</div>` : "";
+    const fillTag = r.fillable == null ? ""
+      : r.fillable ? `<span class="put" style="font-weight:600">✓</span>`
+                   : `<span class="call" style="font-weight:600">✗</span>`;
+    h += `<tr style="cursor:pointer" onclick="openButterflyModal(${arrName}[${i}])" title="Click for the full breakdown">
+      <td style="${td}"><span class="${tCls}" style="font-weight:600">${r.type}</span>${dbg}</td>
+      <td style="${td}">
+        <div style="font-weight:600;color:${MARK_LONG}">K${_n(r.wing_lo_strike)} + K${_n(r.wing_hi_strike)}</div>
+        <div style="${sub}">${r.wing_lo_code} · ${r.wing_hi_code}</div>
+        <div style="${sub}">${r.wing_lo_dte}d / ${r.wing_hi_dte}d</div>
+      </td>
+      <td style="${td}">
+        <div style="font-weight:600;color:${MARK_SHORT}">2× K${_n(r.mid_strike)}</div>
+        <div style="${sub}">${r.mid_contract} · ${r.mid_dte}d</div>
+      </td>
+      <td style="${td};text-align:right">
+        <div class="put" style="font-weight:700">+${_n(r.guaranteed_profit, 0)} NT$</div>
+        <div class="${sub}">floor ${_n(r.guaranteed_ps, 4)}/sh${r.price_diff_pct != null ? " · +" + _n(r.price_diff_pct) + "%" : ""}</div>
+        <div class="${sub}">credit ${_n(r.net_credit, 0)} NT$</div>
+      </td>
+      <td style="${td};text-align:right">
+        <div style="font-weight:600;${r.fillable === false ? "color:var(--call)" : ""}">${_n(r.board_lots, 3)} 張 ${fillTag}</div>
+        <div style="${sub}">+ 2 口 option</div>
+      </td></tr>`;
+  });
+  c.innerHTML = h + "</tbody></table>";
 }
 
 function sortArbBy(key, asc) {
@@ -1407,6 +1468,8 @@ function setPcpChartMode(mode) {
   // Highlight the active button
   const ex = document.getElementById("pcp-mode-exact");
   const wh = document.getElementById("pcp-mode-whole");
+  // The butterfly modal hides these (no whole-張 toggle); restore for 2-leg modes.
+  ex.style.display = ""; wh.style.display = "";
   ex.style.fontWeight = mode === "exact" ? "600" : "400";
   wh.style.fontWeight = mode === "whole" ? "600" : "400";
   ex.style.borderColor = mode === "exact" ? "var(--accent)" : "";
@@ -1489,6 +1552,7 @@ function renderGreeks(row) {
 }
 
 function renderPcpChart(dte) {
+  if (_pcpMode === "butterfly") return renderButterflyChart(dte);
   const row = _pcpRow;
   const contractSize = _contractSize;   // option leg controls exactly this many shares
   const S0 = row.underlying_price;
@@ -1590,6 +1654,206 @@ function renderPcpChart(dte) {
     font:{color:"#8b90a0",family:"Inter,system-ui,sans-serif",size:12},
     xaxis:{title:`Spot Price (NT$) — ${row.warrant_name}`,gridcolor:"#252836",zerolinecolor:"#252836",tickformat:","},
     yaxis:{title:_pcpChartMode==="whole"?`P&L (NT$, whole-張 hedge)`:`P&L (NT$, exact ${contractSize.toLocaleString()}-share hedge)`,gridcolor:"#252836",zerolinecolor:"#252836",tickformat:"+,"},
+    legend:{bgcolor:"#13161f",bordercolor:"#252836",borderwidth:1},
+    margin:{l:80,r:20,t:20,b:60},
+    hovermode:"x unified",
+  },{responsive:true});
+}
+
+// ── Butterfly (convexity) modal ────────────────────────────────────────
+// Reuses the pcpModal DOM (legs table + payoff chart) but with THREE legs:
+// two long warrant wings + a short body (2 option contracts). The payoff floor
+// is drawn from pure intrinsic on all three legs (conservative — the wings
+// outlive the body and still carry time value at the body's expiry).
+let _flyLegs = null;   // [{K, shares, entry_ps, sign}] for the intrinsic payoff
+
+function openButterflyModal(row) {
+  _pcpRow = row;
+  _pcpMode = "butterfly";
+  _pcpEntry = null;
+  const isCall = row.type === "Call";
+  const M = row.mid_contract_size ?? 2000;   // structure scaled to M underlying shares
+  _contractSize = M;
+
+  document.getElementById("pcp-modal-title").textContent =
+    `Butterfly (${row.type}) — K${row.wing_lo_strike} / ${row.mid_strike} / ${row.wing_hi_strike}  —  ${row.underlying_code || ""}`;
+
+  document.getElementById("pcp-legs-caption").innerHTML =
+    `Trade Legs (structure scaled to ${M.toLocaleString()} underlying shares = 2 option contracts short)`
+    + (row.loose_prices ? ` <span class="call" style="font-weight:700">— LOOSE prices (favorable side, NOT executable; debug only)</span>` : "")
+    + `<br><span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted)">Long two warrant wings + short 2× the option body between them. Body expires ≤ the shorter wing, so both wings still cover it. Payoff floor priced at intrinsic (conservative).</span>`;
+
+  // ── Trade legs ──────────────────────────────────────────────────
+  // Buy each wing to M shares (wing_ps already carries the executable/loose
+  // side); sell 2 body contracts (2·M shares) at mid_ps.
+  const wLo = row.wing_lo_units, wHi = row.wing_hi_units;
+  // Warrant leg price shown per UNIT (raw quote), qty in units — so price×qty = cf,
+  // matching the Direct Match modal. Loose buys the wing at its bid (favorable).
+  const loRaw = row.loose_prices ? (row.wing_lo_bid ?? row.wing_lo_ask) : row.wing_lo_ask;
+  const hiRaw = row.loose_prices ? (row.wing_hi_bid ?? row.wing_hi_ask) : row.wing_hi_ask;
+  const loLbl = `${(row.wing_lo_lots).toLocaleString(undefined,{maximumFractionDigits:3})} 張 (${wLo.toLocaleString()} units) × ${row.wing_lo_code} (${row.type.toLowerCase()} warrant, K${row.wing_lo_strike})`;
+  const hiLbl = `${(row.wing_hi_lots).toLocaleString(undefined,{maximumFractionDigits:3})} 張 (${wHi.toLocaleString()} units) × ${row.wing_hi_code} (${row.type.toLowerCase()} warrant, K${row.wing_hi_strike})`;
+  const bodyLbl = `2 × ${row.mid_contract} ${row.type.toLowerCase()} option (K${row.mid_strike}, ×${M.toLocaleString()} sh each)`;
+  const legs = [
+    { action:"BUY",  instrument:loLbl,   qty:wLo,   price:loRaw,      cf:-(wLo*loRaw) },
+    { action:"BUY",  instrument:hiLbl,   qty:wHi,   price:hiRaw,      cf:-(wHi*hiRaw) },
+    { action:"SELL", instrument:bodyLbl, qty:2*M,   price:row.mid_ps, cf: 2*M*row.mid_ps },
+  ];
+  const netCf = legs.reduce((s,l)=>s+l.cf, 0);
+  _pcpLegs = legs; _pcpNetCf = netCf;
+
+  const actionColor = a => a==="BUY" ? "var(--put)" : "var(--call)";
+  let tbody = "";
+  legs.forEach(l=>{
+    tbody+=`<tr>
+      <td style="padding:6px 10px;border-bottom:1px solid var(--border);color:${actionColor(l.action)};font-weight:600">${l.action}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid var(--border);color:var(--text)">${l.instrument}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid var(--border);color:var(--text);text-align:right">${Number(l.qty).toLocaleString()}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid var(--border);color:var(--text);text-align:right">${Number(l.price).toLocaleString(undefined,{maximumFractionDigits:4})}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid var(--border);color:${l.cf>=0?"var(--put)":"var(--call)"};text-align:right;font-variant-numeric:tabular-nums">${l.cf>=0?"+":""}${Math.round(l.cf).toLocaleString()}</td>
+    </tr>`;
+  });
+  document.getElementById("pcp-legs-body").innerHTML = tbody;
+  document.getElementById("pcp-legs-foot").innerHTML = `
+    <tr>
+      <td colspan="4" style="padding:8px 10px;font-weight:600;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.4px">Net entry credit</td>
+      <td style="padding:8px 10px;font-weight:700;font-size:14px;color:${netCf>=0?"var(--put)":"var(--call)"};text-align:right;font-variant-numeric:tabular-nums">${netCf>=0?"+":""}${Math.round(netCf).toLocaleString()} NT$</td>
+    </tr>`;
+
+  // ── Orderbook depth — three legs ────────────────────────────────
+  const depthPanel = document.getElementById("pcp-depth-panel");
+  const wingsOk = row.wing_lo_fillable && row.wing_hi_fillable;
+  depthPanel.style.display = "block";
+  depthPanel.style.background = wingsOk ? "rgba(34,197,94,.08)" : "rgba(239,68,68,.08)";
+  depthPanel.style.border = `1px solid ${wingsOk ? "rgba(34,197,94,.35)" : "rgba(239,68,68,.35)"}`;
+  const wingLine = (lbl, lots, depth, ok) =>
+    `<div><b>${lbl}:</b> <b style="color:${ok?"var(--put)":"var(--call)"}">${ok?"✓":"✗"} ${depth.toLocaleString()} 張</b> resting @ best ask, need <b>${lots.toLocaleString(undefined,{maximumFractionDigits:3})} 張</b></div>`;
+  depthPanel.innerHTML =
+    `<div style="font-weight:600;text-transform:uppercase;letter-spacing:.3px;font-size:11px;color:var(--muted);margin-bottom:4px">Orderbook depth — three legs</div>`
+    + wingLine(`Wing K${row.wing_lo_strike}`, row.wing_lo_lots, row.wing_lo_depth_lots, row.wing_lo_fillable)
+    + wingLine(`Wing K${row.wing_hi_strike}`, row.wing_hi_lots, row.wing_hi_depth_lots, row.wing_hi_fillable)
+    + `<div style="margin-top:2px"><b>Body K${row.mid_strike} (short 2 口):</b> <span style="color:var(--muted)">vol ${(row.mid_volume||0).toLocaleString()} (proxy — best-level size not tracked on the option leg)</span></div>`
+    + `<div style="color:var(--muted);font-size:11px;margin-top:4px">Warrant depth = CMoney best level (張). The short body must be borrowable/writable at its bid; a thin body bid is the usual reason this edge won't fill.</div>`;
+
+  // Greeks panel: a butterfly between the wings is ~delta-flat and defined-risk;
+  // skip the 2-leg greeks engine (it assumes one warrant + one option).
+  document.getElementById("pcp-greeks-panel").style.display = "none";
+
+  // ── Comparison table (three legs + floor) ───────────────────────
+  const thS = "padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--border)";
+  const tdL = "padding:7px 10px;border-bottom:1px solid var(--border);color:var(--text)";
+  const tdR = tdL+";text-align:right;font-variant-numeric:tabular-nums";
+  const fmt = (v,d=4)=> v==null?"—":Number(v).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
+  const legRow = (lbl, side, K, dte, ps, mult) =>
+    `<tr><td style="${tdL};color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.3px">${lbl}</td>
+       <td style="${tdL}"><span class="${isCall?'call':'put'}">${row.type}</span></td>
+       <td style="${tdR}">${Number(K).toLocaleString()}</td>
+       <td style="${tdR}">${dte}d</td>
+       <td style="${tdR}">${side}</td>
+       <td style="${tdR}">${fmt(ps)}</td>
+       <td style="${tdR}">${(mult>=0?"+":"")+Math.round(mult).toLocaleString()}</td></tr>`;
+  document.getElementById("pcp-compare-table").innerHTML = `
+    <thead><tr>
+      <th style="${thS};text-align:left"></th><th style="${thS};text-align:left">Type</th>
+      <th style="${thS};text-align:right">Strike</th><th style="${thS};text-align:right">DTE</th>
+      <th style="${thS};text-align:right">Side</th><th style="${thS};text-align:right">Price / share</th>
+      <th style="${thS};text-align:right">Cash (×${M.toLocaleString()})</th>
+    </tr></thead>
+    <tbody>
+      ${legRow("Wing low",  "Long",     row.wing_lo_strike, row.wing_lo_dte, row.wing_lo_ps, -M*row.wing_lo_ps)}
+      ${legRow("Body ×2",   "Short 2×", row.mid_strike,     row.mid_dte,     row.mid_ps,      2*M*row.mid_ps)}
+      ${legRow("Wing high", "Long",     row.wing_hi_strike, row.wing_hi_dte, row.wing_hi_ps, -M*row.wing_hi_ps)}
+      <tr style="background:var(--surface)">
+        <td style="${tdL};color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.3px">Guaranteed floor</td>
+        <td style="${tdL}" colspan="4"><span style="color:var(--muted)">worst-case payoff ${fmt(row.worst_payoff_ps)} + credit ${fmt(row.credit_ps)} /sh</span></td>
+        <td style="${tdR};color:var(--put);font-weight:700">+${fmt(row.guaranteed_ps)}</td>
+        <td style="${tdR};color:var(--put);font-weight:700">+${Math.round(row.guaranteed_profit).toLocaleString()}</td>
+      </tr>
+    </tbody>`;
+
+  // ── Payoff-leg model for the chart (intrinsic, all same type) ────
+  _flyLegs = [
+    { K: row.wing_lo_strike, shares: M,     entry_ps: row.wing_lo_ps, sign: +1 },
+    { K: row.wing_hi_strike, shares: M,     entry_ps: row.wing_hi_ps, sign: +1 },
+    { K: row.mid_strike,     shares: 2 * M, entry_ps: row.mid_ps,      sign: -1 },
+  ];
+
+  // ── Slider (body expiry) + chart-mode buttons (hidden for fly) ──
+  const slider = document.getElementById("pcp-dte-slider");
+  slider.max = row.mid_dte; slider.value = row.mid_dte;
+  document.getElementById("pcp-dte-label").textContent = `${row.mid_dte} days`;
+  document.getElementById("pcp-mode-exact").style.display = "none";
+  document.getElementById("pcp-mode-whole").style.display = "none";
+  document.getElementById("pcp-mode-note").textContent =
+    `Payoff at the body's expiry (${row.mid_dte}d), all legs at intrinsic. Wings outlive the body, so their real value is ≥ this — the curve is a conservative floor.`;
+
+  // Hide the US/ADR premium sections.
+  document.getElementById("us-premium-section").style.display = "none";
+  document.getElementById("us-scenario-section").style.display = "none";
+
+  // Portfolio entry of a 3-leg structure isn't wired — disable Enter Trade.
+  const enterBtn = document.getElementById("pcp-enter-trade");
+  enterBtn.disabled = true;
+  enterBtn.style.opacity = "0.4";
+  enterBtn.style.cursor = "not-allowed";
+  enterBtn.title = "Butterfly (3-leg) entry not yet supported in Portfolio — analysis view only";
+
+  renderButterflyChart(row.mid_dte);
+  document.getElementById("pcpModal").style.display = "block";
+}
+
+function renderButterflyChart() {
+  const row = _pcpRow;
+  const isCall = row.type === "Call";
+  const S0 = row.underlying_price;
+  const intrinsic = (S, K) => isCall ? Math.max(0, S - K) : Math.max(0, K - S);
+  // Terminal P&L across spot: each leg settled at intrinsic vs its entry price.
+  //   long : shares × (intrinsic − entry);  short: shares × (entry − intrinsic)
+  const pnlAt = (S) => _flyLegs.reduce((sum, lg) =>
+    sum + lg.sign * lg.shares * (intrinsic(S, lg.K) - lg.entry_ps), 0);
+
+  const K1 = row.wing_lo_strike, x = row.mid_strike, K2 = row.wing_hi_strike;
+  const anchorLo = Math.min(S0, K1), anchorHi = Math.max(S0, K2);
+  const pad = Math.max((anchorHi - anchorLo) * 0.25, S0 * 0.15);
+  const lo = Math.max(0, anchorLo - pad), hi = anchorHi + pad;
+
+  const spots = [], pnls = [];
+  const n = 240;
+  for (let i=0; i<=n; i++) {
+    const S = lo + (hi-lo)*i/n;
+    spots.push(parseFloat(S.toFixed(2)));
+    pnls.push(parseFloat(pnlAt(S).toFixed(0)));
+  }
+
+  const zeroLine = { x:[lo,hi], y:[0,0], mode:"lines",
+    line:{color:"rgba(255,255,255,0.15)",dash:"dash",width:1}, showlegend:false, hoverinfo:"skip" };
+  const expiryTrace = { x:spots, y:pnls, mode:"lines", name:"P&L at body expiry",
+    line:{color:"#4ade80",width:2.5},
+    hovertemplate:"Spot: %{x:,.0f}<br>P&L: %{y:+,.0f} NT$<extra></extra>" };
+  const spotPnl = parseFloat(pnlAt(S0).toFixed(0));
+  const spotTrace = { x:[S0], y:[spotPnl], mode:"markers+text", name:"Current spot",
+    marker:{color:"white",size:7,symbol:"circle"},
+    text:[`${spotPnl>=0?"+":""}${spotPnl.toLocaleString()}`],
+    textposition:"top center", textfont:{color:"white",size:11},
+    hovertemplate:"Current spot: %{x:,.0f}<br>P&L: %{y:+,.0f} NT$<extra></extra>" };
+  // Floor line — the guaranteed minimum P&L (locks the arb visually).
+  const floorY = Math.round(row.guaranteed_profit);
+  const floorLine = { x:[lo,hi], y:[floorY,floorY], mode:"lines", name:"Guaranteed floor",
+    line:{color:"#fbbf24",dash:"dot",width:1.5},
+    hovertemplate:`Guaranteed floor: +${floorY.toLocaleString()} NT$<extra></extra>` };
+
+  const _mk = payoffStrikeMarks([
+    { K: K1, label: "Long W", dir: +1 },
+    { K: x,  label: "Short 2× O", dir: -1 },
+    { K: K2, label: "Long W", dir: +1 },
+  ], S0);
+
+  Plotly.react("pcp-pnl-chart", [zeroLine, floorLine, expiryTrace, spotTrace], {
+    shapes: _mk.shapes, annotations: _mk.annotations,
+    paper_bgcolor:"#13161f", plot_bgcolor:"#0d0f16",
+    font:{color:"#8b90a0",family:"Inter,system-ui,sans-serif",size:12},
+    xaxis:{title:`Spot Price (NT$) — ${row.underlying_code || ""}`,gridcolor:"#252836",zerolinecolor:"#252836",tickformat:","},
+    yaxis:{title:`P&L (NT$, ${(row.mid_contract_size||2000).toLocaleString()}-share structure)`,gridcolor:"#252836",zerolinecolor:"#252836",tickformat:"+,"},
     legend:{bgcolor:"#13161f",bordercolor:"#252836",borderwidth:1},
     margin:{l:80,r:20,t:20,b:60},
     hovermode:"x unified",

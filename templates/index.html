@@ -287,9 +287,10 @@
                 </select>
               </div>
               <label>Strategy
-                <select id="arbStrategy" onchange="onArbStrategyChange()" title="Call-Call/Put-Put: match warrant to same-type option. Put-Call Parity: price a warrant against the synthetic built from the opposite-type option + underlying + risk-free bond.">
+                <select id="arbStrategy" onchange="onArbStrategyChange()" title="Call-Call/Put-Put: match warrant to same-type option. Put-Call Parity: price a warrant against the synthetic built from the opposite-type option + underlying + risk-free bond. Butterfly: long two warrant wings + short 2x an option body between them — catches convexity breaks a 2-leg vertical can't see.">
                   <option value="same_type">Call-Call / Put-Put</option>
                   <option value="pcp">Put-Call Parity</option>
+                  <option value="butterfly">Butterfly (Convexity)</option>
                 </select>
               </label>
               <label>Option Type
