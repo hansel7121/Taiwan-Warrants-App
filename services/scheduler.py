@@ -12,6 +12,7 @@ market-hours gate. The scheduler registers them wrapped in _job (logging) and,
 for the three intraday data jobs, _gated (skip when the relevant market is
 closed) on a wall-clock 15-minute cron grid.
 """
+import json
 import threading
 import time
 import traceback
@@ -25,18 +26,20 @@ from apscheduler.triggers.cron import CronTrigger
 
 from services import memlog
 from services import db_market
+from services import db_products
+from services import db_suggestions
+from logic import arb_logic
 from logic import warrant_logic
 from logic import options_logic
 from logic import us_options_logic
 
-# Mirror of DEFAULT_STOCKS in templates/index.html — keep the two in sync.
-DEFAULT_WARRANT_STOCKS = [
-    "2330", "2317", "2454", "2382", "3231", "6669", "2376", "3017", "3324",
-    "2308", "3711", "3034", "2379", "3661", "3443", "2603", "3008", "2881",
-    "2882", "3037", "2303", "2886",
-]
-TW_OPTION_CODES = list(options_logic.COMMODITY_MAP)
-US_OPTION_CODES = list(us_options_logic.US_ADR_MAP)
+# Reuse the Find Arb tab's own defaults (templates/index.html #arbMaxStrikePct
+# / #arbMaxDteDiff), same values app.py's /match_warrant_tw_option route falls
+# back to — the suggest job should surface exactly what a user would see
+# clicking "Warrant vs TW Option" with the page's own defaults, not an
+# invented threshold.
+SUGGEST_MAX_STRIKE_DIFF_PCT = 3.0
+SUGGEST_MAX_DTE_DIFF = 5
 
 # Superset-with-IV column order the writers align each option leg to before the
 # snapshot write. These MUST match the data columns (minus batch_id) of the
@@ -63,7 +66,6 @@ US_OPTION_INT_COLS = ["days_to_expiry", "volume", "oi"]
 
 REFRESH_MINUTES = 15
 CMKEY_MINUTES = 45
-UNIVERSE_HOURS = 24
 FORCE_DEBOUNCE_SECONDS = 60
 
 _TZ_TAIPEI = ZoneInfo("Asia/Taipei")
@@ -71,6 +73,7 @@ _TZ_NY = ZoneInfo("America/New_York")
 
 _scheduler = None
 _start_lock = threading.Lock()
+_force_refresh_lock = threading.Lock()  # guards the force_refresh debounce check+set
 _last_run: dict = {}  # job name -> epoch of last completed run
 
 
@@ -87,22 +90,16 @@ def _coerce_int_cols(df, cols):
     return df
 
 
-def _custom_stock_codes():
-    """Union of every user's custom-stock codes, from Supabase.
-
-    Returns [] on any failure (incl. unconfigured Supabase) so the refresh
-    jobs keep running against the default universe.
-    """
-    try:
-        from services import db
-        return db.all_custom_stock_codes()
-    except Exception as e:
-        print(f"SCHED: custom stock codes unavailable: {e}", flush=True)
-        return []
-
-
 def warrant_universe():
-    return sorted(set(DEFAULT_WARRANT_STOCKS) | set(_custom_stock_codes()))
+    return [row["code"] for row in db_products.list_warrant_stocks()]
+
+
+def tw_option_codes():
+    return [row["code"] for row in db_products.list_tw_option_products()]
+
+
+def us_option_codes():
+    return [row["code"] for row in db_products.list_us_option_products()]
 
 
 # ---------------------------------------------------------------------------
@@ -154,11 +151,11 @@ def is_market_open(market, now=None):
 # Core writers — plain fetch + align + write_snapshot. No gate, no _job wrapper;
 # callable directly by force_refresh and the validation harness.
 # ---------------------------------------------------------------------------
-def refresh_cmkey():
+def sync_cmkey():
     """Fetch the CMoney key and persist it to Supabase (cmoney_key store)."""
-    key = warrant_logic.refresh_cmoney_key()
+    key = warrant_logic.scrape_cmoney_key()
     if not key:
-        # refresh_cmoney_key returns the fetched string, but fall back to the
+        # scrape_cmoney_key returns the fetched string, but fall back to the
         # accessor in case a future refactor changes its return.
         key = warrant_logic.get_cmoney_key()
     if key:
@@ -168,9 +165,9 @@ def refresh_cmkey():
         print("SCHED: cmkey empty, not persisted", flush=True)
 
 
-def refresh_universe():
+def sync_universe():
     """Re-scrape the ISIN listing (in-memory swap) then snapshot the universe."""
-    warrant_logic.refresh_warrant_universe()
+    warrant_logic.scrape_twse_universe()
     rows = warrant_logic.universe_rows()
     if not rows:
         print("SCHED: universe empty, skipping write", flush=True)
@@ -179,9 +176,9 @@ def refresh_universe():
     db_market.write_snapshot("warrant_universe", df)
 
 
-def refresh_warrants():
+def sync_warrant():
     """Fetch the full warrant superset (IV computed, non-converged kept) + write."""
-    df, err, meta = warrant_logic.fetch_warrants(
+    df, err, meta = warrant_logic.scrape_cmoney_warrant(
         warrant_universe(), "All", 0, 365, 0.0, 1e9, 0,
         compute_iv=True, keep_noniv=True,
     )
@@ -191,12 +188,12 @@ def refresh_warrants():
     db_market.write_snapshot("warrants", df)
 
 
-def refresh_tw_options():
+def sync_tw_option():
     """Fetch each TW option product (superset-with-IV), align, write one batch."""
     frames = []
-    for code in TW_OPTION_CODES:
+    for code in tw_option_codes():
         try:
-            df = options_logic.fetch_options(
+            df, err, _meta = options_logic.scrape_tw_option(
                 [code], "All", min_days=0, max_days=365,
                 compute_iv=True, keep_noniv=True,
             )
@@ -205,6 +202,8 @@ def refresh_tw_options():
             print(f"SCHED: tw_option {code} failed: {e}", flush=True)
             continue
         if df is None or df.empty:
+            if err:
+                print(f"SCHED: tw_option {code} empty ({err})", flush=True)
             continue
         df = df.copy()
         df["stock_code"] = code
@@ -220,12 +219,12 @@ def refresh_tw_options():
     db_market.write_snapshot("tw_options", out)
 
 
-def refresh_us_options():
+def sync_us_option():
     """Fetch each US ADR option chain (superset-with-IV), align, write one batch."""
     frames = []
-    for code in US_OPTION_CODES:
+    for code in us_option_codes():
         try:
-            df = us_options_logic.fetch_us_options(
+            df, err, _meta = us_options_logic.scrape_yfinance_us_option(
                 code, "All", min_days=1, max_days=730,
                 compute_iv=True, keep_noniv=True,
             )
@@ -233,6 +232,8 @@ def refresh_us_options():
             print(f"SCHED: us_option {code} failed: {e}", flush=True)
             continue
         if df is None or df.empty:
+            if err:
+                print(f"SCHED: us_option {code} empty ({err})", flush=True)
             continue
         df = df.copy()
         df["stock_code"] = code
@@ -243,6 +244,81 @@ def refresh_us_options():
     out = pd.concat(frames, ignore_index=True).reindex(columns=US_OPTION_COLS)
     out = _coerce_int_cols(out, US_OPTION_INT_COLS)
     db_market.write_snapshot("us_options", out)
+
+
+# Direct tab's two strategies -> arb_suggestions arb_type tags, matching the
+# exact mode strings static/js/arb.js already passes to openArbModal(row, mode)
+# at the Find Arb tab (openArbModal(row, "direct") / (row, "pcp")) so the
+# Suggestions sub-tab can route a stored row into that same modal unchanged.
+_SUGGEST_STRATEGIES = (("direct_same_type", "same_type"), ("direct_pcp", "pcp"))
+
+
+def sync_suggestions():
+    """Scan the Direct tab's two strategies, persist positive-edge rows as suggestions.
+
+    Only match_warrant_tw_option (not the US-option or TW/US cross-market
+    matchers) — both legs must be TW-listed so the suggest job's own
+    tw_equity gate (services/scheduler.py:start) actually bounds when a
+    suggested trade is executable. Every row _match_warrants_to_options /
+    _match_warrants_pcp returns is already profitable per its own
+    direction-specific sign convention (that's what "match" means for these
+    functions — same as what the Find Arb tab itself displays); the PCP
+    matcher additionally emits NON-EXECUTABLE debug rows (short-warrant side,
+    executable=False) that must be dropped here since warrants can't be
+    shorted.
+    """
+    codes = sorted(set(warrant_universe()) & set(tw_option_codes()))
+    if not codes:
+        print("SCHED: suggestions: no warrant/tw_option overlap, skipping", flush=True)
+        return
+
+    for arb_type, strategy in _SUGGEST_STRATEGIES:
+        try:
+            df = arb_logic.match_warrant_tw_option(
+                codes, "All", SUGGEST_MAX_STRIKE_DIFF_PCT, SUGGEST_MAX_DTE_DIFF,
+                positive_loose=False, min_volume=0, strategy=strategy,
+            )
+        except RuntimeError as e:
+            print(f"SCHED: suggestions {arb_type} no matches: {e}", flush=True)
+            db_suggestions.mark_stale(arb_type, [])
+            continue
+
+        if strategy == "pcp" and "executable" in df.columns:
+            df = df[df["executable"]]
+        if df.empty:
+            print(f"SCHED: suggestions {arb_type} 0 active (no executable rows)", flush=True)
+            db_suggestions.mark_stale(arb_type, [])
+            continue
+
+        # Each (warrant_code, option_contract) pair yields at most one row per
+        # arb_type: same_type dedupes pairs across its two directions
+        # (arb_logic.py's `seen` set) and pcp keeps only the single executable
+        # side per pair — so this pair is already a stable, deterministic
+        # opportunity identity; no need to also encode strike/expiry/direction.
+        recs = json.loads(df.to_json(orient="records"))
+        rows = []
+        touched_ids = []
+        for row in recs:
+            sug_id = f"{arb_type}:{row['warrant_code']}:{row['option_contract']}"
+            touched_ids.append(sug_id)
+            rows.append({
+                "id": sug_id,
+                "arb_type": arb_type,
+                "legs": row,
+                "price_diff": row["price_diff"],
+                "price_diff_pct": row.get("price_diff_pct"),
+                # The suggest job itself only runs while tw_equity is open
+                # (see the "tw_equity" gate at registration below), and
+                # opt_df was already filtered to is_live rows before either
+                # matcher ran — so both legs are live for every row this job
+                # ever produces. Kept as a field (not hardcoded away) since a
+                # future relaxation of the job's own gate should make this
+                # meaningful again rather than requiring a schema change.
+                "legs_status": {"warrant": "live", "option": "live"},
+            })
+        db_suggestions.upsert_suggestions(rows)
+        db_suggestions.mark_stale(arb_type, touched_ids)
+        print(f"SCHED: suggestions {arb_type} {len(rows)} active", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -274,54 +350,66 @@ def _gated(market, fn):
 # Registration targets: each core writer wrapped in _job logging. These (not the
 # bare cores) are what the scheduler and force_refresh dispatch.
 def _run_cmkey():
-    _job("cmkey", refresh_cmkey)
+    _job("cmkey", sync_cmkey)
 
 
 def _run_universe():
-    _job("universe", refresh_universe)
+    _job("universe", sync_universe)
 
 
 def _run_warrants():
-    _job("warrants", refresh_warrants)
+    _job("warrants", sync_warrant)
 
 
 def _run_tw_options():
-    _job("tw_options", refresh_tw_options)
+    _job("tw_options", sync_tw_option)
 
 
 def _run_us_options():
-    _job("us_options", refresh_us_options)
+    _job("us_options", sync_us_option)
 
 
-# No "universe" entry: /refresh is a refresh-prices-now action, and force_refresh
-# ("all") would fire a multi-minute ISIN scrape on every click. The daily job and
-# warrant_logic._ensure_universe_fetch already keep it current. These call the
-# ungated core writers (via _job) so a manual /refresh works regardless of hours.
+def _run_suggestions():
+    _job("suggestions", sync_suggestions)
+
+
+# "universe" is deliberately separate from the three price kinds above: it's a
+# multi-minute ISIN scrape, so it's only reachable via its own /sync_universe
+# route (never bundled into a combined "refresh everything" action). It still
+# goes through the same debounced force_refresh dispatch as the others.
 _FORCE_MAP = {
     "warrants": _run_warrants,
     "tw_options": _run_tw_options,
     "us_options": _run_us_options,
+    "universe": _run_universe,
 }
 
 
-def force_refresh(kind="all"):
-    """Manual refresh for the /refresh route; debounced per kind."""
-    kinds = list(_FORCE_MAP) if kind == "all" else [kind]
-    unknown = [k for k in kinds if k not in _FORCE_MAP]
-    if unknown:
-        return {"ok": False, "error": f"unknown kind: {unknown[0]}"}
-    now = time.time()
-    started, skipped = [], []
-    for k in kinds:
-        if now - _last_run.get(k, 0) < FORCE_DEBOUNCE_SECONDS:
-            skipped.append(k)
-            continue
-        # Mark at dispatch, not completion, so a second click while the
-        # refresh is still running debounces instead of double-fetching.
-        _last_run[k] = now
-        threading.Thread(target=_FORCE_MAP[k], daemon=True).start()
-        started.append(k)
-    return {"ok": True, "started": started, "skipped": skipped}
+def force_refresh(kind):
+    """Manual sync for the /sync_X routes; debounced per kind.
+
+    Runs synchronously — blocks until the scrape+store completes — so the
+    caller's response IS the completion signal (no polling needed). A
+    debounced call still returns immediately, before any blocking work.
+    """
+    if kind not in _FORCE_MAP:
+        return {"ok": False, "error": f"unknown kind: {kind}"}
+    # The check-then-set below must be atomic: two near-simultaneous requests
+    # for the same kind could otherwise both read a stale _last_run before
+    # either writes it, both slip past the debounce, and both run the scraper
+    # concurrently — racing each other's write_snapshot() for the same
+    # category. The lock only guards this tiny check+mark; the actual
+    # scrape+store runs outside it so different kinds (or the next window's
+    # same kind) are never serialized by it.
+    with _force_refresh_lock:
+        now = time.time()
+        if now - _last_run.get(kind, 0) < FORCE_DEBOUNCE_SECONDS:
+            return {"ok": True, "started": [], "skipped": [kind]}
+        # Mark at dispatch, not completion, so a concurrent click debounces
+        # instead of double-fetching.
+        _last_run[kind] = now
+    _FORCE_MAP[kind]()
+    return {"ok": True, "started": [kind], "skipped": []}
 
 
 def last_run(name):
@@ -337,11 +425,18 @@ def start():
             return _scheduler
         # Single-threaded executor: with max_workers=1 no two pandas-heavy
         # refresh jobs can overlap, which is what keeps the process under
-        # Render's 512 MB cap.
+        # Render's 512 MB cap. That same single worker means jobs due at the
+        # same cron tick queue up behind one another; APScheduler's default
+        # misfire_grace_time (1s) is far shorter than a scrape can take, so a
+        # job second (or third) in the queue gets silently dropped as
+        # "missed" before its turn ever comes up rather than actually
+        # running late. A generous grace window (10 min — comfortably longer
+        # than any single job observed in MEM: logs) lets queued jobs still
+        # fire instead of vanishing.
         sched = BackgroundScheduler(
             daemon=True,
             executors={"default": ThreadPoolExecutor(max_workers=1)},
-            job_defaults={"max_instances": 1, "coalesce": True},
+            job_defaults={"max_instances": 1, "coalesce": True, "misfire_grace_time": 600},
         )
         now = datetime.now()
         # Boot order: cmkey scrape first, since every warrant fetch needs it.
@@ -358,14 +453,31 @@ def start():
         # the first warrant refresh resolves against the fresh ISIN listing rather
         # than the stale bundled snapshot (it waits on the multi-minute scrape;
         # requests meanwhile fetch-on-miss off the fallback).
-        sched.add_job(_run_universe, "interval", hours=UNIVERSE_HOURS,
-                      next_run_time=now + timedelta(seconds=5))
+        #
+        # Fixed daily 07:00 TPE (before TWSE's 09:00 open) rather than an
+        # interval-since-boot: an interval trigger's wall-clock time drifts with
+        # every process restart (Render redeploy, OOM restart, local dev
+        # restart), so the listing could go stale for a day if a restart lands
+        # right after that day's already-completed run.
+        sched.add_job(_run_universe, CronTrigger(hour=7, minute=0, timezone=_TZ_TAIPEI))
         sched.add_job(_gated("tw_equity", _run_warrants),
                       CronTrigger(minute="0,15,30,45"))
         sched.add_job(_gated("tw_option", _run_tw_options),
                       CronTrigger(minute="0,15,30,45"))
         sched.add_job(_gated("us_option", _run_us_options),
                       CronTrigger(minute="0,15,30,45"))
+        # Suggest job offset a couple minutes after the sync grid, not the same
+        # tick: APScheduler doesn't guarantee execution order between
+        # independently-registered jobs due at the same instant even under a
+        # single-worker executor, so an explicit gap is what actually
+        # guarantees sync_warrant/sync_tw_option have finished writing before
+        # this job reads their snapshots. Gated on tw_equity (not tw_option,
+        # which the warrant/option syncs use) — the binding constraint here is
+        # executability: the warrant leg only trades 09:00-13:30 TPE, a
+        # narrower window than TAIFEX's, so a suggestion is useless outside it
+        # even though the option leg itself might still be live.
+        sched.add_job(_gated("tw_equity", _run_suggestions),
+                      CronTrigger(minute="2,17,32,47", timezone=_TZ_TAIPEI))
         sched.start()
         _scheduler = sched
         print("SCHED: started", flush=True)

@@ -45,12 +45,13 @@
     </div>
     <div id="market-clock" title="Local exchange time + current session">
       <div class="mc-clocks">
+        <span><b id="mc-pt-time">--:--</b> PT</span>
         <span><b id="mc-ny-time">--:--</b> ET</span>
         <span><b id="mc-tw-time">--:--</b> TPE</span>
       </div>
-      <div class="mc-row"><span class="mc-lbl">NYSE</span><span class="mc-badge mc-closed" id="mc-ny-st">–</span></div>
-      <div class="mc-row"><span class="mc-lbl">TWSE</span><span class="mc-badge mc-closed" id="mc-tw-st">–</span></div>
-      <div class="mc-row"><span class="mc-lbl">TAIFEX opt</span><span class="mc-badge mc-closed" id="mc-tx-st">–</span></div>
+      <div class="mc-row" id="mc-row-ny"><span class="mc-lbl">NYSE</span><span class="mc-badge mc-closed" id="mc-ny-st">–</span></div>
+      <div class="mc-row" id="mc-row-tw"><span class="mc-lbl">TWSE</span><span class="mc-badge mc-closed" id="mc-tw-st">–</span></div>
+      <div class="mc-row" id="mc-row-tx"><span class="mc-lbl">TAIFEX opt</span><span class="mc-badge mc-closed" id="mc-tx-st">–</span></div>
     </div>
 
     <div class="tab-bar">
@@ -72,19 +73,35 @@
           <div class="stock-select">
             <span>Product</span>
             <!-- Taiwan-listed TAIFEX options -->
-            <select id="optionStockSelect" multiple style="height:80px">
-              <option value="TXO" selected>TXO 台指選擇權</option>
-              <option value="2330">2330 台積電選擇權</option>
-              <option value="2303">2303 聯電選擇權 (UMC)</option>
-              <option value="2603">2603 長榮選擇權</option>
-              <option value="2881">2881 富邦金選擇權</option>
-              <option value="2882">2882 國泰金選擇權</option>
+            <select id="optionStockSelect" multiple size="6">
             </select>
+            <div class="btn-row" id="twProductBtnRow">
+              <button class="sm" onclick="toggleAddProduct('tw_option')">+ Add Product</button>
+              <button class="sm" onclick="removeSelectedProduct('tw_option')">Remove Selected</button>
+            </div>
+            <div id="addForm_tw_option" class="add-product-form" style="display:none">
+              <input type="text" id="newTwCode" placeholder="Code e.g. 2330" />
+              <input type="text" id="newTwCommodityIds" placeholder="Commodity IDs e.g. CDA,CDO" />
+              <input type="text" id="newTwTicker" placeholder="Yahoo ticker e.g. 2330.TW" />
+              <input type="number" id="newTwExerciseRatio" placeholder="Exercise ratio e.g. 2000" />
+              <input type="text" id="newTwName" placeholder="Name (optional)" />
+              <button class="sm" onclick="addTwOptionProduct()">Confirm</button>
+            </div>
             <!-- US ADR (American) options — hidden until toggled -->
-            <select id="optionUsSelect" multiple style="height:80px;display:none">
-              <option value="2303" selected>UMC (2303 聯電) US options</option>
-              <option value="2412">CHT (2412 中華電) US options</option>
+            <select id="optionUsSelect" multiple size="6" style="display:none">
             </select>
+            <div class="btn-row" id="usProductBtnRow" style="display:none">
+              <button class="sm" onclick="toggleAddProduct('us_option')">+ Add Product</button>
+              <button class="sm" onclick="removeSelectedProduct('us_option')">Remove Selected</button>
+            </div>
+            <div id="addForm_us_option" class="add-product-form" style="display:none">
+              <input type="text" id="newUsCode" placeholder="TW code e.g. 2303" />
+              <input type="text" id="newUsAdrTicker" placeholder="ADR ticker e.g. UMC" />
+              <input type="text" id="newUsFxTicker" placeholder="FX ticker e.g. TWD=X" value="TWD=X" />
+              <input type="number" id="newUsAdrRatio" placeholder="ADR ratio e.g. 5" />
+              <input type="text" id="newUsName" placeholder="Name (optional)" />
+              <button class="sm" onclick="addUsOptionProduct()">Confirm</button>
+            </div>
           </div>
           <label>Option Type
             <select id="optionsType">
@@ -105,9 +122,9 @@
           <label>Min Volume
             <input type="number" id="optMinVolume" value="0" min="0" />
           </label>
-          <div class="action-group">
-            <button class="primary" onclick="fetchOptionsData()">Fetch Options</button>
-            <button class="sm" id="refreshOptionsBtn" onclick="refreshOptions()">Refresh now</button>
+          <div class="action-group compact">
+            <button class="primary" id="readOptionBtn" onclick="readOption()">Read Options</button>
+            <button class="sm" id="refreshOptionsBtn" onclick="syncOption()">Sync now</button>
             <button class="success" id="optDownloadBtn" onclick="downloadOptionsCSV()" style="display:none">
               Download CSV
             </button>
@@ -131,39 +148,17 @@
         <div class="filters">
           <div class="stock-select">
             <span>Stock (multi-select)</span>
-            <select id="stockSelect" multiple>
-              <option value="0050">0050 元大台灣50 (ETF)</option>
-              <option value="2330">2330 台積電 (TSMC)</option>
-              <option value="2317">2317 鴻海 (Foxconn)</option>
-              <option value="2454">2454 聯發科 (MediaTek)</option>
-              <option value="2382">2382 廣達</option>
-              <option value="3231">3231 緯創</option>
-              <option value="6669">6669 緯穎</option>
-              <option value="2376">2376 技嘉</option>
-              <option value="3017">3017 奇鋐</option>
-              <option value="3324">3324 雙鴻</option>
-              <option value="2308">2308 台達電</option>
-              <option value="3711">3711 日月光投控</option>
-              <option value="3034">3034 聯詠</option>
-              <option value="2379">2379 瑞昱</option>
-              <option value="3661">3661 世芯-KY</option>
-              <option value="3443">3443 創意</option>
-              <option value="2603">2603 長榮</option>
-              <option value="3008">3008 大立光</option>
-              <option value="2881">2881 富邦金</option>
-              <option value="2882">2882 國泰金</option>
-              <option value="3037">3037 欣興</option>
-              <option value="2303">2303 聯電 (UMC)</option>
-              <option value="2886">2886 兆豐金</option>
+            <select id="stockSelect" multiple size="6">
             </select>
             <div class="btn-row">
               <button class="sm" onclick="toggleSelectAll()">Select All</button>
-              <button class="sm" onclick="toggleAddStock()">+ Add Stock</button>
+              <button class="sm" onclick="toggleAddProduct('warrant')">+ Add Stock</button>
+              <button class="sm" onclick="removeSelectedProduct('warrant')">Remove Selected</button>
             </div>
-            <div id="addStockForm" style="display:none">
-              <input type="text" id="newStockCode" placeholder="Code e.g. 2412" />
-              <input type="text" id="newStockName" placeholder="Name e.g. 中華電" />
-              <button class="sm" onclick="addStock()">Confirm</button>
+            <div id="addForm_warrant" class="add-product-form" style="display:none">
+              <input type="text" id="newWarrantCode" placeholder="Code e.g. 2412" oninput="lookupWarrantName()" />
+              <span id="warrantLookupResult" style="font-size:12px;color:var(--muted)"></span>
+              <button class="sm" onclick="addWarrantStock()">Confirm</button>
             </div>
           </div>
 
@@ -190,9 +185,10 @@
             <input type="number" id="minVolume" value="0" min="0" />
           </label>
 
-          <div class="action-group">
-            <button class="primary" onclick="fetchData()">Fetch Warrants</button>
-            <button class="sm" id="refreshWarrantsBtn" onclick="refreshWarrants()">Refresh now</button>
+          <div class="action-group compact">
+            <button class="primary" id="readWarrantBtn" onclick="readWarrant()">Read Warrants</button>
+            <button class="sm" id="refreshWarrantsBtn" onclick="syncWarrant()">Sync now</button>
+            <button class="sm" id="syncUniverseBtn" onclick="syncUniverse()" title="Re-scrape all TWSE/TPEx listed securities (~3-5 min) — updates which warrants exist and their listing dates. Separate from the price sync above.">Sync Universe</button>
             <button class="success" id="downloadBtn" onclick="downloadCSV()" style="display:none">
               Download CSV
             </button>
@@ -213,80 +209,51 @@
     <!-- IV SURFACE TAB -->
     <div id="tab-ivsurface" class="tab-content">
       <main>
-        <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
+        <!-- Sub-tab toggle: Warrants | Options -->
+        <div style="display:flex;gap:6px;border-bottom:1px solid var(--border);margin-bottom:16px">
+          <button id="iv-src-warrants" class="pfsub-btn active" onclick="setIVSource('warrants')">Warrants</button>
+          <button id="iv-src-options" class="pfsub-btn" onclick="setIVSource('options')">Options</button>
+        </div>
 
-          <!-- Source toggle -->
-          <div style="display:flex;gap:0;border:1px solid var(--border);border-radius:5px;overflow:hidden">
-            <button id="iv-src-warrants" onclick="setIVSource('warrants')"
-              style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--accent);color:#fff">
-              Warrants
-            </button>
-            <button id="iv-src-options" onclick="setIVSource('options')"
-              style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--surface);color:var(--muted)">
-              Options
-            </button>
+        <!-- Warrants controls -->
+        <div id="iv-warrants-controls" class="filters">
+          <div class="stock-select">
+            <span>Stock (multi-select)</span>
+            <select id="ivStockSelect" multiple size="6">
+            </select>
+            <button class="sm" onclick="toggleSelectAllIV()">Select All</button>
           </div>
-
-          <!-- Warrants controls -->
-          <div id="iv-warrants-controls" style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
-            <div class="stock-select">
-              <span>Stock (multi-select)</span>
-              <select id="ivStockSelect" multiple>
-                <option value="2330">2330 台積電 (TSMC)</option>
-                <option value="2317">2317 鴻海 (Foxconn)</option>
-                <option value="2454">2454 聯發科 (MediaTek)</option>
-                <option value="2382">2382 廣達</option>
-                <option value="3231">3231 緯創</option>
-                <option value="6669">6669 緯穎</option>
-                <option value="2376">2376 技嘉</option>
-                <option value="3017">3017 奇鋐</option>
-                <option value="3324">3324 雙鴻</option>
-                <option value="2308">2308 台達電</option>
-                <option value="3711">3711 日月光投控</option>
-                <option value="3034">3034 聯詠</option>
-                <option value="2379">2379 瑞昱</option>
-                <option value="3661">3661 世芯-KY</option>
-                <option value="3443">3443 創意</option>
-                <option value="2603">2603 長榮</option>
-                <option value="3008">3008 大立光</option>
-                <option value="2881">2881 富邦金</option>
-                <option value="2882">2882 國泰金</option>
-                <option value="3037">3037 欣興</option>
-                <option value="2303">2303 聯電 (UMC)</option>
-                <option value="2886">2886 兆豐金</option>
-              </select>
-              <button class="sm" onclick="toggleSelectAllIV()">Select All</button>
-            </div>
-            <label>Option Type
-              <select id="ivOptionType">
-                <option value="All">All</option>
-                <option value="Call">Call</option>
-                <option value="Put">Put</option>
-              </select>
-            </label>
-            <label>Highlight Warrant Code
-              <input type="text" id="highlightCode" placeholder="e.g. 061563" style="width:160px" />
-            </label>
+          <label>Option Type
+            <select id="ivOptionType">
+              <option value="All">All</option>
+              <option value="Call">Call</option>
+              <option value="Put">Put</option>
+            </select>
+          </label>
+          <label>Highlight Warrant Code
+            <input type="text" id="highlightCode" placeholder="e.g. 061563" />
+          </label>
+          <div class="action-group compact">
             <button class="primary" onclick="fetchIVSurface()">Plot IV Surface</button>
           </div>
+        </div>
 
-          <!-- Options controls -->
-          <div id="iv-options-controls" style="display:none;gap:20px;align-items:flex-end;flex-wrap:wrap">
-            <label>Product
-              <select id="ivOptProduct">
-                <option value="TXO">TXO 台指選擇權</option>
-                <option value="2330">2330 台積電選擇權</option>
-              </select>
-            </label>
-            <label>Call / Put
-              <select id="ivOptType">
-                <option value="Call">Call</option>
-                <option value="Put">Put</option>
-              </select>
-            </label>
+        <!-- Options controls -->
+        <div id="iv-options-controls" class="filters" style="display:none">
+          <div class="stock-select">
+            <span>Product</span>
+            <select id="ivOptProduct" size="6">
+            </select>
+          </div>
+          <label>Call / Put
+            <select id="ivOptType">
+              <option value="Call">Call</option>
+              <option value="Put">Put</option>
+            </select>
+          </label>
+          <div class="action-group compact">
             <button class="primary" onclick="fetchIVSurfaceOptions()">Plot IV Surface</button>
           </div>
-
         </div>
 
         <div id="iv-status"></div>
@@ -297,22 +264,12 @@
     <!-- ARB FINDER TAB -->
     <div id="tab-arb" class="tab-content">
       <main>
-        <!-- Sub-tab toggle: Direct Match | US Option Match -->
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
-          <div style="display:flex;gap:0;border:1px solid var(--border);border-radius:5px;overflow:hidden">
-            <button id="arb-mode-direct" onclick="setArbMode('direct')"
-              style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--accent);color:#fff">
-              Direct Match
-            </button>
-            <button id="arb-mode-us" onclick="setArbMode('us')"
-              style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--surface);color:var(--muted)">
-              US Option Match
-            </button>
-            <button id="arb-mode-twus" onclick="setArbMode('twus')"
-              style="padding:6px 18px;font-size:13px;font-family:inherit;font-weight:500;border:none;cursor:pointer;background:var(--surface);color:var(--muted)">
-              TW Opt / US Opt
-            </button>
-          </div>
+        <!-- Sub-tab toggle: Direct Match | US Option Match | TW Opt / US Opt -->
+        <div style="display:flex;gap:6px;border-bottom:1px solid var(--border);margin-bottom:16px">
+          <button id="arb-mode-direct" class="pfsub-btn active" onclick="setArbMode('direct')">Direct Match</button>
+          <button id="arb-mode-us" class="pfsub-btn" onclick="setArbMode('us')">US Option Match</button>
+          <button id="arb-mode-twus" class="pfsub-btn" onclick="setArbMode('twus')">TW Opt / US Opt</button>
+          <button id="arb-mode-straddle" class="pfsub-btn" onclick="setArbMode('straddle')">Straddle Vol Arb</button>
         </div>
 
         <!-- ── Direct Match sub-tab ── -->
@@ -326,12 +283,7 @@
             <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
               <div class="stock-select" id="arb-stock-select-wrap">
                 <span>Stock (multi-select)</span>
-                <select id="arbStockSelect" multiple style="height:120px;min-width:200px">
-                  <option value="2330" selected>2330 台積電 (TSMC)</option>
-                  <option value="2303">2303 聯電 (UMC)</option>
-                  <option value="2603">2603 長榮</option>
-                  <option value="2881">2881 富邦金</option>
-                  <option value="2882">2882 國泰金</option>
+                <select id="arbStockSelect" multiple size="6">
                 </select>
               </div>
               <label>Strategy
@@ -348,20 +300,20 @@
                 </select>
               </label>
               <label>Max Strike Diff %
-                <input type="number" id="arbMaxStrikePct" value="3" step="0.5" min="0" max="20" style="width:80px"/>
+                <input type="number" id="arbMaxStrikePct" value="3" step="0.5" min="0" max="20"/>
               </label>
               <label>Max DTE Diff (days)
-                <input type="number" id="arbMaxDteDiff" value="5" min="0" max="30" style="width:70px"/>
+                <input type="number" id="arbMaxDteDiff" value="5" min="0" max="30"/>
               </label>
               <label>Min Option Volume
-                <input type="number" id="arbMinVolume" value="0" min="0" style="width:90px" title="Drop options with volume below this (illiquid contracts)"/>
+                <input type="number" id="arbMinVolume" value="0" min="0" title="Drop options with volume below this (illiquid contracts)"/>
               </label>
               <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="Loose: positive price_diff uses opt_ask − warrant_bid (more results, spread not covered). Executable: opt_bid − warrant_ask (tradeable arb only).">
                 <input type="checkbox" id="arbPositiveLoose" style="width:auto;margin:0"/>
                 Positive: loose prices
               </label>
-              <div class="action-group">
-                <button class="primary" id="arbFindBtn" onclick="runArb()">Find Arb</button>
+              <div class="action-group compact">
+                <button class="primary" id="arbFindBtn" onclick="matchWarrantTwOption()">Warrant vs TW Option</button>
                 <button class="success" id="arbDownloadBtn" onclick="downloadArbCSV()" style="display:none">
                   Download CSV
                 </button>
@@ -370,7 +322,9 @@
           </div>
 
           <div id="arb-sort-direct" class="sort-btns">
+            <button onclick="sortArbBy('price_diff', false)">Price Diff ↓</button>
             <button onclick="sortArbBy('price_diff_pct', false)">Price Diff % ↓</button>
+            <button onclick="sortArbBy('opt_dte', true)">Opt DTE ↑</button>
             <button onclick="sortArbBy('dte_diff', true)">DTE Diff ↑</button>
             <button onclick="sortArbBy('strike_diff_pct', true)">Strike Diff ↑</button>
           </div>
@@ -390,9 +344,7 @@
             <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
               <div class="stock-select">
                 <span>Stock</span>
-                <select id="usStockSelect" multiple style="height:80px;min-width:200px">
-                  <option value="2303" selected>2303 聯電 (UMC, 1:5)</option>
-                  <option value="2412">2412 中華電 (CHT, 1:10)</option>
+                <select id="usStockSelect" multiple size="6">
                 </select>
               </div>
               <label>Strategy
@@ -409,20 +361,20 @@
                 </select>
               </label>
               <label>Max Strike Diff %
-                <input type="number" id="usMaxStrikePct" value="3" step="0.5" min="0" max="20" style="width:80px"/>
+                <input type="number" id="usMaxStrikePct" value="3" step="0.5" min="0" max="20"/>
               </label>
               <label>Max DTE Diff (days)
-                <input type="number" id="usMaxDteDiff" value="5" min="0" max="30" style="width:70px"/>
+                <input type="number" id="usMaxDteDiff" value="5" min="0" max="30"/>
               </label>
               <label>Min Option Volume
-                <input type="number" id="usMinVolume" value="0" min="0" style="width:90px" title="Drop UMC options with volume below this (illiquid contracts)"/>
+                <input type="number" id="usMinVolume" value="0" min="0" title="Drop UMC options with volume below this (illiquid contracts)"/>
               </label>
               <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="Loose: positive price_diff uses opt_ask − warrant_bid (more results, spread not covered). Executable: opt_bid − warrant_ask (tradeable arb only).">
                 <input type="checkbox" id="usPositiveLoose" style="width:auto;margin:0"/>
                 Positive: loose prices
               </label>
-              <div class="action-group">
-                <button class="primary" id="usFindBtn" onclick="fetchUsData()">Find Match</button>
+              <div class="action-group compact">
+                <button class="primary" id="usFindBtn" onclick="matchWarrantUsOption()">Warrant vs US Option</button>
                 <button class="success" id="usDownloadBtn" onclick="downloadUsCSV()" style="display:none">
                   Download CSV
                 </button>
@@ -431,7 +383,9 @@
           </div>
 
           <div class="sort-btns">
+            <button onclick="sortUsBy('price_diff', false)">Price Diff ↓</button>
             <button onclick="sortUsBy('price_diff_pct', false)">Price Diff % ↓</button>
+            <button onclick="sortUsBy('opt_dte', true)">Opt DTE ↑</button>
             <button onclick="sortUsBy('dte_diff', true)">DTE Diff ↑</button>
             <button onclick="sortUsBy('strike_diff_pct', true)">Strike Diff ↑</button>
           </div>
@@ -451,8 +405,7 @@
             <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
               <div class="stock-select">
                 <span>Stock</span>
-                <select id="twusStockSelect" multiple style="height:60px;min-width:200px">
-                  <option value="2303" selected>2303 聯電 (UMC, 1:5)</option>
+                <select id="twusStockSelect" multiple size="6">
                 </select>
               </div>
               <label>Option Type
@@ -463,16 +416,16 @@
                 </select>
               </label>
               <label>Max Strike Diff %
-                <input type="number" id="twusMaxStrikePct" value="2" step="0.5" min="0" max="20" style="width:80px"/>
+                <input type="number" id="twusMaxStrikePct" value="2" step="0.5" min="0" max="20"/>
               </label>
               <label>Max DTE Diff (days)
-                <input type="number" id="twusMaxDteDiff" value="10" min="0" max="60" style="width:70px"/>
+                <input type="number" id="twusMaxDteDiff" value="10" min="0" max="60"/>
               </label>
               <label>Min Option Volume
-                <input type="number" id="twusMinVolume" value="0" min="0" style="width:90px" title="Drop options with volume below this on either leg"/>
+                <input type="number" id="twusMinVolume" value="0" min="0" title="Drop options with volume below this on either leg"/>
               </label>
-              <div class="action-group">
-                <button class="primary" id="twusFindBtn" onclick="fetchTwUsData()">Find Match</button>
+              <div class="action-group compact">
+                <button class="primary" id="twusFindBtn" onclick="matchTwUsOption()">TW Option vs US Option</button>
                 <button class="success" id="twusDownloadBtn" onclick="downloadTwUsCSV()" style="display:none">
                   Download CSV
                 </button>
@@ -483,12 +436,70 @@
           <div class="sort-btns">
             <button onclick="sortTwUsBy('price_diff_pct', false)">Credit % ↓</button>
             <button onclick="sortTwUsBy('entry_credit', false)">Entry Credit ↓</button>
+            <button onclick="sortTwUsBy('price_diff', false)">Parity Gap ↓</button>
+            <button onclick="sortTwUsBy('us_option_dte', true)">US DTE ↑</button>
             <button onclick="sortTwUsBy('strike_diff_pct', true)">Strike Diff ↑</button>
             <button onclick="sortTwUsBy('dte_diff', true)">DTE Diff ↑</button>
           </div>
 
           <div id="twus-status"></div>
           <div id="twus-tableContainer"></div>
+        </div>
+
+        <!-- ── Straddle Vol Arb sub-tab ── -->
+        <div id="arb-sub-straddle" style="display:none">
+          <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-size:14px;font-weight:600;color:var(--text)">Straddle Vol Arb — long cheap-vol package vs short dear option package</span>
+              <button onclick="openStraddleInfo()" title="How does Straddle Vol Arb work?" style="background:none;border:1.5px solid var(--border);border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);font-family:inherit;padding:0;flex-shrink:0">ⓘ</button>
+            </div>
+
+            <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
+              <div class="stock-select">
+                <span>Stock (multi-select)</span>
+                <select id="straddleStockSelect" multiple size="6">
+                </select>
+              </div>
+              <label>Max Strike Diff %
+                <input type="number" id="straddleMaxStrikePct" value="10" step="0.5" min="0" max="40" title="Max strike gap between any two legs (call vs put in a package, and long vs short package), as % of spot"/>
+              </label>
+              <label>Max DTE Diff (days)
+                <input type="number" id="straddleMaxDteDiff" value="30" min="0" max="120"/>
+              </label>
+              <label>Min IV Edge (vol pts)
+                <input type="number" id="straddleMinIvEdge" value="1" step="0.5" min="-100" max="100" title="Short-package IV minus long-package IV, in volatility points. Positive = short vol is dearer than long vol."/>
+              </label>
+              <label>Min Option Volume
+                <input type="number" id="straddleMinVolume" value="0" min="0"/>
+              </label>
+              <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="DEBUG. Prices every leg on its favorable side (buy at bid, write at ask) instead of the executable side. Does not cross the spread — resulting edge is NOT tradeable.">
+                <input type="checkbox" id="straddleLoose" style="width:auto;margin:0"/>
+                Loose prices
+              </label>
+              <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="DEBUG. Lets warrant legs sit on the short side. Only the issuing bank can write Taiwan warrants, so these rows are NOT executable — use to enlarge the short-side pool when the option chain is thin.">
+                <input type="checkbox" id="straddleShortWarrants" style="width:auto;margin:0"/>
+                Allow short warrants
+              </label>
+              <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer" title="DEBUG. Off = allow rows where a short leg outlives the long package, leaving a naked short after long expiry. Keep ON for tradeable results.">
+                <input type="checkbox" id="straddleDteCover" checked style="width:auto;margin:0"/>
+                Require DTE cover
+              </label>
+              <div class="action-group compact">
+                <button class="primary" id="straddleFindBtn" onclick="runStraddle()">Find Straddle Arb</button>
+                <button class="success" id="straddleDownloadBtn" onclick="downloadStraddleCSV()" style="display:none">Download CSV</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="arb-sort-straddle" class="sort-btns">
+            <button onclick="sortStraddleBy('iv_edge_pts', false)">IV Edge ↓</button>
+            <button onclick="sortStraddleBy('net_cash', false)">Net Cash ↓</button>
+            <button onclick="sortStraddleBy('first_expiry', true)">First Expiry ↑</button>
+            <button onclick="sortStraddleBy('k_diff_pct', true)">Strike Gap ↑</button>
+          </div>
+
+          <div id="straddle-status"></div>
+          <div id="straddle-tableContainer"></div>
         </div>
       </main>
     </div>
@@ -507,6 +518,7 @@
         <div style="display:flex;gap:6px;border-bottom:1px solid var(--border);margin-bottom:16px">
           <button id="pfsub-btn-pnl"     class="pfsub-btn active" onclick="switchPfSub('pnl', this)">P&amp;L</button>
           <button id="pfsub-btn-history" class="pfsub-btn"        onclick="switchPfSub('history', this)">Trade History</button>
+          <button id="pfsub-btn-suggestions" class="pfsub-btn"    onclick="switchPfSub('suggestions', this)">Suggestions</button>
         </div>
 
         <div id="pfsub-pnl" class="pfsub-content" style="display:block">
@@ -520,6 +532,12 @@
           <p style="font-size:12px;color:var(--muted);margin:0 0 14px">
             Every trade entered from Arb Finder. <b>Realized P&amp;L</b> fills in once the short leg has expired and the trade auto-closes. Click a row for detail.</p>
           <div id="portfolio-tableContainer"></div>
+        </div>
+
+        <div id="pfsub-suggestions" class="pfsub-content" style="display:none">
+          <p style="font-size:12px;color:var(--muted);margin:0 0 14px">
+            Direct Match opportunities found automatically by the background scanner (every 15 min, market hours only). Click a row for the full P&amp;L detail — same view as Arb Finder.</p>
+          <div id="portfolio-suggestionsContainer"></div>
         </div>
       </main>
     </div>
@@ -748,6 +766,14 @@
           <div id="pf-payoff-chart" style="width:100%;height:340px"></div>
         </div>
         <div id="pf-body"></div>
+      </div>
+    </div>
+
+    <!-- Straddle Vol Arb detail modal -->
+    <div id="straddleModal" onclick="if(event.target===this)closeStraddleModal()" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
+      <div style="max-width:840px;margin:40px auto;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:26px;position:relative">
+        <button onclick="closeStraddleModal()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
+        <div id="straddle-modal-body"></div>
       </div>
     </div>
 

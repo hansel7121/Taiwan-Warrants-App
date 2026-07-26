@@ -6,6 +6,8 @@ from logic import us_options_logic
 from services import scheduler
 from services import auth
 from services import db
+from services import db_products
+from services import db_suggestions
 from services import store
 from logic import arb_logic
 from services.auth import require_auth
@@ -20,12 +22,8 @@ import threading
 import webbrowser
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 from scipy.interpolate import griddata
-
-
-def _epoch_iso(ts):
-    return datetime.fromtimestamp(ts).isoformat() if ts else None
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
 app = Flask(
@@ -40,30 +38,40 @@ app.json.sort_keys = False
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 app.jinja_env.auto_reload = True
 
+# Data routes return large repeated-key JSON tables (~10:1 compressible) and
+# Render's proxy doesn't gzip, so compress responses here. Optional dep — degrade
+# gracefully if it isn't installed in a dev env (flask-compress skips small
+# responses and honors Accept-Encoding on its own).
+try:
+    from flask_compress import Compress
+    Compress(app)
+except ImportError:
+    print("flask-compress not installed; responses served uncompressed")
+
 # Render pings /healthz constantly; static assets are noise too. Neither says
 # anything about what the app is doing, so they stay out of the log.
 _LOG_SKIP_PATHS = {"/healthz", "/favicon.ico"}
 # Params worth a completion line's worth of context, in the order they read best.
 _LOG_PARAMS = ("stock_codes", "option_type", "strategy", "kind", "period")
-# The paths are historical and say nothing about the work behind them (/fetch is
-# warrants, /us_options is the US chain scan). Only the routes that do real data
+# The paths say what data work is behind them. Only the routes that do real data
 # work are named here; anything else logs its bare path, as before.
 _ROUTE_LABELS = {
-    "/fetch": "warrants",
-    "/download": "warrants csv",
-    "/fetch_options": "tw options",
-    "/download_options": "tw options csv",
-    "/us_options": "us options",
+    "/read_warrant": "warrants",
+    "/read_warrant_csv": "warrants csv",
+    "/read_tw_option": "tw options",
+    "/read_tw_option_csv": "tw options csv",
+    "/read_us_option_csv": "us options csv",
+    "/read_us_option": "us options",
     "/iv_surface": "iv surface",
     "/iv_surface_options": "iv surface (options)",
     "/adr_premium": "adr premium",
     "/adr_premium_scenario": "adr premium scenario",
-    "/us_option_match": "us/tw match",
-    "/us_option_match_csv": "us/tw match csv",
-    "/tw_us_option_match": "tw/us match",
-    "/tw_us_option_match_csv": "tw/us match csv",
-    "/arb_finder": "arb scan",
-    "/arb_finder_csv": "arb scan csv",
+    "/match_warrant_us_option": "us/tw match",
+    "/match_warrant_us_option_csv": "us/tw match csv",
+    "/match_tw_us_option": "tw/us match",
+    "/match_tw_us_option_csv": "tw/us match csv",
+    "/match_warrant_tw_option": "arb scan",
+    "/match_warrant_tw_option_csv": "arb scan csv",
 }
 
 
@@ -205,7 +213,7 @@ def close_quote():
             s = us_options_logic.adr_premium_scenario(us_code, 30)
             out["current_premium"] = s.get("current_premium")
             out["current_fx"] = (s.get("fx") or {}).get("current_fx")
-            out["adr_ratio"] = us_options_logic.US_ADR_MAP.get(us_code, {}).get("adr_ratio")
+            out["adr_ratio"] = us_options_logic._adr_map().get(us_code, {}).get("adr_ratio")
         except Exception:
             pass
 
@@ -221,7 +229,7 @@ def close_quote():
                     out["warrant_bid"] = bid
                     out["source"] = "market"
         elif survivor == "option" and mode in ("us", "twus") and us_code:
-            last = arb_logic.us_option_last(
+            last = us_options_logic.us_option_last(
                 us_code, d.get("opt_type"), float(d.get("opt_strike") or 0),
                 d.get("opt_expiry_iso"), out["current_fx"], out["adr_ratio"],
             )
@@ -234,22 +242,130 @@ def close_quote():
     return jsonify(out)
 
 
-@app.route("/get_custom_stocks")
+@app.route("/list_warrant_stocks")
 @require_auth
-def get_custom_stocks():
-    return jsonify(db.get_custom_stocks(g.user["id"]))
+def list_warrant_stocks():
+    return jsonify(db_products.list_warrant_stocks())
 
 
-@app.route("/save_custom_stocks", methods=["POST"])
+@app.route("/add_warrant_stock", methods=["POST"])
 @require_auth
-def save_custom_stocks():
-    db.save_custom_stocks(g.user["id"], request.json or [])
+def add_warrant_stock():
+    data = request.json or {}
+    code = (data.get("code") or "").strip()
+    if not code:
+        return jsonify({"error": "code required"}), 400
+    db_products.add_warrant_stock(code, data.get("name"))
     return jsonify({"ok": True})
 
 
-@app.route("/fetch", methods=["POST"])
+@app.route("/remove_warrant_stock", methods=["POST"])
 @require_auth
-def fetch():
+def remove_warrant_stock():
+    data = request.json or {}
+    code = (data.get("code") or "").strip()
+    if not code:
+        return jsonify({"error": "code required"}), 400
+    db_products.remove_warrant_stock(code)
+    return jsonify({"ok": True})
+
+
+@app.route("/lookup_warrant_stock")
+@require_auth
+def lookup_warrant_stock():
+    code = (request.args.get("code") or "").strip()
+    info = warrant_logic._universe().get(code)
+    return jsonify({"code": code, "name": info.name if info else None})
+
+
+@app.route("/list_suggestions")
+@require_auth
+def list_suggestions():
+    return jsonify(db_suggestions.list_active_suggestions())
+
+
+@app.route("/remove_suggestion", methods=["POST"])
+@require_auth
+def remove_suggestion():
+    data = request.json or {}
+    sug_id = (data.get("id") or "").strip()
+    if not sug_id:
+        return jsonify({"error": "id required"}), 400
+    db_suggestions.delete_suggestion(sug_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/list_tw_option_products")
+@require_auth
+def list_tw_option_products():
+    return jsonify(db_products.list_tw_option_products())
+
+
+@app.route("/add_tw_option_product", methods=["POST"])
+@require_auth
+def add_tw_option_product():
+    data = request.json or {}
+    code = (data.get("code") or "").strip()
+    commodity_ids = data.get("commodity_ids")
+    ticker = (data.get("ticker") or "").strip()
+    exercise_ratio = data.get("exercise_ratio")
+    if not code or not commodity_ids or not ticker or not exercise_ratio:
+        return jsonify({"error": "code, commodity_ids, ticker, exercise_ratio required"}), 400
+    if isinstance(commodity_ids, str):
+        commodity_ids = [c.strip() for c in commodity_ids.split(",") if c.strip()]
+    db_products.add_tw_option_product(code, commodity_ids, ticker, int(exercise_ratio), data.get("name"))
+    options_logic.invalidate_commodity_map_cache()
+    return jsonify({"ok": True})
+
+
+@app.route("/remove_tw_option_product", methods=["POST"])
+@require_auth
+def remove_tw_option_product():
+    data = request.json or {}
+    code = (data.get("code") or "").strip()
+    if not code:
+        return jsonify({"error": "code required"}), 400
+    db_products.remove_tw_option_product(code)
+    options_logic.invalidate_commodity_map_cache()
+    return jsonify({"ok": True})
+
+
+@app.route("/list_us_option_products")
+@require_auth
+def list_us_option_products():
+    return jsonify(db_products.list_us_option_products())
+
+
+@app.route("/add_us_option_product", methods=["POST"])
+@require_auth
+def add_us_option_product():
+    data = request.json or {}
+    code = (data.get("code") or "").strip()
+    adr_ticker = (data.get("adr_ticker") or "").strip()
+    fx_ticker = (data.get("fx_ticker") or "").strip()
+    adr_ratio = data.get("adr_ratio")
+    if not code or not adr_ticker or not fx_ticker or not adr_ratio:
+        return jsonify({"error": "code, adr_ticker, fx_ticker, adr_ratio required"}), 400
+    db_products.add_us_option_product(code, adr_ticker, fx_ticker, float(adr_ratio), data.get("name"))
+    us_options_logic.invalidate_adr_map_cache()
+    return jsonify({"ok": True})
+
+
+@app.route("/remove_us_option_product", methods=["POST"])
+@require_auth
+def remove_us_option_product():
+    data = request.json or {}
+    code = (data.get("code") or "").strip()
+    if not code:
+        return jsonify({"error": "code required"}), 400
+    db_products.remove_us_option_product(code)
+    us_options_logic.invalidate_adr_map_cache()
+    return jsonify({"ok": True})
+
+
+@app.route("/read_warrant", methods=["POST"])
+@require_auth
+def read_warrant():
     data = request.json
     stock_codes = data.get("stock_codes", ["2330"])
     option_type = data.get("option_type", "All")
@@ -259,7 +375,7 @@ def fetch():
     max_tv_pct = float(data.get("max_tv_pct", 100.0))
     min_volume = int(data.get("min_volume", 0))
 
-    df, error, meta = warrant_logic.fetch_warrants(
+    df, error, meta = warrant_logic.read_warrant(
         stock_codes,
         option_type,
         min_days,
@@ -275,9 +391,9 @@ def fetch():
     return jsonify({"rows": df.to_dict(orient="records"), "count": len(df), **meta})
 
 
-@app.route("/download", methods=["POST"])
+@app.route("/read_warrant_csv", methods=["POST"])
 @require_auth
-def download():
+def read_warrant_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2330"])
     option_type = data.get("option_type", "All")
@@ -287,7 +403,7 @@ def download():
     max_tv_pct = float(data.get("max_tv_pct", 100.0))
     min_volume = int(data.get("min_volume", 0))
 
-    df, error, _meta = warrant_logic.fetch_warrants(
+    df, error, _meta = warrant_logic.read_warrant(
         stock_codes,
         option_type,
         min_days,
@@ -306,9 +422,9 @@ def download():
     )
 
 
-@app.route("/fetch_options", methods=["POST"])
+@app.route("/read_tw_option", methods=["POST"])
 @require_auth
-def fetch_options():
+def read_tw_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["TXO"])
     option_type = data.get("option_type", "All")
@@ -316,45 +432,59 @@ def fetch_options():
     max_days = int(data.get("max_days", 365))
     min_leverage = float(data.get("min_leverage", 0.0))
     min_volume = int(data.get("min_volume", 0))
-    try:
-        df = options_logic.fetch_options(
-            stock_codes, option_type, min_days, max_days, min_leverage, min_volume
-        )
-        # Use pandas JSON serialisation so NaN → null (browser JSON.parse rejects bare NaN)
-        rows = json.loads(df.to_json(orient="records"))
-        applog.set_rows(len(df))
-        return jsonify({"rows": rows, "count": len(df), "as_of": _epoch_iso(options_logic.data_as_of(stock_codes))})
-    except Exception as e:
-        applog.log("OPT", f"fetch_options failed: {e}")
-        return jsonify({"rows": [], "count": 0, "error": str(e)})
+    df, error, meta = options_logic.read_tw_option(
+        stock_codes, option_type, min_days, max_days, min_leverage, min_volume
+    )
+    if error and df.empty:
+        applog.set_rows(0)
+        return jsonify({"rows": [], "count": 0, "error": error, **meta})
+    # Use pandas JSON serialisation so NaN → null (browser JSON.parse rejects bare NaN)
+    rows = json.loads(df.to_json(orient="records"))
+    applog.set_rows(len(df))
+    return jsonify({"rows": rows, "count": len(df), **meta})
 
 
-@app.route("/us_options", methods=["POST"])
+@app.route("/read_us_option", methods=["POST"])
 @require_auth
-def us_options():
+def read_us_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
     option_type = data.get("option_type", "All")
     min_days = data.get("min_days", 0)
     max_days = data.get("max_days", 365)
     min_volume = data.get("min_volume", 0)
-    try:
-        df = arb_logic.us_options_scan(stock_codes, option_type, min_days, max_days, min_volume)
-        rows = json.loads(df.to_json(orient="records"))
-        as_of = min(
-            (t for t in (us_options_logic.data_as_of(c) for c in stock_codes) if t),
-            default=None,
-        )
-        applog.set_rows(len(df))
-        return jsonify({"rows": rows, "count": len(df), "as_of": _epoch_iso(as_of)})
-    except Exception as e:
-        applog.log("USOPT", f"scan failed: {e}")
-        return jsonify({"rows": [], "count": 0, "error": str(e)})
+    df, error, meta = us_options_logic.us_options_scan(stock_codes, option_type, min_days, max_days, min_volume)
+    if error and df.empty:
+        applog.set_rows(0)
+        return jsonify({"rows": [], "count": 0, "error": error, **meta})
+    rows = json.loads(df.to_json(orient="records"))
+    applog.set_rows(len(df))
+    return jsonify({"rows": rows, "count": len(df), **meta})
 
 
-@app.route("/download_options", methods=["POST"])
+@app.route("/read_us_option_csv", methods=["POST"])
 @require_auth
-def download_options():
+def read_us_option_csv():
+    data = request.json
+    stock_codes = data.get("stock_codes", ["2303"])
+    option_type = data.get("option_type", "All")
+    min_days = data.get("min_days", 0)
+    max_days = data.get("max_days", 365)
+    min_volume = data.get("min_volume", 0)
+    df, _error, _meta = us_options_logic.us_options_scan(stock_codes, option_type, min_days, max_days, min_volume)
+    output = io.StringIO()
+    df.to_csv(output, index=False)
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=us_options.csv"},
+    )
+
+
+@app.route("/read_tw_option_csv", methods=["POST"])
+@require_auth
+def read_tw_option_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["TXO"])
     option_type = data.get("option_type", "All")
@@ -362,12 +492,9 @@ def download_options():
     max_days = int(data.get("max_days", 365))
     min_leverage = float(data.get("min_leverage", 0.0))
     min_volume = int(data.get("min_volume", 0))
-    try:
-        df = options_logic.fetch_options(
-            stock_codes, option_type, min_days, max_days, min_leverage, min_volume
-        )
-    except Exception:
-        df = pd.DataFrame()
+    df, _error, _meta = options_logic.read_tw_option(
+        stock_codes, option_type, min_days, max_days, min_leverage, min_volume
+    )
     output = io.StringIO()
     df.to_csv(output, index=False)
     output.seek(0)
@@ -384,10 +511,9 @@ def iv_surface_options():
     data = request.json
     stock_codes = data.get("stock_codes", ["TXO"])
     option_type = data.get("option_type", "Call")
-    try:
-        df = options_logic.fetch_options(stock_codes, option_type, min_days=1)
-    except Exception as e:
-        return jsonify({"error": str(e)})
+    df, error, _meta = options_logic.read_tw_option(stock_codes, option_type, min_days=1)
+    if df.empty:
+        return jsonify({"error": error or "No data"})
 
     df = df[df["iv_ask"].notna() & (df["iv_ask"] > 0)]
     if len(df) < 4:
@@ -481,7 +607,7 @@ def adr_premium():
     data = request.json
     stock_code = data.get("stock_code")
     try:
-        if stock_code not in us_options_logic.US_ADR_MAP:
+        if stock_code not in us_options_logic._adr_map():
             raise RuntimeError(f"{stock_code}: no US ADR mapping")
         return jsonify(us_options_logic.adr_premium_stats(stock_code))
     except Exception as e:
@@ -495,16 +621,16 @@ def adr_premium_scenario():
     stock_code = data.get("stock_code")
     horizon_days = int(data.get("horizon_days", 30) or 30)
     try:
-        if stock_code not in us_options_logic.US_ADR_MAP:
+        if stock_code not in us_options_logic._adr_map():
             raise RuntimeError(f"{stock_code}: no US ADR mapping")
         return jsonify(us_options_logic.adr_premium_scenario(stock_code, horizon_days))
     except Exception as e:
         return jsonify({"error": str(e)})
 
 
-@app.route("/us_option_match", methods=["POST"])
+@app.route("/match_warrant_us_option", methods=["POST"])
 @require_auth
-def us_option_match():
+def match_warrant_us_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
     option_type = data.get("option_type", "All")
@@ -514,20 +640,20 @@ def us_option_match():
     min_volume = int(data.get("min_volume", 0) or 0)
     strategy = data.get("strategy", "same_type")
     try:
-        df = arb_logic.build_us_match_df(stock_codes, option_type, max_strike_diff_pct,
+        df = arb_logic.match_warrant_us_option(stock_codes, option_type, max_strike_diff_pct,
                                 max_dte_diff, positive_loose=positive_loose,
                                 min_volume=min_volume, strategy=strategy)
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
         applog.set_rows(len(rows))
         return jsonify({"rows": rows, "count": len(rows)})
     except Exception as e:
-        applog.log("ARB", f"us_option_match failed: {e}")
+        applog.log("ARB", f"match_warrant_us_option failed: {e}")
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
-@app.route("/us_option_match_csv", methods=["POST"])
+@app.route("/match_warrant_us_option_csv", methods=["POST"])
 @require_auth
-def us_option_match_csv():
+def match_warrant_us_option_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
     option_type = data.get("option_type", "All")
@@ -537,7 +663,7 @@ def us_option_match_csv():
     min_volume = int(data.get("min_volume", 0) or 0)
     strategy = data.get("strategy", "same_type")
     try:
-        df = arb_logic.build_us_match_df(stock_codes, option_type, max_strike_diff_pct,
+        df = arb_logic.match_warrant_us_option(stock_codes, option_type, max_strike_diff_pct,
                                 max_dte_diff, positive_loose=positive_loose,
                                 min_volume=min_volume, strategy=strategy)
     except Exception:
@@ -552,9 +678,9 @@ def us_option_match_csv():
     )
 
 
-@app.route("/tw_us_option_match", methods=["POST"])
+@app.route("/match_tw_us_option", methods=["POST"])
 @require_auth
-def tw_us_option_match():
+def match_tw_us_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
     option_type = data.get("option_type", "All")
@@ -563,20 +689,20 @@ def tw_us_option_match():
     positive_loose = bool(data.get("positive_loose", False))
     min_volume = int(data.get("min_volume", 0) or 0)
     try:
-        df = arb_logic.build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct,
+        df = arb_logic.match_tw_us_option(stock_codes, option_type, max_strike_diff_pct,
                                     max_dte_diff, positive_loose=positive_loose,
                                     min_volume=min_volume)
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
         applog.set_rows(len(rows))
         return jsonify({"rows": rows, "count": len(rows)})
     except Exception as e:
-        applog.log("ARB", f"tw_us_option_match failed: {e}")
+        applog.log("ARB", f"match_tw_us_option failed: {e}")
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
-@app.route("/tw_us_option_match_csv", methods=["POST"])
+@app.route("/match_tw_us_option_csv", methods=["POST"])
 @require_auth
-def tw_us_option_match_csv():
+def match_tw_us_option_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
     option_type = data.get("option_type", "All")
@@ -585,7 +711,7 @@ def tw_us_option_match_csv():
     positive_loose = bool(data.get("positive_loose", False))
     min_volume = int(data.get("min_volume", 0) or 0)
     try:
-        df = arb_logic.build_tw_us_option_df(stock_codes, option_type, max_strike_diff_pct,
+        df = arb_logic.match_tw_us_option(stock_codes, option_type, max_strike_diff_pct,
                                     max_dte_diff, positive_loose=positive_loose,
                                     min_volume=min_volume)
     except Exception:
@@ -600,9 +726,9 @@ def tw_us_option_match_csv():
     )
 
 
-@app.route("/arb_finder", methods=["POST"])
+@app.route("/match_warrant_tw_option", methods=["POST"])
 @require_auth
-def arb_finder():
+def match_warrant_tw_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["2330"])
     option_type = data.get("option_type", "All")
@@ -612,7 +738,7 @@ def arb_finder():
     min_volume = int(data.get("min_volume", 0) or 0)
     strategy = data.get("strategy", "same_type")
     try:
-        df = arb_logic.build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
+        df = arb_logic.match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
                            positive_loose=positive_loose, min_volume=min_volume,
                            strategy=strategy)
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
@@ -622,15 +748,16 @@ def arb_finder():
             default=None,
         )
         applog.set_rows(len(rows))
-        return jsonify({"rows": rows, "count": len(rows), "as_of": _epoch_iso(as_of)})
+        as_of_iso = datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None
+        return jsonify({"rows": rows, "count": len(rows), "as_of": as_of_iso})
     except Exception as e:
-        applog.log("ARB", f"arb_finder failed: {e}")
+        applog.log("ARB", f"match_warrant_tw_option failed: {e}")
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
-@app.route("/arb_finder_csv", methods=["POST"])
+@app.route("/match_warrant_tw_option_csv", methods=["POST"])
 @require_auth
-def arb_finder_csv():
+def match_warrant_tw_option_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2330"])
     option_type = data.get("option_type", "All")
@@ -640,7 +767,7 @@ def arb_finder_csv():
     min_volume = int(data.get("min_volume", 0) or 0)
     strategy = data.get("strategy", "same_type")
     try:
-        df = arb_logic.build_arb_df(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
+        df = arb_logic.match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
                            positive_loose=positive_loose, min_volume=min_volume,
                            strategy=strategy)
     except Exception:
@@ -652,6 +779,67 @@ def arb_finder_csv():
         output.getvalue(),
         mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=arb_finder.csv"},
+    )
+
+
+def _straddle_params(data):
+    return dict(
+        stock_codes=data.get("stock_codes", ["2330"]),
+        option_type=data.get("option_type", "All"),
+        max_strike_diff_pct=float(data.get("max_strike_diff_pct", 10.0)),
+        max_dte_diff=int(data.get("max_dte_diff", 30)),
+        min_volume=int(data.get("min_volume", 0) or 0),
+        min_iv_edge=float(data.get("min_iv_edge", 1.0)),
+        loose=bool(data.get("loose", False)),
+        short_warrants=bool(data.get("short_warrants", False)),
+        require_dte_cover=bool(data.get("require_dte_cover", True)),
+    )
+
+
+@app.route("/straddle_arbitrage", methods=["POST"])
+@require_auth
+def straddle_arbitrage():
+    p = _straddle_params(request.json)
+    try:
+        df = arb_logic.build_straddle_arb(**p)
+        rows = json.loads(df.to_json(orient="records")) if not df.empty else []
+        as_of = min(
+            (t for t in (warrant_logic.cache_as_of(p["stock_codes"]),
+                         options_logic.data_as_of(p["stock_codes"])) if t),
+            default=None,
+        )
+        applog.set_rows(len(rows))
+        as_of_iso = datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None
+        return jsonify({"rows": rows, "count": len(rows), "as_of": as_of_iso})
+    except Exception as e:
+        applog.log("ARB", f"straddle_arbitrage failed: {e}")
+        return jsonify({"rows": [], "count": 0, "error": str(e)})
+
+
+@app.route("/straddle_arbitrage_csv", methods=["POST"])
+@require_auth
+def straddle_arbitrage_csv():
+    p = _straddle_params(request.json)
+    try:
+        df = arb_logic.build_straddle_arb(**p)
+        # Flatten the nested leg dicts so the CSV is human-readable.
+        flat = []
+        for r in json.loads(df.to_json(orient="records")):
+            row = {k: v for k, v in r.items() if not isinstance(v, dict)}
+            for lk in ("long_call", "long_put", "short_call", "short_put"):
+                lg = r.get(lk) or {}
+                row[f"{lk}"] = f"{lg.get('source')} {lg.get('id')} K{lg.get('K')} {lg.get('dte')}d iv{lg.get('iv')}"
+            flat.append(row)
+        df = pd.DataFrame(flat)
+    except Exception:
+        df = pd.DataFrame()
+    output = io.StringIO()
+    df.to_csv(output, index=False)
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=straddle_arbitrage.csv"},
     )
 
 
@@ -699,11 +887,28 @@ def healthz():
     )
 
 
-@app.route("/refresh", methods=["POST"])
+@app.route("/sync_warrant", methods=["POST"])
 @require_auth
-def refresh():
-    kind = (request.json or {}).get("kind", "all")
-    return jsonify(scheduler.force_refresh(kind))
+def sync_warrant():
+    return jsonify(scheduler.force_refresh("warrants"))
+
+
+@app.route("/sync_tw_option", methods=["POST"])
+@require_auth
+def sync_tw_option():
+    return jsonify(scheduler.force_refresh("tw_options"))
+
+
+@app.route("/sync_us_option", methods=["POST"])
+@require_auth
+def sync_us_option():
+    return jsonify(scheduler.force_refresh("us_options"))
+
+
+@app.route("/sync_universe", methods=["POST"])
+@require_auth
+def sync_universe():
+    return jsonify(scheduler.force_refresh("universe"))
 
 
 def open_browser(port):

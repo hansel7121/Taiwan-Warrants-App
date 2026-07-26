@@ -17,14 +17,18 @@ single spot FX snapshot is used for every conversion.
 """
 
 import time
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
 from services import applog
 from services import db_market
-from logic.warrant_logic import implied_vol, bs_delta, calc_real_leverage
+from logic.warrant_logic import (
+    implied_vol, bs_delta, calc_real_leverage,
+    implied_vol_vec, bs_delta_vec, _refine_iv_for_rounding,
+)
 
 # One US option contract covers 100 ADRs. The number of ordinary (Taiwan)
 # shares per ADR ("adr_ratio") is per-listing, so contract size in Taiwan
@@ -33,19 +37,30 @@ US_CONTRACT_ADRS = 100
 
 R_US = 0.04  # US benchmark rate for BS/IV on the ADR leg
 
-# Map a Taiwan stock code to its US ADR ticker, FX pair, and ADR ratio
-# (ordinary shares per ADR). Only listings whose ADR tracks the local share
-# tightly enough to treat as the same asset are included — see the parity
-# screen in analysis notebooks (persistent/large premium => excluded, e.g. TSM).
-US_ADR_MAP = {
-    "2303": {"adr_ticker": "UMC", "fx_ticker": "TWD=X", "adr_ratio": 5},   # 500 TW shares/contract
-    "2412": {"adr_ticker": "CHT", "fx_ticker": "TWD=X", "adr_ratio": 10},  # 1000 TW shares/contract
-}
+_PRODUCT_CACHE_TTL = 300  # 5 min; add/remove routes also invalidate directly
+_adr_map_cache = {"data": None, "ts": 0.0}
+
+
+def _adr_map():
+    """{code: {adr_ticker, fx_ticker, adr_ratio, name}} from us_option_products, cached."""
+    now = time.time()
+    if _adr_map_cache["data"] is not None and now - _adr_map_cache["ts"] < _PRODUCT_CACHE_TTL:
+        return _adr_map_cache["data"]
+    from services import db_products
+    data = {row["code"]: row for row in db_products.list_us_option_products()}
+    _adr_map_cache["data"] = data
+    _adr_map_cache["ts"] = now
+    return data
+
+
+def invalidate_adr_map_cache():
+    """Called by the add/remove product routes (Phase 5.3) so a change is visible immediately."""
+    _adr_map_cache["data"] = None
 
 
 def contract_tw_shares(stock_code):
     """Taiwan shares controlled by one US option contract for this listing."""
-    return US_CONTRACT_ADRS * US_ADR_MAP[stock_code]["adr_ratio"]
+    return US_CONTRACT_ADRS * _adr_map()[stock_code]["adr_ratio"]
 
 # Full option chain per (stock_code, compute_iv); day-range and type filters
 # are applied per call so one scheduler warm-up serves every filter combo.
@@ -70,15 +85,6 @@ def data_as_of(stock_code):
     return min(ts_list) if ts_list else None
 
 
-def refresh_cache(stock_codes):
-    """Scheduler hook: drop and refetch both cached chain variants per code."""
-    for code in stock_codes:
-        for civ in (True, False):
-            _cache.pop((code, civ), None)
-        # Scanner path (with IV) and arb path (without) cache separately.
-        fetch_us_options(code, "All", min_days=1, max_days=730, compute_iv=True)
-        fetch_us_options(code, "All", min_days=1, max_days=730, compute_iv=False)
-
 _prem_cache: dict = {}
 _PREM_TTL = 1800  # 30 minutes — 3y premium HISTORY only; the "now" point is refreshed live
 
@@ -94,7 +100,7 @@ def _premium_series(stock_code, period="3y"):
     The premium already embeds FX (it's baked into the numerator), so its
     distribution captures the *combined* ADR-basis + FX risk of the trade.
     """
-    cfg = US_ADR_MAP[stock_code]
+    cfg = _adr_map()[stock_code]
 
     def daily(t):
         s = yf.Ticker(t).history(period=period)["Close"]
@@ -328,7 +334,7 @@ def adr_premium_stats(stock_code, period="3y"):
     low) with their historical frequency and conditional-mean premium — the
     inputs to the Expected-Value calc in the trade modal.
     """
-    cfg = US_ADR_MAP[stock_code]
+    cfg = _adr_map()[stock_code]
     key = (stock_code, period)
 
     def _with_live(stats):
@@ -406,7 +412,7 @@ def _live_premium_fx(stock_code):
     freshest available Yahoo snapshot. Returns (premium, fx) or None on failure
     so callers can fall back to the last daily close.
     """
-    cfg = US_ADR_MAP.get(stock_code)
+    cfg = _adr_map().get(stock_code)
     if not cfg:
         return None
     try:
@@ -421,30 +427,34 @@ def _live_premium_fx(stock_code):
     return None
 
 
-def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
+def read_us_option(stock_codes, option_type="All", min_days=1, max_days=365,
                      compute_iv=True, keep_noniv=False):
-    """Return a DataFrame of UMC options priced in TWD per Taiwan share.
+    """Return (df, error_or_None, meta) of UMC options priced in TWD per Taiwan
+    share, for one or more stock codes. Never raises — mirrors read_warrant /
+    read_tw_option's contract.
 
-    Columns mirror options_logic.fetch_options so the same matching code can
+    Columns mirror options_logic.read_tw_option so the same matching code can
     consume it: type, strike, days_to_expiry, bid, ask, iv_bid, iv_ask,
     contract, is_live, plus USD reference fields (strike_usd, fx, adr_price).
+    When multiple codes are passed, each row also carries a "stock_code" column
+    so callers can tell the legs apart (mirrors the Supabase snapshot schema).
     """
-    if stock_code not in US_ADR_MAP:
-        raise RuntimeError(f"{stock_code}: no US ADR mapping")
+    if isinstance(stock_codes, str):
+        stock_codes = [stock_codes]
 
     # Snapshot-first read (MARKET_SOURCE=supabase). The stored snapshot is the
     # superset-with-IV; compute_iv=True (scanner) drops non-converged-IV rows,
-    # compute_iv=False (arb) keeps the superset. _filter_chain preserves the
-    # raise-on-empty-range contract. Empty snapshot / read error falls through
-    # to the live path below; the supabase path never warms _cache.
+    # compute_iv=False (arb) keeps the superset. Empty snapshot / read error
+    # falls through to the live path below; the supabase path never warms _cache.
     if db_market.snapshot_enabled():
-        snap = None
+        snap, as_of = None, None
         try:
-            snap, _as_of = db_market.read_snapshot("us_options", codes=[stock_code])
+            snap, as_of = db_market.read_snapshot("us_options", codes=list(stock_codes))
         except Exception as e:
             applog.log("USOPT", f"supabase read failed ({e}) — falling back to live")
             snap = None
         if snap is not None and not snap.empty:
+            meta = {"as_of": as_of, "cached": True}
             if compute_iv:
                 snap = snap[snap["iv_ask"].notna()]
             else:
@@ -455,28 +465,63 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
                 for _c in ("iv_ask", "iv_bid", "delta_calc"):
                     if _c in snap.columns:
                         snap[_c] = np.nan
-            return _filter_chain(snap, option_type, min_days, max_days)
+            result = _apply_us_option_filters(snap, option_type, min_days, max_days)
+            if result.empty:
+                return pd.DataFrame(), "No US options in range", meta
+            return result, None, meta
 
-    cfg = US_ADR_MAP[stock_code]
-    # The cache holds the FULL chain (all types, all expiries); the requested
-    # option_type/day-range are filter views applied on the way out, so a
-    # background warm-up serves every filter combination.
-    cache_key = (stock_code, compute_iv, keep_noniv)
-    hit = _cache.get(cache_key)
-    if hit and time.time() - hit[0] < _CACHE_TTL:
-        applog.log(
-            "USOPT",
-            f"{stock_code} {cfg['adr_ticker']} cache hit (age {int(time.time() - hit[0])}s)",
+    dfs, errors, as_ofs = [], [], []
+    for code in stock_codes:
+        df, err, meta = scrape_yfinance_us_option(
+            code, option_type, min_days, max_days, compute_iv, keep_noniv,
         )
-        return _filter_chain(hit[1], option_type, min_days, max_days)
+        if err:
+            errors.append(f"{code}: {err}")
+        if df is not None and not df.empty:
+            dfs.append(df.assign(stock_code=code))
+        if meta.get("as_of"):
+            as_ofs.append(meta["as_of"])
+    combined_meta = {"as_of": min(as_ofs) if as_ofs else None, "cached": False}
+    if not dfs:
+        err_msg = "; ".join(errors) if errors else "No US options in range"
+        return pd.DataFrame(), err_msg, combined_meta
+    result = pd.concat(dfs, ignore_index=True)
+    return result, None, combined_meta
+
+
+def scrape_yfinance_us_option(stock_code, option_type="All", min_days=1, max_days=365,
+                          compute_iv=True, keep_noniv=False):
+    """Pure live-scrape reader (no Supabase snapshot branch).
+
+    The scraper half of read_us_option: always walks the yfinance option
+    chain fresh (never short-circuits on the in-process _cache TTL) so a manual
+    refresh is guaranteed live, then repopulates _cache so the reader-side
+    cache-hit path stays warm. Never raises — returns (df, error_or_None, meta),
+    mirroring warrant_logic.scrape_cmoney_warrant / options_logic.scrape_tw_option.
+    """
+    if stock_code not in _adr_map():
+        return pd.DataFrame(), f"{stock_code}: no US ADR mapping", {"as_of": None, "cached": False}
+
+    cfg = _adr_map()[stock_code]
+    cache_key = (stock_code, compute_iv, keep_noniv)
 
     t0 = time.time()
     adr_ratio = cfg["adr_ratio"]             # ordinary shares per ADR
-    adr = _last_price(cfg["adr_ticker"])     # USD per ADR
-    fx = _last_price(cfg["fx_ticker"])       # TWD per USD
+    try:
+        adr = _last_price(cfg["adr_ticker"])     # USD per ADR
+        fx = _last_price(cfg["fx_ticker"])       # TWD per USD
+    except Exception as e:
+        applog.log("USOPT", f"{stock_code} price fetch failed: {e}")
+        return pd.DataFrame(), str(e), {"as_of": None, "cached": False}
+
+    meta = {
+        "as_of": datetime.fromtimestamp(t0, tz=timezone.utc).isoformat(),
+        "cached": False,
+    }
+
     if adr <= 0 or fx <= 0:
         applog.log("USOPT", f"{stock_code} bad ADR price ({adr}) or FX ({fx})")
-        raise RuntimeError("bad ADR price or FX")
+        return pd.DataFrame(), "bad ADR price or FX", meta
 
     # Underlying value expressed per Taiwan share, in TWD — the same basis the
     # warrant leg uses (so strike_diff_pct etc. are apples-to-apples).
@@ -486,7 +531,7 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
     expiries = tk.options
     if not expiries:
         applog.log("USOPT", f"{stock_code} {cfg['adr_ticker']} no option expiries")
-        raise RuntimeError(f"{cfg['adr_ticker']}: no option expiries")
+        return pd.DataFrame(), f"{cfg['adr_ticker']}: no option expiries", meta
 
     # One yfinance round-trip per expiry, so this walk is the slow part; logging
     # before it starts makes a hang attributable to this stage.
@@ -499,68 +544,120 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
     today = pd.Timestamp.now().normalize()
     rows = []
     failed_exp = 0
+
+    # Compute dte per expiry and drop dte<1 BEFORE fetching so dead-on-arrival
+    # expiries never spend a round-trip. Keep the survivors in the original
+    # expiries order — the pre-sort frame must be assembled in that order so the
+    # output is byte-identical to the sequential version (the final
+    # sort_values is stable, so identical tie order is preserved).
+    fetchable = []
     for exp in expiries:
         exp_ts = pd.Timestamp(exp)
         dte = int((exp_ts - today).days)
         if dte < 1:
             continue
+        fetchable.append((exp, exp_ts, dte))
+
+    # Fetch the option chains concurrently. tk.option_chain issues an
+    # independent HTTPS GET per expiry (via requests under the hood), which is
+    # the dominant cost; a small pool overlaps those round-trips. yfinance's
+    # per-call HTTP is effectively independent for distinct expiries, and the
+    # shared-Ticker + small-pool pattern is the widely used idiom — a per-call
+    # lock would serialize the fetch and defeat the point. max_workers=5 keeps
+    # us polite to Yahoo. Results are gathered here (unordered) then processed
+    # below strictly in `fetchable` order for deterministic output.
+    def _fetch(exp):
         try:
-            chain = tk.option_chain(exp)
+            return tk.option_chain(exp)
         except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        chains = list(pool.map(_fetch, [exp for exp, _ts, _dte in fetchable]))
+
+    conv = fx / adr_ratio  # USD/ADR -> TWD/Taiwan-share
+    for (exp, exp_ts, dte), chain in zip(fetchable, chains):
+        if chain is None:
             failed_exp += 1
             continue
 
+        T = dte / 365.0
         for is_put, leg in ((False, chain.calls), (True, chain.puts)):
             opt_type = "Put" if is_put else "Call"
-            for _, o in leg.iterrows():
-                K_usd = float(o.get("strike", np.nan))
-                bid_usd = float(o.get("bid", np.nan) or np.nan)
-                ask_usd = float(o.get("ask", np.nan) or np.nan)
-                last_usd = float(o.get("lastPrice", np.nan) or np.nan)
-                if not np.isfinite(K_usd) or K_usd <= 0:
+            if leg is None or len(leg) == 0:
+                continue
+
+            # Vectorized replacement for the per-leg iterrows() loop. yfinance
+            # returns each leg as a DataFrame already, so pull the columns into
+            # numpy arrays and process the whole leg at once.
+            def _col(name):
+                if name in leg.columns:
+                    return pd.to_numeric(leg[name], errors="coerce").to_numpy(dtype=float)
+                return np.full(len(leg), np.nan)
+
+            K_usd = _col("strike")
+            with np.errstate(all="ignore"):
+                # float(x or np.nan): 0 -> NaN, everything else unchanged.
+                bid_usd = np.where(_col("bid") == 0, np.nan, _col("bid"))
+                ask_usd = np.where(_col("ask") == 0, np.nan, _col("ask"))
+                last_usd = np.where(_col("lastPrice") == 0, np.nan, _col("lastPrice"))
+
+            vol_raw = leg["volume"].to_numpy() if "volume" in leg.columns \
+                else np.full(len(leg), np.nan)
+            oi_raw = leg["openInterest"].to_numpy() if "openInterest" in leg.columns \
+                else np.full(len(leg), np.nan)
+
+            with np.errstate(all="ignore"):
+                kok = np.isfinite(K_usd) & (K_usd > 0)
+                ask_live = np.isfinite(ask_usd) & (ask_usd > 0)
+                bid_live = np.isfinite(bid_usd) & (bid_usd > 0)
+                is_live = ask_live & bid_live
+                a_usd = np.where(ask_live, ask_usd, last_usd)
+                b_usd = np.where(bid_live, bid_usd, last_usd)
+                aok = np.isfinite(a_usd) & (a_usd > 0)
+            pre = kok & aok
+
+            m = len(leg)
+            adr_arr = np.full(m, float(adr))
+            T_arr = np.full(m, T)
+            if compute_iv:
+                # IV in native USD/ADR space (scale-free).
+                iv_ask = implied_vol_vec(a_usd, adr_arr, K_usd, T_arr, R_US, 1.0, is_put)
+                with np.errstate(all="ignore"):
+                    b_for = np.where(np.isfinite(b_usd) & (b_usd > 0), b_usd, np.nan)
+                iv_bid = implied_vol_vec(b_for, adr_arr, K_usd, T_arr, R_US, 1.0, is_put)
+                ask_conv = ~np.isnan(iv_ask)
+                fbk = np.isnan(iv_ask) & ~np.isnan(iv_bid)
+                iv_ask = np.where(fbk, iv_bid, iv_ask)
+                # Delta boundary refinement (no leverage column here); re-solve
+                # on the same USD price the scalar path used for iv_ask.
+                price_for_ivask = np.where(ask_conv, a_usd, b_for)
+                iv_ask = _refine_iv_for_rounding(
+                    iv_ask, price_for_ivask, adr_arr, K_usd, T_arr, R_US, 1.0, is_put,
+                    check_delta=True,
+                )
+                converged = ~np.isnan(iv_ask)
+                delta = bs_delta_vec(adr_arr, K_usd, T_arr, R_US, iv_ask, 1.0, is_put)
+                iv_bid = np.where(converged, iv_bid, np.nan)
+                delta = np.where(converged, delta, np.nan)
+                iv_keep = converged if not keep_noniv else np.ones(m, dtype=bool)
+            else:
+                # Arb finder does not use IV/delta — skip the solve.
+                iv_ask = iv_bid = delta = np.full(m, np.nan)
+                iv_keep = np.ones(m, dtype=bool)
+
+            keep = pre & iv_keep
+            exp_lbl = exp_ts.strftime("%b%y")
+            for j in range(m):
+                if not keep[j]:
                     continue
-
-                ask_live = np.isfinite(ask_usd) and ask_usd > 0
-                bid_live = np.isfinite(bid_usd) and bid_usd > 0
-                is_live = ask_live and bid_live
-
-                # Fall back to last trade when a side is missing.
-                a_usd = ask_usd if ask_live else last_usd
-                b_usd = bid_usd if bid_live else last_usd
-                if not (np.isfinite(a_usd) and a_usd > 0):
-                    continue
-
-                T = dte / 365.0
-                if compute_iv:
-                    # IV in native USD/ADR space (scale-free).
-                    iv_ask = implied_vol(a_usd, adr, K_usd, T, R_US, 1.0, is_put)
-                    iv_bid = (
-                        implied_vol(b_usd, adr, K_usd, T, R_US, 1.0, is_put)
-                        if np.isfinite(b_usd) and b_usd > 0
-                        else np.nan
-                    )
-                    if np.isnan(iv_ask) and not np.isnan(iv_bid):
-                        iv_ask = iv_bid
-                    if np.isnan(iv_ask):
-                        # keep_noniv (superset-with-IV mode): keep the row with
-                        # all IV-derived metrics NaN instead of dropping it.
-                        if not keep_noniv:
-                            continue
-                        iv_ask = iv_bid = delta = np.nan
-                    else:
-                        delta = bs_delta(adr, K_usd, T, R_US, iv_ask, 1.0, is_put)
-                else:
-                    # Arb finder does not use IV/delta — skip the solve so an
-                    # option is never dropped just because IV wouldn't converge.
-                    iv_ask = iv_bid = delta = np.nan
-
-                conv = fx / adr_ratio  # USD/ADR -> TWD/Taiwan-share
-                strike_twd = K_usd * conv
-                ask_twd = a_usd * conv
-                bid_twd = (b_usd * conv) if (np.isfinite(b_usd) and b_usd > 0) else np.nan
-
-                contract = f"{'P' if is_put else 'C'}{K_usd:g} {exp_ts.strftime('%b%y')} (US)"
-
+                Kx = K_usd[j]; ax = a_usd[j]; bx = b_usd[j]
+                bok = np.isfinite(bx) and bx > 0
+                strike_twd = Kx * conv
+                ask_twd = ax * conv
+                bid_twd = (bx * conv) if bok else np.nan
+                ivb = iv_bid[j]
+                contract = f"{'P' if is_put else 'C'}{float(Kx):g} {exp_lbl} (US)"
                 rows.append({
                     "contract": contract,
                     "type": opt_type,
@@ -569,16 +666,16 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
                     "days_to_expiry": dte,
                     "bid": round(bid_twd, 4) if np.isfinite(bid_twd) else None,
                     "ask": round(ask_twd, 4),
-                    "iv_ask": round(float(iv_ask), 4),
-                    "iv_bid": round(float(iv_bid), 4) if np.isfinite(iv_bid) else None,
-                    "delta_calc": round(float(delta), 4),
-                    "volume": int(o["volume"]) if pd.notna(o.get("volume")) else 0,
-                    "oi": int(o["openInterest"]) if pd.notna(o.get("openInterest")) else 0,
-                    "is_live": bool(is_live),
+                    "iv_ask": round(float(iv_ask[j]), 4),
+                    "iv_bid": round(float(ivb), 4) if np.isfinite(ivb) else None,
+                    "delta_calc": round(float(delta[j]), 4),
+                    "volume": int(vol_raw[j]) if pd.notna(vol_raw[j]) else 0,
+                    "oi": int(oi_raw[j]) if pd.notna(oi_raw[j]) else 0,
+                    "is_live": bool(is_live[j]),
                     # USD reference (for display / auditing)
-                    "strike_usd": round(K_usd, 4),
-                    "bid_usd": round(b_usd, 4) if (np.isfinite(b_usd) and b_usd > 0) else None,
-                    "ask_usd": round(a_usd, 4),
+                    "strike_usd": round(float(Kx), 4),
+                    "bid_usd": round(float(bx), 4) if bok else None,
+                    "ask_usd": round(float(ax), 4),
                     "adr_price": round(adr, 4),
                     "fx": round(fx, 4),
                 })
@@ -589,7 +686,7 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
             f"{stock_code} {cfg['adr_ticker']} -> 0 contracts from "
             f"{len(expiries)} expiries in {time.time() - t0:.1f}s",
         )
-        raise RuntimeError("no US options in range")
+        return pd.DataFrame(), "no US options in range", meta
 
     applog.log(
         "USOPT",
@@ -599,13 +696,76 @@ def fetch_us_options(stock_code, option_type="All", min_days=1, max_days=365,
     )
     df = pd.DataFrame(rows).sort_values(["days_to_expiry", "strike"]).reset_index(drop=True)
     _cache[cache_key] = (time.time(), df.copy())
-    return _filter_chain(df, option_type, min_days, max_days)
+    filtered = _apply_us_option_filters(df, option_type, min_days, max_days)
+    if filtered.empty:
+        return pd.DataFrame(), "no US options in range", meta
+    return filtered, None, meta
 
 
-def _filter_chain(df, option_type, min_days, max_days):
+def _apply_us_option_filters(df, option_type, min_days, max_days):
+    """Pure filtering (day-range + type). Returns the filtered df, possibly
+    empty. No raise — callers own the empty-case messaging, matching
+    options_logic._apply_option_filters / warrant_logic._apply_warrant_filters."""
     view = df[df["days_to_expiry"].between(int(min_days), int(max_days))]
     if option_type != "All":
         view = view[view["type"] == option_type]
-    if view.empty:
-        raise RuntimeError("no US options in range")
     return view.copy().reset_index(drop=True)
+
+
+def us_option_last(us_code, opt_type, strike_twd, expiry_iso, fx, adr_ratio):
+    """Last traded price (USD per ADR) of the surviving US option leg.
+
+    Matches the ADR option chain by nearest expiry then nearest strike. The
+    stored strike is TWD-per-TW-share, so it is converted back to a USD/ADR
+    strike (× adr_ratio ÷ FX) before matching. Returns None if anything is
+    missing so the caller can fall back to a model value.
+    """
+    cfg = _adr_map().get(us_code)
+    if not cfg or not fx or not adr_ratio or strike_twd <= 0:
+        return None
+    strike_usd = strike_twd * adr_ratio / fx
+    tk = yf.Ticker(cfg["adr_ticker"])
+    exps = tk.options
+    if not exps:
+        return None
+    if expiry_iso:
+        target = pd.Timestamp(expiry_iso).normalize()
+        exp = min(exps, key=lambda e: abs((pd.Timestamp(e) - target).days))
+    else:
+        exp = exps[0]
+    chain = tk.option_chain(exp)
+    leg = chain.calls if str(opt_type).lower().startswith("c") else chain.puts
+    if leg is None or leg.empty:
+        return None
+    row = leg.iloc[(leg["strike"] - strike_usd).abs().argmin()]
+    last = float(row.get("lastPrice") or 0)
+    return last if last > 0 else None
+
+
+def us_options_scan(stock_codes, option_type, min_days, max_days, min_volume):
+    """American (US ADR) option chains for the scanner, in native USD.
+
+    Wraps read_us_option (which also carries the TWD-normalized view used by
+    the arb finder) and returns the USD-native columns a US options trader
+    expects: strike_usd, bid_usd, ask_usd, adr_price (underlying), plus IV /
+    delta / volume / OI. Returns (df, error_or_None, meta) — same contract as
+    the read_X functions it wraps.
+    """
+    df, error, meta = read_us_option(
+        stock_codes, option_type, min_days=max(1, int(min_days)),
+        max_days=int(max_days), compute_iv=True,
+    )
+    if df.empty:
+        return pd.DataFrame(), error or "No data returned", meta
+    if int(min_volume) > 0:
+        df = df[df["volume"] >= int(min_volume)]
+    if df.empty:
+        return pd.DataFrame(), "No data returned", meta
+    if "stock_code" in df.columns:
+        df = df.rename(columns={"stock_code": "product"})
+    else:
+        df = df.assign(product=stock_codes[0] if len(stock_codes) == 1 else None)
+    cols = ["product", "contract", "type", "strike_usd", "adr_price",
+            "days_to_expiry", "bid_usd", "ask_usd", "iv_ask", "iv_bid",
+            "delta_calc", "volume", "oi", "fx", "is_live"]
+    return df[[c for c in cols if c in df.columns]], None, meta

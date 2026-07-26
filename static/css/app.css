@@ -124,10 +124,18 @@ main { padding: 20px 24px; }
   font-family: inherit;
   outline: none;
   transition: border-color 0.15s;
-  min-width: 90px;
 }
 .filters input:focus,
 .filters select:focus { border-color: var(--accent); }
+.filters input,
+.filters select {
+  width: 120px;
+}
+.filters select {
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+}
 
 /* ── Stock multi-select ── */
 .stock-select {
@@ -143,8 +151,8 @@ main { padding: 20px 24px; }
   text-transform: uppercase;
 }
 .stock-select select {
-  height: 150px;
-  min-width: 210px;
+  height: 140px;
+  min-width: 220px;
   padding: 4px;
   background: var(--bg);
   border: 1px solid var(--border);
@@ -153,6 +161,12 @@ main { padding: 20px 24px; }
   font-size: 13px;
   font-family: inherit;
   outline: none;
+  /* The `size` attribute on the element (not just this CSS height) is what
+     actually matters here: without it, some browsers render a multi-select
+     taller than its option count in a mode where mouse-wheel scroll inside
+     the box doesn't work at all — only dragging the native scrollbar thumb
+     does. Setting `size` puts it in the normal scrollable-listbox mode. */
+  overflow-y: auto;
 }
 .stock-select select:focus { border-color: var(--accent); }
 
@@ -205,13 +219,13 @@ button.success {
 }
 button.success:hover { opacity: 0.85; }
 
-/* ── Add-stock form ── */
-#addStockForm {
+/* ── Add-product form (warrant / TW option / US option) ── */
+.add-product-form {
   flex-direction: column;
   gap: 5px;
   margin-top: 4px;
 }
-#addStockForm input {
+.add-product-form input {
   padding: 5px 8px;
   background: var(--bg);
   border: 1px solid var(--border);
@@ -221,7 +235,7 @@ button.success:hover { opacity: 0.85; }
   font-family: inherit;
   outline: none;
 }
-#addStockForm input:focus { border-color: var(--accent); }
+.add-product-form input:focus { border-color: var(--accent); }
 
 /* ── Sort buttons ── */
 .sort-btns {
@@ -325,4 +339,27 @@ tbody tr:last-child td { border-bottom: none; }
   display: flex;
   flex-direction: column;
   gap: 8px;
+  flex-basis: 100%;
+  margin-top: 6px;
 }
+.action-group.compact {
+  flex-basis: auto;
+  margin-top: 0;
+}
+
+/* ── Market-session clock widget ── */
+#market-clock{position:fixed;right:14px;bottom:14px;z-index:900;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 11px;font-size:11px;color:var(--muted);box-shadow:0 4px 16px rgba(0,0,0,.35);min-width:190px;user-select:none}
+#market-clock .mc-clocks{display:flex;justify-content:space-between;gap:10px;margin-bottom:7px;padding-bottom:6px;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums}
+#market-clock .mc-clocks b{color:var(--text);font-size:12px;font-weight:700}
+#market-clock .mc-row{position:relative;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:2px 0;cursor:default}
+#market-clock .mc-lbl{color:var(--muted)}
+#market-clock .mc-tip{position:absolute;right:calc(100% + 10px);top:50%;transform:translateY(-50%);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 10px;box-shadow:0 6px 20px rgba(0,0,0,.45);white-space:nowrap;opacity:0;visibility:hidden;transition:opacity .12s;pointer-events:none;z-index:1000;min-width:158px}
+#market-clock .mc-row:hover .mc-tip{opacity:1;visibility:visible}
+#market-clock .mc-tip-h{color:var(--text);font-weight:700;font-size:11px;margin-bottom:5px}
+#market-clock .mc-tip-r{display:flex;justify-content:space-between;gap:14px;padding:1px 0;font-size:11px;font-variant-numeric:tabular-nums}
+#market-clock .mc-tip-k{color:var(--muted)}
+#market-clock .mc-tip-v{color:var(--text)}
+#market-clock .mc-badge{font-weight:700;font-size:10px;letter-spacing:.3px;text-transform:uppercase;padding:2px 7px;border-radius:10px;white-space:nowrap}
+.mc-open{color:var(--put);background:rgba(74,222,128,.15)}
+.mc-after{color:#fbbf24;background:rgba(251,191,36,.15)}
+.mc-closed{color:var(--muted);background:rgba(139,144,160,.13)}

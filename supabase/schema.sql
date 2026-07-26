@@ -1,8 +1,8 @@
 -- Supabase schema for Taiwan-Warrants-Web.
 -- Run this ONCE in the Supabase SQL editor (Dashboard -> SQL Editor -> New query).
--- Creates the allowed_users allow-list, per-user portfolio and custom_stocks
--- tables, enables Row Level Security, and adds policies so each authenticated
--- user can only read/write their own rows.
+-- Creates the allowed_users allow-list and per-user portfolio table, enables
+-- Row Level Security, and adds policies so each authenticated user can only
+-- read/write their own rows.
 -- This file is the current end state. An existing deployment created from an
 -- older copy is brought up to date by the files in migrations/ instead.
 
@@ -20,15 +20,9 @@ create table portfolio (
   primary key (user_id, id)
 );
 create index portfolio_user_updated_at_idx on portfolio (user_id, updated_at desc);
-create table custom_stocks (
-  user_id uuid primary key references auth.users(id) on delete cascade,
-  stocks jsonb not null default '[]', updated_at timestamptz default now()
-);
 alter table portfolio enable row level security;
-alter table custom_stocks enable row level security;
 alter table allowed_users enable row level security;
 create policy "own rows" on portfolio for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
-create policy "own row" on custom_stocks for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- SERVER-ONLY market-data tables (Supabase market-data migration, Phase 2).
@@ -142,7 +136,8 @@ create table if not exists md_warrant_universe (
   code text,
   name text,
   start date,
-  market text
+  market text,
+  type text
 );
 create index if not exists md_warrant_universe_batch_code_idx on md_warrant_universe (batch_id, code);
 
@@ -153,6 +148,61 @@ create table if not exists cmoney_key (
   key text,
   updated_at timestamptz
 );
+
+-- Tracked-product lists (Phase 5 of the naming/correctness plan). Shared
+-- across all users — no per-user scoping, no is_admin gate. Same RLS pattern
+-- as the md_* tables above: enabled, no policy, service-role only.
+create table if not exists warrant_stocks (
+  code text primary key,
+  name text,
+  created_at timestamptz default now()
+);
+
+create table if not exists tw_option_products (
+  code text primary key,
+  commodity_ids text[] not null,
+  ticker text not null,
+  exercise_ratio int not null,
+  name text,
+  created_at timestamptz default now()
+);
+
+create table if not exists us_option_products (
+  code text primary key,
+  adr_ticker text not null,
+  fx_ticker text not null,
+  adr_ratio numeric not null,
+  name text,
+  created_at timestamptz default now()
+);
+
+-- Automated Direct-Arb scanner output (scheduler.py:sync_suggestions), same
+-- server-only RLS pattern as the tables above. id is a deterministic string
+-- built from (arb_type, sorted leg codes, strikes, expiry/contract,
+-- direction) so re-finding the same opportunity next cycle upserts the same
+-- row instead of creating a duplicate. status has no 'dismissed' value —
+-- user-initiated removal is a hard delete (services/db_suggestions.py),
+-- since the next scan cycle would just re-upsert the same id anyway.
+create table if not exists arb_suggestions (
+  id text primary key,
+  arb_type text not null,
+  legs jsonb not null,
+  price_diff numeric not null,
+  price_diff_pct numeric,
+  legs_status jsonb not null,
+  first_seen_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  status text not null default 'active',
+  created_at timestamptz default now()
+);
+create index if not exists arb_suggestions_status_idx on arb_suggestions (status, last_seen_at desc);
+
+alter table warrant_stocks enable row level security;
+alter table tw_option_products enable row level security;
+alter table us_option_products enable row level security;
+alter table arb_suggestions enable row level security;
+
+grant all on warrant_stocks, tw_option_products, us_option_products, arb_suggestions to service_role;
 
 alter table md_batches enable row level security;
 alter table md_warrants enable row level security;

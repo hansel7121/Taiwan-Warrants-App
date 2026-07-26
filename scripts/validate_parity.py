@@ -141,25 +141,25 @@ def compare_frames(name, live_df, supa_df, key_cols):
 
 def main():
     _mark_supabase(False)
-    # Pin the warrant universe SYNCHRONOUSLY first. refresh_warrants otherwise
+    # Pin the warrant universe SYNCHRONOUSLY first. sync_warrant otherwise
     # kicks an async ISIN scrape that can complete mid-run, invalidate the
     # warrant cache, and make the live read resolve against a different (larger)
     # universe than the one the snapshot was written from — a harness-only race,
     # not a reader defect. Scraping up front makes the universe stable so live
     # and snapshot see identical inputs.
     print("PARITY: pinning warrant universe (synchronous ISIN scrape)...")
-    warrant_logic.refresh_warrant_universe()
+    warrant_logic.scrape_twse_universe()
     print("PARITY: refreshing snapshots + warming live caches (single instant)...")
-    scheduler.refresh_warrants()
-    scheduler.refresh_tw_options()
-    scheduler.refresh_us_options()
+    scheduler.sync_warrant()
+    scheduler.sync_tw_option()
+    scheduler.sync_us_option()
     print("PARITY: refresh complete\n")
 
     results = {}
 
     # 1. Warrant scanner (compute_iv default True) — HARD gate. Compare tuple[0].
     lv, sp = both(
-        warrant_logic.fetch_warrants, ["2330", "2317"], "All", 0, 365, 0, 100, 0
+        warrant_logic.read_warrant, ["2330", "2317"], "All", 0, 365, 0, 100, 0
     )
     results["warrants_scanner"] = compare_frames(
         "warrants_scanner", lv[0], sp[0], ["warrant_code"]
@@ -167,53 +167,45 @@ def main():
 
     # 2. Warrant arb superset (compute_iv=False).
     lv, sp = both(
-        warrant_logic.fetch_warrants, ["2330"], "All", 0, 365, 0, 1e9, 0,
+        warrant_logic.read_warrant, ["2330"], "All", 0, 365, 0, 1e9, 0,
         compute_iv=False,
     )
     results["warrants_arb"] = compare_frames(
         "warrants_arb", lv[0], sp[0], ["warrant_code"]
     )
 
-    # 3. TW options scanner. Live returns empty df on no-data; supabase raises on
-    #    empty — treat both-empty (whether empty-df or raise) as PASS.
-    lv, sp, Raised = _both_try(
-        options_logic.fetch_options, ["2330"], "All", 0, 365, 0, 0
-    )
-    live_empty = isinstance(lv, Raised) or (hasattr(lv, "empty") and lv.empty)
-    supa_empty = isinstance(sp, Raised) or (hasattr(sp, "empty") and sp.empty)
-    if live_empty and supa_empty:
+    # 3. TW options scanner. Both live and supabase now return (df, error, meta)
+    #    gracefully — both-empty is a legitimate SKIP/PASS, not a raise.
+    def _tw_option_df(*args, **kw):
+        df, _err, _meta = options_logic.read_tw_option(*args, **kw)
+        return df
+
+    lv, sp = both(_tw_option_df, ["2330"], "All", 0, 365, 0, 0)
+    if lv.empty and sp.empty:
         print("[tw_options_scanner] live=empty supa=empty SKIP/PASS (both empty)")
         results["tw_options_scanner"] = True
-    elif isinstance(lv, Raised) or isinstance(sp, Raised):
-        print(f"[tw_options_scanner] FAIL only one side raised "
-              f"(live_raised={isinstance(lv, Raised)} supa_raised={isinstance(sp, Raised)})")
-        results["tw_options_scanner"] = False
     else:
         results["tw_options_scanner"] = compare_frames(
             "tw_options_scanner", lv, sp, ["contract"]
         )
 
     # 4. US options scanner.
-    lv, sp, Raised = _both_try(
-        us_options_logic.fetch_us_options, "2303", "All", 1, 365
-    )
-    live_empty = isinstance(lv, Raised) or (hasattr(lv, "empty") and lv.empty)
-    supa_empty = isinstance(sp, Raised) or (hasattr(sp, "empty") and sp.empty)
-    if live_empty and supa_empty:
+    def _us_option_df(*args, **kw):
+        df, _err, _meta = us_options_logic.read_us_option(*args, **kw)
+        return df
+
+    lv, sp = both(_us_option_df, ["2303"], "All", 1, 365)
+    if lv.empty and sp.empty:
         print("[us_options_scanner] live=empty supa=empty SKIP/PASS (both empty)")
         results["us_options_scanner"] = True
-    elif isinstance(lv, Raised) or isinstance(sp, Raised):
-        print(f"[us_options_scanner] FAIL only one side raised "
-              f"(live_raised={isinstance(lv, Raised)} supa_raised={isinstance(sp, Raised)})")
-        results["us_options_scanner"] = False
     else:
         results["us_options_scanner"] = compare_frames(
             "us_options_scanner", lv, sp, ["contract"]
         )
 
-    # 5. Arb finder end-to-end (proves the /arb_finder path matches) — HARD gate.
+    # 5. Arb finder end-to-end (proves the /match_warrant_tw_option path matches) — HARD gate.
     lv, sp, Raised = _both_try(
-        arb_logic.build_arb_df, ["2330"], "All", 5.0, 30,
+        arb_logic.match_warrant_tw_option, ["2330"], "All", 5.0, 30,
         True, 0, "same_type",
     )
     live_empty = isinstance(lv, Raised) or (hasattr(lv, "empty") and lv.empty)

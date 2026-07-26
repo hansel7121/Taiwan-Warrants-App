@@ -1,7 +1,7 @@
 // Arb Finder (Direct / US / TW-US), ADR-premium panels, and the PCP trade modal.
 
 async function downloadArbCSV() {
-  const res = await api("/arb_finder_csv", {
+  const res = await api("/match_warrant_tw_option_csv", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(getArbFilters()),
@@ -52,13 +52,13 @@ function onUsStrategyChange() {
     : "";
 }
 
-async function fetchUsData() {
+async function matchWarrantUsOption() {
   document.getElementById("us-status").textContent = "Fetching warrants and UMC options…";
   document.getElementById("us-tableContainer").innerHTML = "";
   document.getElementById("usDownloadBtn").style.display = "none";
   let data;
   try {
-    const res = await api("/us_option_match", {
+    const res = await api("/match_warrant_us_option", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(getUsFilters()),
@@ -84,49 +84,7 @@ async function fetchUsData() {
 // IV is no longer computed for arb — hide those columns everywhere.
 
 function renderUsTable(rows) {
-  const container = document.getElementById("us-tableContainer");
-  if (!rows.length) {
-    container.innerHTML = "<p style='padding:16px;color:var(--muted)'>No matches found. Try relaxing the thresholds.</p>";
-    return;
-  }
-  const cols = visCols(rows[0]);
-  let html = "<table><thead><tr>";
-  cols.forEach((c, i) => {
-    const arrow = usSortCol === i ? (usSortAsc ? " ▲" : " ▼") : "";
-    html += `<th onclick="sortUsByIndex(${i})">${colLabel(c)}${arrow}</th>`;
-  });
-  html += "</tr></thead><tbody>";
-  rows.forEach((row, ri) => {
-    const typeCls = row.type === "Call" ? "call" : "put";
-    html += `<tr style="cursor:pointer" onclick="openUsModal(currentUsData[${ri}])" title="Click to view trade breakdown">`;
-    cols.forEach(c => {
-      let val = row[c] === null ? "—" : row[c];
-      if (c === "type") {
-        val = `<span class="${typeCls}">${val}</span>`;
-      } else if ((c === "price_diff_pct" || c === "price_diff") && row[c] !== null) {
-        const cls = row[c] > 0 ? "put" : "call";
-        val = `<span class="${cls}">${val}${c === "price_diff_pct" ? "%" : ""}</span>`;
-      }
-      html += `<td>${val}</td>`;
-    });
-    html += "</tr>";
-  });
-  html += "</tbody></table>";
-  container.innerHTML = html;
-}
-
-function sortUsByIndex(colIndex) {
-  if (!currentUsData.length) return;
-  const key = visCols(currentUsData[0])[colIndex];
-  if (usSortCol === colIndex) usSortAsc = !usSortAsc;
-  else { usSortCol = colIndex; usSortAsc = true; }
-  currentUsData.sort((a, b) => {
-    const av = a[key], bv = b[key];
-    if (av === null) return 1; if (bv === null) return -1;
-    if (typeof av === "number") return usSortAsc ? av - bv : bv - av;
-    return usSortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
-  });
-  renderUsTable(currentUsData);
+  renderCompactArbTable("us-tableContainer", rows, "us", "currentUsData");
 }
 
 function sortUsBy(key, asc) {
@@ -183,7 +141,7 @@ function openUsModal(row) {
 }
 
 async function downloadUsCSV() {
-  const res = await api("/us_option_match_csv", {
+  const res = await api("/match_warrant_us_option_csv", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(getUsFilters()),
@@ -207,13 +165,13 @@ function getTwUsFilters() {
   };
 }
 
-async function fetchTwUsData() {
+async function matchTwUsOption() {
   document.getElementById("twus-status").textContent = "Fetching Taiwan + US options…";
   document.getElementById("twus-tableContainer").innerHTML = "";
   document.getElementById("twusDownloadBtn").style.display = "none";
   let data;
   try {
-    const res = await api("/tw_us_option_match", {
+    const res = await api("/match_tw_us_option", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(getTwUsFilters()),
@@ -235,45 +193,7 @@ async function fetchTwUsData() {
 }
 
 function renderTwUsTable(rows) {
-  const container = document.getElementById("twus-tableContainer");
-  if (!rows.length) {
-    container.innerHTML = "<p style='padding:16px;color:var(--muted)'>No matches found. Try relaxing the thresholds.</p>";
-    return;
-  }
-  const cols = visCols(rows[0]);
-  let html = "<table><thead><tr>";
-  cols.forEach((c, i) => {
-    const arrow = twusSortCol === i ? (twusSortAsc ? " ▲" : " ▼") : "";
-    html += `<th onclick="sortTwUsByIndex(${i})">${colLabel(c)}${arrow}</th>`;
-  });
-  html += "</tr></thead><tbody>";
-  rows.forEach((row, ri) => {
-    const typeCls = row.type === "Call" ? "call" : "put";
-    html += `<tr style="cursor:pointer" onclick="openTwUsModal(currentTwUsData[${ri}])" title="Click to view trade breakdown + scenario">`;
-    cols.forEach(c => {
-      let val = row[c] === null ? "—" : row[c];
-      if (c === "type") val = `<span class="${typeCls}">${val}</span>`;
-      else if (c === "price_diff_pct" && row[c] !== null) val = `<span class="put">${val}%</span>`;
-      html += `<td>${val}</td>`;
-    });
-    html += "</tr>";
-  });
-  html += "</tbody></table>";
-  container.innerHTML = html;
-}
-
-function sortTwUsByIndex(colIndex) {
-  if (!currentTwUsData.length) return;
-  const key = visCols(currentTwUsData[0])[colIndex];
-  if (twusSortCol === colIndex) twusSortAsc = !twusSortAsc;
-  else { twusSortCol = colIndex; twusSortAsc = true; }
-  currentTwUsData.sort((a, b) => {
-    const av = a[key], bv = b[key];
-    if (av === null) return 1; if (bv === null) return -1;
-    if (typeof av === "number") return twusSortAsc ? av - bv : bv - av;
-    return twusSortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
-  });
-  renderTwUsTable(currentTwUsData);
+  renderCompactArbTable("twus-tableContainer", rows, "twus", "currentTwUsData");
 }
 
 function sortTwUsBy(key, asc) {
@@ -289,38 +209,38 @@ function sortTwUsBy(key, asc) {
 function openTwUsModal(row) {
   // TW option → warrant_* slots, US option → opt_* slots (already emitted so).
   const mapped = {
-    warrant_code:     row.warrant_code,
-    warrant_name:     row.warrant_name,
+    warrant_code:     row.tw_option_code,
+    warrant_name:     row.tw_option_name,
     warrant_type:     row.type,
     opt_type:         row.type,
-    option_contract:  row.option_contract,
+    option_contract:  row.us_option_contract,
     underlying_price: row.underlying_price,
-    warrant_dte:      row.warrant_dte,
-    opt_dte:          row.opt_dte,
+    warrant_dte:      row.tw_option_dte,
+    opt_dte:          row.us_option_dte,
     dte_diff:         row.dte_diff,
-    warrant_strike:   row.warrant_strike,
-    opt_strike:       row.opt_strike,
+    warrant_strike:   row.tw_option_strike,
+    opt_strike:       row.us_option_strike,
     strike_diff_pct:  row.strike_diff_pct,
-    warrants_needed:  row.warrants_needed,
-    opt_contract_size:row.opt_contract_size,
+    warrants_needed:  row.tw_contracts_needed,
+    opt_contract_size:row.us_option_contract_size,
     tw_contracts:     row.tw_contracts,
     us_contracts:     row.us_contracts,
     tw_depth_contracts: row.tw_depth_contracts,
     tw_fillable:      row.tw_fillable,
     us_volume:        row.us_volume,
     us_oi:            row.us_oi,
-    warrant_ask:      row.warrant_ask,
-    warrant_bid:      row.warrant_bid,
-    opt_bid:          row.opt_bid,
-    opt_ask:          row.opt_ask,
-    warrant_per_share:row.warrant_per_share,
-    opt_per_share:    row.opt_per_share,
+    warrant_ask:      row.tw_option_ask,
+    warrant_bid:      row.tw_option_bid,
+    opt_bid:          row.us_option_bid,
+    opt_ask:          row.us_option_ask,
+    warrant_per_share:row.tw_option_per_share,
+    opt_per_share:    row.us_option_per_share,
     pcp_diff:         row.price_diff,
     pcp_diff_pct:     row.price_diff_pct,
-    synthetic_price:  row.opt_per_share,
+    synthetic_price:  row.us_option_per_share,
     bond_pv:          null,
-    warrant_iv:       row.warrant_iv,
-    opt_iv:           row.opt_iv,
+    warrant_iv:       row.tw_option_iv,
+    opt_iv:           row.us_option_iv,
     us_stock_code:    row.us_stock_code,
     loose:            false,   // TW/US tab has no loose toggle (always executable)
   };
@@ -328,7 +248,7 @@ function openTwUsModal(row) {
 }
 
 async function downloadTwUsCSV() {
-  const res = await api("/tw_us_option_match_csv", {
+  const res = await api("/match_tw_us_option_csv", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(getTwUsFilters()),
@@ -687,17 +607,16 @@ let arbSortCol = null;
 let arbSortAsc = true;
 
 function setArbMode(mode) {
-  const modes = ["direct", "us", "twus"];
+  const modes = ["direct", "us", "twus", "straddle"];
   modes.forEach(m => {
     const active = m === mode;
     const btn = document.getElementById("arb-mode-" + m);
-    btn.style.background = active ? "var(--accent)" : "var(--surface)";
-    btn.style.color = active ? "#fff" : "var(--muted)";
+    btn.classList.toggle("active", active);
     document.getElementById("arb-sub-" + m).style.display = active ? "block" : "none";
   });
 }
 
-function runArb() {
+function matchWarrantTwOption() {
   fetchArbData();
 }
 
@@ -727,7 +646,7 @@ async function fetchArbData() {
   document.getElementById("arbDownloadBtn").style.display = "none";
   let data;
   try {
-    const res = await api("/arb_finder", {
+    const res = await api("/match_warrant_tw_option", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(getArbFilters()),
@@ -750,67 +669,101 @@ async function fetchArbData() {
   renderArbTable(currentArbData);
 }
 
-function renderArbTable(rows) {
-  const container = document.getElementById("arb-tableContainer");
+// ── Compact arb result table (shared by Direct / US / TW-US) ───────────
+// Five decision columns. Everything trimmed — both sides of every quote,
+// depth counts, contract sizes, IV — is still reachable: click the row for
+// the full modal, or hit Download CSV, which exports every field.
+// Each mode names its two legs and where its strike/DTE fields live, since
+// TW/US rows carry tw_option_*/us_option_* while Direct/US carry warrant_*/opt_*.
+const ARB_TBL = {
+  direct: { open: "openDirectModal", legA: "Warrant",   legB: "TW Option",
+            aName: "warrant_name", aK: "warrant_strike", aD: "warrant_dte",
+            bName: "option_contract", bK: "opt_strike", bD: "opt_dte" },
+  us:     { open: "openUsModal",     legA: "Warrant",   legB: "US Option",
+            aName: "warrant_name", aK: "warrant_strike", aD: "warrant_dte",
+            bName: "option_contract", bK: "opt_strike", bD: "opt_dte" },
+  twus:   { open: "openTwUsModal",   legA: "TW Option", legB: "US Option",
+            aName: "tw_option_name", aK: "tw_option_strike", aD: "tw_option_dte",
+            bName: "us_option_contract", bK: "us_option_strike", bD: "us_option_dte" },
+};
+const _n = (v, d = 2) => v == null ? "—"
+  : Number(v).toLocaleString(undefined, { maximumFractionDigits: d });
+
+function renderCompactArbTable(containerId, rows, mode, arrName) {
+  const cfg = ARB_TBL[mode];
+  const c = document.getElementById(containerId);
   if (!rows.length) {
-    container.innerHTML = "<p style='padding:16px;color:var(--muted)'>No matches found. Try relaxing the thresholds.</p>";
+    c.innerHTML = "<p style='padding:16px;color:var(--muted)'>No matches found. Try relaxing the thresholds.</p>";
     return;
   }
-  const cols = visCols(rows[0]);
-  let html = "<table><thead><tr>";
-  cols.forEach((c, i) => {
-    const arrow = arbSortCol === i ? (arbSortAsc ? " ▲" : " ▼") : "";
-    html += `<th onclick="sortArbByIndex(${i})">${colLabel(c)}${arrow}</th>`;
+  const th = "padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;border-bottom:1px solid var(--border);text-align:left";
+  const td = "padding:7px 10px;border-bottom:1px solid var(--border);font-size:12px;vertical-align:top";
+  const sub = "color:var(--muted);font-size:11px";
+  let h = `<table style="width:100%;border-collapse:collapse"><thead><tr>
+    <th style="${th}">Trade</th><th style="${th}">${cfg.legA}</th><th style="${th}">${cfg.legB}</th>
+    <th style="${th};text-align:right">Edge</th><th style="${th};text-align:right">Size</th>
+  </tr></thead><tbody>`;
+
+  rows.forEach((r, i) => {
+    // "Buy Warrant / Sell Option" and "Long TW / Short US" both split on the
+    // slash into a bought leg and a sold leg — colour them by side.
+    const legs = String(r.trade || "").split("/").map(s => s.trim()).filter(Boolean);
+    const tradeHtml = legs.map(p =>
+      `<div style="color:${/^(Buy|Long)/i.test(p) ? MARK_LONG : MARK_SHORT};font-size:11px;font-weight:600">${p}</div>`
+    ).join("");
+    const dbg = r.executable === false
+      ? `<div style="${sub};color:var(--call)">debug</div>` : "";
+
+    const tCls = r.type === "Call" ? "call" : "put";
+    const typeTag = `<span class="${tCls}" style="font-weight:600">${r.type || ""}</span>`;
+    const legCell = (title, K, dte) =>
+      `<div style="font-weight:600">${title}</div>
+       <div style="${sub}">K${_n(K)} · ${dte == null ? "—" : dte + "d"}</div>`;
+
+    // Colour each figure by its own sign. In TW/US mode price_diff is the parity
+    // gap while price_diff_pct is the entry credit, so the two genuinely disagree
+    // in sign and must not share a class.
+    const pd = r.price_diff, pct = r.price_diff_pct;
+    const pdCls = pd > 0 ? "put" : "call";
+    const pctCls = pct > 0 ? "put" : "call";
+    const credit = r.entry_credit != null
+      ? `<div style="${sub}">${r.entry_credit >= 0 ? "+" : ""}${_n(r.entry_credit, 0)} NT$</div>` : "";
+
+    // Size = the quantity that actually has to be executed, plus whether the
+    // best price level holds enough resting size to fill it.
+    let sizeMain, sizeSub, fillOk;
+    if (mode === "twus") {
+      sizeMain = `${_n(r.tw_contracts, 0)} 口`;
+      sizeSub = `${_n(r.us_contracts, 0)} US`;
+      fillOk = r.tw_fillable;
+    } else {
+      sizeMain = `${_n(r.board_lots, 3)} 張`;
+      sizeSub = r.warrant_depth_lots != null ? `depth ${_n(r.warrant_depth_lots, 0)}` : "";
+      fillOk = r.fillable;
+    }
+    const fillTag = fillOk == null ? ""
+      : fillOk ? `<span class="put" style="font-weight:600">✓</span>`
+               : `<span class="call" style="font-weight:600">✗</span>`;
+
+    h += `<tr style="cursor:pointer" onclick="${cfg.open}(${arrName}[${i}])" title="Click for the full breakdown">
+      <td style="${td}">${tradeHtml}${dbg}</td>
+      <td style="${td}">${typeTag} ${legCell(r[cfg.aName] || r.warrant_code || "", r[cfg.aK], r[cfg.aD])}</td>
+      <td style="${td}">${legCell(r[cfg.bName] || "", r[cfg.bK], r[cfg.bD])}</td>
+      <td style="${td};text-align:right">
+        <div class="${pdCls}" style="font-weight:700">${pd == null ? "—" : (pd > 0 ? "+" : "") + _n(pd, 4)}</div>
+        <div class="${pctCls}" style="font-size:11px">${pct == null ? "" : (pct > 0 ? "+" : "") + _n(pct) + "%"}</div>
+        ${credit}
+      </td>
+      <td style="${td};text-align:right">
+        <div style="font-weight:600;${fillOk === false ? "color:var(--call)" : ""}">${sizeMain} ${fillTag}</div>
+        <div style="${sub}">${sizeSub}</div>
+      </td></tr>`;
   });
-  html += "</tr></thead><tbody>";
-  rows.forEach((row, ri) => {
-    const typeCls = row.type === "Call" ? "call" : "put";
-    html += `<tr style="cursor:pointer" onclick="openDirectModal(currentArbData[${ri}])" title="Click to view trade breakdown">`;
-    cols.forEach(c => {
-      let val = row[c] === null ? "—" : row[c];
-      if (c === "type") {
-        val = `<span class="${typeCls}">${val}</span>`;
-      } else if (c === "fillable") {
-        // Enough resting size at the quoted price to fill board_lots?
-        val = row[c]
-          ? `<span class="put" style="font-weight:600">✓</span>`
-          : `<span class="call" style="font-weight:600">✗</span>`;
-      } else if (c === "board_lots") {
-        // Red when the needed size exceeds the best-level depth.
-        val = row.fillable === false
-          ? `<span class="call" style="font-weight:600">${val}</span>`
-          : val;
-      } else if (c === "executable") {
-        val = row[c]
-          ? `<span class="put" style="font-weight:600">exec</span>`
-          : `<span style="color:var(--muted)">debug</span>`;
-      } else if (c === "price_diff_pct" && row[c] !== null) {
-        const cls = row[c] > 0 ? "put" : "call";
-        val = `<span class="${cls}">${val}%</span>`;
-      } else if (c === "price_diff" && row[c] !== null) {
-        const cls = row[c] > 0 ? "put" : "call";
-        val = `<span class="${cls}">${val}</span>`;
-      }
-      html += `<td>${val}</td>`;
-    });
-    html += "</tr>";
-  });
-  html += "</tbody></table>";
-  container.innerHTML = html;
+  c.innerHTML = h + "</tbody></table>";
 }
 
-function sortArbByIndex(colIndex) {
-  if (!currentArbData.length) return;
-  const key = visCols(currentArbData[0])[colIndex];
-  if (arbSortCol === colIndex) arbSortAsc = !arbSortAsc;
-  else { arbSortCol = colIndex; arbSortAsc = true; }
-  currentArbData.sort((a, b) => {
-    const av = a[key], bv = b[key];
-    if (av === null) return 1; if (bv === null) return -1;
-    if (typeof av === "number") return arbSortAsc ? av - bv : bv - av;
-    return arbSortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
-  });
-  renderArbTable(currentArbData);
+function renderArbTable(rows) {
+  renderCompactArbTable("arb-tableContainer", rows, "direct", "currentArbData");
 }
 
 function sortArbBy(key, asc) {
@@ -821,6 +774,235 @@ function sortArbBy(key, asc) {
     return asc ? av - bv : bv - av;
   });
   renderArbTable(currentArbData);
+}
+
+// ── Straddle Vol Arb ───────────────────────────────────────────────
+let currentStraddleData = [];
+
+function runStraddle() { fetchStraddleData(); }
+
+function getStraddleFilters() {
+  const sel = document.getElementById("straddleStockSelect");
+  return {
+    stock_codes: Array.from(sel.selectedOptions).map(o => o.value),
+    max_strike_diff_pct: parseFloat(document.getElementById("straddleMaxStrikePct").value) || 10,
+    max_dte_diff: parseInt(document.getElementById("straddleMaxDteDiff").value) || 30,
+    min_iv_edge: parseFloat(document.getElementById("straddleMinIvEdge").value) || 0,
+    min_volume: parseInt(document.getElementById("straddleMinVolume").value) || 0,
+    loose: document.getElementById("straddleLoose").checked,
+    short_warrants: document.getElementById("straddleShortWarrants").checked,
+    require_dte_cover: document.getElementById("straddleDteCover").checked,
+  };
+}
+
+async function fetchStraddleData() {
+  const st = document.getElementById("straddle-status");
+  st.textContent = "Fetching warrants and options…";
+  document.getElementById("straddle-tableContainer").innerHTML = "";
+  document.getElementById("straddleDownloadBtn").style.display = "none";
+  let data;
+  try {
+    const res = await api("/straddle_arbitrage", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(getStraddleFilters()),
+    });
+    data = await res.json();
+  } catch (e) { st.textContent = "Error: " + e.message; return; }
+  if (data.error) { st.textContent = "Error: " + data.error; return; }
+  currentStraddleData = data.rows;
+  const f = getStraddleFilters();
+  const dbg = [];
+  if (f.loose) dbg.push("loose prices");
+  if (f.short_warrants) dbg.push("short warrants");
+  if (!f.require_dte_cover) dbg.push("DTE cover off");
+  const warn = dbg.length
+    ? `<div style="margin-top:6px;padding:6px 10px;border-radius:4px;background:rgba(220,80,60,0.15);border:1px solid rgba(220,80,60,0.5);color:var(--text);font-size:12px"><b>DEBUG MODE — rows below are NOT executable</b> (${dbg.join(", ")}).</div>`
+    : "";
+  st.innerHTML = `${data.count} straddle pairs — <b>long</b> the cheap-vol package (buy) vs <b>short</b> the dear option package (write). Edge = short IV − long IV (vol pts).${asOfLabel(data)}` + warn;
+  if (data.count) document.getElementById("straddleDownloadBtn").style.display = "inline-block";
+  renderStraddleTable(currentStraddleData);
+}
+
+function _strLegCell(lg) {
+  const tag = lg.source === "warrant" ? "W" : "O";
+  const col = lg.type === "Call" ? "var(--put)" : "var(--call)";
+  return `<span style="color:${col};font-weight:600">${tag}·${lg.type[0]}</span> K${lg.K} ${lg.dte}d <span style="color:var(--muted)">iv${(lg.iv*100).toFixed(1)}</span>`;
+}
+
+function renderStraddleTable(rows) {
+  const c = document.getElementById("straddle-tableContainer");
+  if (!rows.length) {
+    c.innerHTML = "<p style='padding:16px;color:var(--muted)'>No straddle pairs. Relax Δ-strike / ΔDTE, or lower Min IV Edge — warrants trade rich, so a positive (executable) edge is uncommon.</p>";
+    return;
+  }
+  const th = "padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;border-bottom:1px solid var(--border);text-align:left";
+  const td = "padding:7px 10px;border-bottom:1px solid var(--border);font-size:12px";
+  let h = `<table style="width:100%;border-collapse:collapse"><thead><tr>
+    <th style="${th}">Stock</th><th style="${th}">Long pkg (buy)</th><th style="${th}">Short pkg (write · options)</th>
+    <th style="${th};text-align:right">IV edge</th><th style="${th};text-align:right">Long/Short IV</th>
+    <th style="${th};text-align:right">Net cash</th><th style="${th};text-align:right">1st exp</th></tr></thead><tbody>`;
+  rows.forEach((r, i) => {
+    const eCol = r.iv_edge_pts >= 0 ? "var(--put)" : "var(--call)";
+    h += `<tr style="cursor:pointer" onclick="openStraddleModal(currentStraddleData[${i}])" title="Click for breakdown">
+      <td style="${td}">${r.underlying_code}</td>
+      <td style="${td}">${_strLegCell(r.long_call)} + ${_strLegCell(r.long_put)}</td>
+      <td style="${td}">${_strLegCell(r.short_call)} + ${_strLegCell(r.short_put)}</td>
+      <td style="${td};text-align:right;font-weight:700;color:${eCol}">${r.iv_edge_pts>=0?"+":""}${r.iv_edge_pts.toFixed(2)}</td>
+      <td style="${td};text-align:right">${(r.long_iv*100).toFixed(1)} / ${(r.short_iv*100).toFixed(1)}</td>
+      <td style="${td};text-align:right;color:${r.net_cash>=0?'var(--put)':'var(--call)'}">${r.net_cash>=0?"+":""}${Math.round(r.net_cash).toLocaleString()}</td>
+      <td style="${td};text-align:right">${r.first_expiry}d</td></tr>`;
+  });
+  c.innerHTML = h + "</tbody></table>";
+}
+
+function sortStraddleBy(key, asc) {
+  if (!currentStraddleData.length) return;
+  currentStraddleData.sort((a, b) => { const av = a[key] ?? (asc ? Infinity : -Infinity), bv = b[key] ?? (asc ? Infinity : -Infinity); return asc ? av - bv : bv - av; });
+  renderStraddleTable(currentStraddleData);
+}
+
+async function downloadStraddleCSV() {
+  const res = await api("/straddle_arbitrage_csv", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(getStraddleFilters()) });
+  const blob = await res.blob(); const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download = "straddle_arbitrage.csv"; a.click();
+}
+
+function openStraddleInfo() {
+  alert("Straddle Vol Arb\n\nA straddle package = one call + one put on the same underlying (strikes may differ within Δ-strike = a strangle).\n\nLONG the cheapest-implied-vol package (legs bought from a warrant OR an option) and SHORT the dearest package (OPTION legs only — Taiwan warrants can't be shorted). Edge = short IV − long IV, in vol points.\n\nCompared in IMPLIED VOL, not price, so the deterministic intrinsic (strike) and √T (expiry) terms are stripped out. Because strikes/expiries differ (loose match) each trade carries residual net delta + net vega + skew/term exposure — see the breakdown. The trade unwinds at the FIRST expiry. Every leg is then settled at INTRINSIC — ITM exercised, OTM worthless — even legs with time left, so the P&L curve contains no IV input at all and rests only on payoff structure plus entry prices.\n\nThat approximation cuts both ways: discarding a long leg's remaining time value is conservative, but assuming a short leg that outlives first expiry is closed at intrinsic ignores the time value you'd actually pay to buy it back. The curve is only a true floor when every short leg expires at first expiry.\n\nWarrants trade rich, so a positive (executable) edge is uncommon. v1 uses the raw IV spread for ranking; skew/term adjustment is a later refinement.");
+}
+
+function closeStraddleModal() {
+  document.getElementById("straddleModal").style.display = "none";
+  Plotly.purge("straddle-payoff-chart");
+}
+
+function openStraddleModal(r) {
+  const S = r.underlying_price, CS = r.contract_size;
+  const legs = [
+    { ...r.long_call, dir: +1, side: "Long" },
+    { ...r.long_put, dir: +1, side: "Long" },
+    { ...r.short_call, dir: -1, side: "Short" },
+    { ...r.short_put, dir: -1, side: "Short" },
+  ];
+  // Net residual greeks TODAY (each leg at its own dte), per package (2000 sh).
+  let nd = 0, nv = 0;
+  legs.forEach(l => {
+    const tau = l.dte / 365, isPut = l.type === "Put";
+    nd += l.dir * CS * bsDelta(S, l.K, tau, R_FREE, l.iv, isPut);
+    nv += l.dir * CS * bsVega(S, l.K, tau, R_FREE, l.iv);
+  });
+  const nvPt = nv / 100;   // NT$ per 1 vol-point
+
+  const th = "padding:6px 9px;background:var(--surface);color:var(--muted);font-size:10px;font-weight:600;text-transform:uppercase;text-align:left";
+  const td = "padding:6px 9px;border-bottom:1px solid var(--border);font-size:12px";
+  const tdr = td + ";text-align:right;font-variant-numeric:tabular-nums";
+  let legRows = "";
+  legs.forEach(l => {
+    const sc = l.side === "Long" ? "var(--put)" : "var(--call)";
+    const sz = l.source === "warrant" ? `${l.board_lots} 張` : `${l.board_lots} contract`;
+    legRows += `<tr>
+      <td style="${td};color:${sc};font-weight:600">${l.side} ${l.type}</td>
+      <td style="${td}">${l.source === "warrant" ? "Warrant" : "Option"} <span style="color:var(--muted)">${l.id}</span></td>
+      <td style="${tdr}">${l.K}</td><td style="${tdr}">${l.dte}d</td>
+      <td style="${tdr}">${(l.iv*100).toFixed(1)}%</td>
+      <td style="${tdr}">${l.px_per_share}</td><td style="${tdr}">${sz}</td></tr>`;
+  });
+
+  // "Stub" legs = still alive at first expiry but settled at intrinsic in the
+  // P&L. The approximation is not symmetric: for a LONG stub you give up time
+  // value you actually own (understates P&L, safe); for a SHORT stub you assume
+  // you buy it back at intrinsic when you'd really pay intrinsic + time value
+  // (overstates P&L, unsafe). Long stubs are the margin of safety, short stubs
+  // are unmodelled cost — so name them.
+  const longStubs = legs.filter(l => l.dir > 0 && l.dte > r.first_expiry);
+  const shortStubs = legs.filter(l => l.dir < 0 && l.dte > r.first_expiry);
+  const stubTxt = (arr) => arr.map(l => `${l.type} ${l.dte}d`).join(", ");
+  const stubNote =
+    (longStubs.length
+      ? `<b>Conservative:</b> long ${stubTxt(longStubs)} still ${longStubs.map(l => l.dte - r.first_expiry).join("/")}d from expiry — remaining time value discarded, so realised P&L should beat this curve. `
+      : "")
+    + (shortStubs.length
+      ? `<b style="color:var(--call)">Unmodelled cost:</b> short ${stubTxt(shortStubs)} outlives first expiry by ${shortStubs.map(l => l.dte - r.first_expiry).join("/")}d — closing it costs intrinsic <i>plus</i> time value, which this curve omits, so the line is <b>not</b> a floor.`
+      : `All short legs die at first expiry, so nothing is bought back above intrinsic — this curve is a genuine worst case.`);
+
+  const eCol = r.iv_edge_pts >= 0 ? "var(--put)" : "var(--call)";
+  // Executability is a property of the LEGS and the pricing mode, never of the
+  // edge sign. A short warrant leg can't be written at all, and loose prices
+  // don't cross the spread — either makes the row debug-only.
+  const nx = [];
+  if (r.shorts_warrant) nx.push("shorts a warrant — only the issuer can write these");
+  if (r.loose_prices) nx.push("loose prices — spread not crossed");
+  const exec = nx.length
+    ? `<span style="color:var(--call);font-weight:700">NON-EXECUTABLE (debug): ${nx.join("; ")}</span>`
+    : r.iv_edge_pts > 0
+      ? '<span style="color:var(--put)">EXECUTABLE (short legs are options)</span>'
+      : '<span style="color:var(--call)">no positive edge — long-vol is richer than short-vol here</span>';
+  document.getElementById("straddle-modal-body").innerHTML = `
+    <h2 style="margin:0 0 4px;font-size:18px">${r.underlying_code} — Straddle Vol Arb <span style="color:var(--muted);font-size:13px">spot ${S}</span></h2>
+    <p style="margin:0 0 16px;font-size:12px;color:var(--muted)">Long the cheap-vol package, short the dear option package. ${exec}.</p>
+    <div style="display:flex;gap:22px;flex-wrap:wrap;margin-bottom:18px">
+      <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">IV edge</div><div style="font-size:20px;font-weight:700;color:${eCol}">${r.iv_edge_pts>=0?"+":""}${r.iv_edge_pts.toFixed(2)} pts</div></div>
+      <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Long / Short IV</div><div style="font-size:20px;font-weight:700">${(r.long_iv*100).toFixed(1)} / ${(r.short_iv*100).toFixed(1)}%</div></div>
+      <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Net cash (per 2000 sh)</div><div style="font-size:20px;font-weight:700;color:${r.net_cash>=0?'var(--put)':'var(--call)'}">${r.net_cash>=0?"+":""}${Math.round(r.net_cash).toLocaleString()}</div></div>
+      <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">First expiry</div><div style="font-size:20px;font-weight:700">${r.first_expiry}d</div></div>
+    </div>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:16px"><thead><tr>
+      <th style="${th}">Leg</th><th style="${th}">Instrument</th><th style="${th};text-align:right">Strike</th><th style="${th};text-align:right">DTE</th>
+      <th style="${th};text-align:right">IV</th><th style="${th};text-align:right">Px/sh</th><th style="${th};text-align:right">Size</th></tr></thead>
+      <tbody>${legRows}</tbody></table>
+    <div style="display:flex;gap:22px;flex-wrap:wrap;margin-bottom:14px">
+      <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Residual net Δ</div><div style="font-size:16px;font-weight:700;color:${Math.abs(nd)<50?'var(--muted)':(nd>0?'var(--put)':'var(--call)')}">${nd>=0?"+":""}${Math.round(nd).toLocaleString()} sh</div></div>
+      <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Net vega</div><div style="font-size:16px;font-weight:700">${nvPt>=0?"+":""}${Math.round(nvPt).toLocaleString()} / vol-pt</div></div>
+    </div>
+    <div id="straddle-payoff-chart" style="width:100%;height:280px"></div>
+    <div style="background:var(--surface);border-radius:6px;padding:11px 14px;margin-top:12px;font-size:11px;color:var(--muted);line-height:1.6">
+      P&L at the FIRST expiry (${r.first_expiry}d) across spot. <b>Every leg is settled at intrinsic</b> — ITM legs exercised, OTM legs worthless — including legs with time left. No Black-Scholes, no IV anywhere in this curve, so it can't be distorted by the unreliable vols solved off near-intrinsic or deep-OTM quotes. ${stubNote} Because strikes/expiries differ this is a strangle-vs-strangle carrying the <b>net Δ</b> above. Warrant legs can't be shorted, so only option legs are written unless the debug toggle is on. Quotes are delayed; run during the TW session (09:00–13:30) for live two-sided option prices.
+    </div>`;
+
+  // Payoff at first expiry — every leg settled at INTRINSIC, including the ones
+  // with time left. Deliberately not marked at Black-Scholes: the solved IVs are
+  // unreliable on near-intrinsic and deep-OTM quotes, and an arb should stand on
+  // payoff structure plus entry price alone, with no vol input in the P&L.
+  //
+  // Range must span every strike AND spot. A spot±20% window hides the kinks
+  // whenever the legs are far from the money (deep-ITM warrants sit hundreds of
+  // points below spot), rendering the payoff as a featureless flat line and
+  // hiding exactly where the risk turns.
+  const strikes = legs.map(l => l.K);
+  const anchors = [S, ...strikes];
+  let lo = Math.min(...anchors), hi = Math.max(...anchors);
+  const pad = Math.max((hi - lo) * 0.18, S * 0.06);
+  lo = Math.max(0, lo - pad); hi = hi + pad;
+
+  // Sample the strikes exactly so each kink vertex lands on a plotted point
+  // instead of being rounded off by the grid.
+  const N = 160;
+  const xset = new Set();
+  for (let i = 0; i <= N; i++) xset.add(lo + (hi - lo) * i / N);
+  anchors.forEach(a => { if (a > lo && a < hi) xset.add(a); });
+  const xs = [...xset].sort((a, b) => a - b);
+  const payoff = ST => legs.reduce((acc, l) => {
+    const val = l.type === "Put" ? Math.max(0, l.K - ST) : Math.max(0, ST - l.K);
+    return acc + l.dir * CS * (val - l.px_per_share);
+  }, 0);
+  const ys = xs.map(x => Math.round(payoff(x)));
+  // Mark every strike so the kinks are identifiable — green a leg you own,
+  // red one you owe — via the shared payoff-chart helper.
+  const _sMk = payoffStrikeMarks(
+    legs.map(l => ({ K: l.K, label: `${l.side[0]}${l.type[0]}`, dir: l.dir })), S);
+  document.getElementById("straddleModal").style.display = "block";
+  Plotly.react("straddle-payoff-chart", [
+    { x: [lo, hi], y: [0, 0], mode: "lines", line: { color: "rgba(255,255,255,0.15)", dash: "dash", width: 1 }, showlegend: false, hoverinfo: "skip" },
+    { x: xs, y: ys, mode: "lines", line: { color: "#4f8ef7", width: 2 }, hovertemplate: "spot %{x:.0f}<br>P&L %{y:+,.0f} NT$<extra></extra>", showlegend: false },
+    { x: [S], y: [Math.round(payoff(S))], mode: "markers", marker: { color: "#fff", size: 7 }, hovertemplate: "spot now %{x:.0f}<br>P&L %{y:+,.0f} NT$<extra></extra>", showlegend: false },
+  ], {
+    shapes: _sMk.shapes, annotations: _sMk.annotations,
+    paper_bgcolor: "#13161f", plot_bgcolor: "#0d0f16",
+    font: { color: "#8b90a0", family: "Inter,system-ui,sans-serif", size: 11 },
+    xaxis: { title: "underlying at first expiry", gridcolor: "#252836", zerolinecolor: "#252836" },
+    yaxis: { title: "P&L (NT$)", gridcolor: "#252836", zerolinecolor: "#252836", tickformat: "+," },
+    margin: { l: 60, r: 12, t: 10, b: 38 },
+  }, { responsive: true });
 }
 
 // ── Direct Match Modal ─────────────────────────────────────────────
@@ -1396,7 +1578,14 @@ function renderPcpChart(dte) {
     hovertemplate:"Current spot: %{x:,.0f}<br>P&L: %{y:+,.0f} NT$<extra></extra>",
   };
 
+  // dir > 0 means the warrant is the long leg and the option the short one.
+  const _mk = payoffStrikeMarks([
+    { K: Kw, label: `${dir > 0 ? "Long" : "Short"} W`, dir: dir },
+    { K: Ko, label: `${dir > 0 ? "Short" : "Long"} O`, dir: -dir },
+  ], S0);
+
   Plotly.react("pcp-pnl-chart", [...zeroLine, expiryTrace, spotTrace], {
+    shapes: _mk.shapes, annotations: _mk.annotations,
     paper_bgcolor:"#13161f", plot_bgcolor:"#0d0f16",
     font:{color:"#8b90a0",family:"Inter,system-ui,sans-serif",size:12},
     xaxis:{title:`Spot Price (NT$) — ${row.warrant_name}`,gridcolor:"#252836",zerolinecolor:"#252836",tickformat:","},

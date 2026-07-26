@@ -1,11 +1,5 @@
 // Shared: Supabase auth, fetch wrapper, tab nav + view persistence, table helpers.
 
-const DEFAULT_STOCKS = [
-  "2330","2317","2454","2382","3231","6669","2376","3017","3324",
-  "2308","3711","3034","2379","3661","3443","2603","3008","2881",
-  "2882","3037","2303","2886",
-];
-
 // --- Supabase auth bootstrap -------------------------------------------
 
 const SUPABASE_URL = window.SUPABASE_URL;
@@ -91,48 +85,44 @@ function _tickAges() {
 
 setInterval(_tickAges, 30000);
 
-// "Refresh now" helper shared by both scanner tabs. Kicks the backend's
-// debounced background re-scrape, then polls the tab's own fetch until the
-// snapshot's as_of advances (so the table auto-updates when the scrape lands)
-// or a 60s cap elapses. Always re-enables the button, even on error.
+// "Sync now" helper shared by all three scanner tabs. The /sync_X route is
+// synchronous on the backend (blocks until the scrape+store completes), so
+// this is a plain linear sequence — no polling loop: clear the table, await
+// the sync, then do exactly one read to render the result. Always re-enables
+// the button(s), even on error.
+//
+// readBtn is also disabled for the duration: the "Read" button isn't wired
+// through this function's own request, so without disabling it a manual click
+// mid-sync would race its own read against onDone()'s trailing read, and
+// whichever response landed last would win the render.
 
-async function refreshNow(kind, statusEl, btn, onDone) {
+async function refreshNow(kind, statusEl, btn, onDone, tableEl, readBtn) {
   if (!statusEl || !btn) return;
   const origLabel = btn.textContent;
   const wasDisabled = btn.disabled;
-  // Pre-refresh as_of, read from the last stored fetch for this status line.
-  let prevAsOf = null;
-  for (const k in window._lastAsOf) {
-    const rec = window._lastAsOf[k];
-    if (rec && rec.elId === statusEl.id && rec.data) { prevAsOf = rec.data.as_of || null; break; }
-  }
+  const readWasDisabled = readBtn ? readBtn.disabled : null;
   btn.disabled = true;
-  btn.textContent = "Refreshing…";
-  statusEl.textContent = "Refreshing market data… (up to ~30s)";
+  btn.textContent = "Syncing…";
+  if (readBtn) readBtn.disabled = true;
+  statusEl.textContent = "Syncing market data… this may take a bit";
+  if (tableEl) tableEl.innerHTML = "";
   try {
-    const res = await api("/refresh", {
+    const routeMap = { warrants: "/sync_warrant", tw_options: "/sync_tw_option", us_options: "/sync_us_option" };
+    const res = await api(routeMap[kind], {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind }),
     });
     const data = await res.json();
     if (data && Array.isArray(data.skipped) && data.skipped.includes(kind)) {
-      statusEl.textContent = "A refresh is already running — showing latest.";
+      statusEl.textContent = "A sync is already running — showing latest.";
     }
-    const prevMs = prevAsOf ? new Date(prevAsOf).getTime() : 0;
-    const deadline = Date.now() + 60000;
-    while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 4000));
-      let fresh;
-      try { fresh = await onDone(); } catch (e) { continue; }
-      const newAsOf = fresh && fresh.as_of;
-      if (newAsOf && new Date(newAsOf).getTime() > prevMs) break;
-    }
+    await onDone();
   } catch (e) {
-    statusEl.textContent = "Refresh failed: " + (e && e.message ? e.message : e);
+    statusEl.textContent = "Sync failed: " + (e && e.message ? e.message : e);
   } finally {
     btn.disabled = wasDisabled;
     btn.textContent = origLabel;
+    if (readBtn) readBtn.disabled = readWasDisabled;
   }
 }
 
@@ -164,7 +154,7 @@ function restoreView() {
   }
 }
 
-const HIDDEN_COLS = ["warrant_iv", "opt_iv", "iv_diff",
+const HIDDEN_COLS = ["warrant_iv", "opt_iv", "tw_option_iv", "us_option_iv", "iv_diff",
   // TW/US raw depth fields — surfaced in the popup panel, not the table.
   "tw_depth_contracts", "tw_fillable", "us_volume", "us_oi"];
 // The US Option Match "us_stock_code" value is actually the TW stock code.
@@ -175,6 +165,95 @@ const COL_LABELS = { us_stock_code: "tw_stock_code",
 const visCols = (row) => Object.keys(row).filter(c => !HIDDEN_COLS.includes(c));
 
 const colLabel = (c) => COL_LABELS[c] || c;
+
+// Fetch a product-list endpoint; empty array on any failure (network error,
+// 401 redirect, etc.) so a populate call just yields an empty <select> rather
+// than throwing.
+async function fetchProductList(url) {
+  try {
+    const res = await api(url);
+    return await res.json();
+  } catch (e) {
+    return [];
+  }
+}
+
+// Fill a <select> with <option>s built from `rows` ({code, name, ...}).
+// selectedCodes pre-selects matching options (mirrors a static <option
+// selected> from before this change); selectFirst pre-selects the first
+// option if nothing else ended up selected (for single-select boxes like
+// ivOptProduct that always need something chosen).
+function populateProductSelect(selectEl, rows, opts) {
+  if (!selectEl) return;
+  opts = opts || {};
+  const labelFn = opts.labelFn || (r => r.name ? `${r.code} ${r.name}` : r.code);
+  const selectedCodes = opts.selectedCodes || [];
+  selectEl.innerHTML = "";
+  rows.forEach(r => {
+    const option = document.createElement("option");
+    option.value = r.code;
+    option.textContent = labelFn(r);
+    if (selectedCodes.includes(r.code)) option.selected = true;
+    selectEl.appendChild(option);
+  });
+  if (opts.selectFirst && selectEl.options.length && !selectEl.value) {
+    selectEl.options[0].selected = true;
+  }
+}
+
+function currentSelection(id) {
+  const el = document.getElementById(id);
+  return el ? Array.from(el.selectedOptions).map(o => o.value) : [];
+}
+
+// Fetch all three product lists and populate every product/stock <select> on
+// the page. Called once from _boot() (portfolio.js), and again after every
+// add/remove (Phase 5.5) so derived selects (the two-list intersections)
+// stay correct. Each select's current selection is preserved across a
+// refresh; the hardcoded fallback only applies the first time (nothing
+// selected yet).
+async function initProductSelects() {
+  const [warrants, twOpts, usOpts] = await Promise.all([
+    fetchProductList("/list_warrant_stocks"),
+    fetchProductList("/list_tw_option_products"),
+    fetchProductList("/list_us_option_products"),
+  ]);
+  // Exposed for the add/remove UI to reuse without re-fetching.
+  window._productLists = { warrants, twOpts, usOpts };
+
+  const codesOf = rows => new Set(rows.map(r => r.code));
+  const twCodes = codesOf(twOpts), usCodes = codesOf(usOpts);
+  const warrantXTw = warrants.filter(r => twCodes.has(r.code));
+  const warrantXUs = warrants.filter(r => usCodes.has(r.code));
+  const twXUs = twOpts.filter(r => usCodes.has(r.code));
+
+  const sel = (id, fallback) => {
+    const cur = currentSelection(id);
+    return cur.length ? cur : fallback;
+  };
+
+  populateProductSelect(document.getElementById("stockSelect"), warrants,
+    { selectedCodes: sel("stockSelect", []) });
+  populateProductSelect(document.getElementById("ivStockSelect"), warrants,
+    { selectedCodes: sel("ivStockSelect", []) });
+  populateProductSelect(document.getElementById("optionStockSelect"), twOpts,
+    { selectedCodes: sel("optionStockSelect", ["TXO"]) });
+  populateProductSelect(document.getElementById("optionUsSelect"), usOpts,
+    { labelFn: r => r.name || r.code, selectedCodes: sel("optionUsSelect", ["2303"]) });
+  populateProductSelect(document.getElementById("ivOptProduct"), twOpts,
+    { selectedCodes: sel("ivOptProduct", []), selectFirst: true });
+  populateProductSelect(document.getElementById("arbStockSelect"), warrantXTw,
+    { selectedCodes: sel("arbStockSelect", ["2330"]) });
+  // Straddle Vol Arb needs BOTH a warrant and a TW option on the underlying —
+  // same warrant∩TW-option overlap as Direct Match, so it stays correct as
+  // products are added (no hardcoded code list).
+  populateProductSelect(document.getElementById("straddleStockSelect"), warrantXTw,
+    { selectedCodes: sel("straddleStockSelect", ["2330"]) });
+  populateProductSelect(document.getElementById("usStockSelect"), warrantXUs,
+    { selectedCodes: sel("usStockSelect", ["2303"]) });
+  populateProductSelect(document.getElementById("twusStockSelect"), twXUs,
+    { selectedCodes: sel("twusStockSelect", ["2303"]) });
+}
 
 // ── Market session clock (NYSE / TWSE / TAIFEX options) ──────────────
 // NYSE runs in US Eastern; TWSE and TAIFEX in Taipei. Sessions are wall-
@@ -192,8 +271,10 @@ function _mcSet(id, txt, cls) {
   e.textContent = txt; e.className = "mc-badge " + cls;
 }
 function updateMarketClock() {
-  const et = _tzParts("America/New_York"), tp = _tzParts("Asia/Taipei");
+  const et = _tzParts("America/New_York"), tp = _tzParts("Asia/Taipei"),
+        pt = _tzParts("America/Los_Angeles");
   document.getElementById("mc-ny-time").textContent = et.str;
+  document.getElementById("mc-pt-time").textContent = pt.str;
   document.getElementById("mc-tw-time").textContent = tp.str;
   const nyWknd = et.wd === "Sat" || et.wd === "Sun", nt = et.mins;
   // NYSE: pre 04:00–09:30, regular 09:30–16:00, after 16:00–20:00
@@ -214,5 +295,51 @@ function updateMarketClock() {
   else if (tt < 300 && tp.wd !== "Sun" && tp.wd !== "Mon") _mcSet("mc-tx-st", "After-hrs", "mc-after");
   else _mcSet("mc-tx-st", "Closed", "mc-closed");
 }
-updateMarketClock();
-setInterval(updateMarketClock, 15000);
+// ── Hover tooltips: trading hours per exchange, in the USER's local tz ──
+// Session ranges are wall-clock minutes past midnight in each exchange's own
+// timezone; end < start (e.g. TAIFEX night) is expressed as end + 1440.
+const MC_SESSIONS = {
+  "mc-row-ny": { name: "NYSE", tz: "America/New_York",
+    rows: [["Pre-market", 240, 570], ["Regular", 570, 960], ["After-hours", 960, 1200]] },
+  "mc-row-tw": { name: "TWSE", tz: "Asia/Taipei",
+    rows: [["Regular", 540, 810]] },
+  "mc-row-tx": { name: "TAIFEX opt", tz: "Asia/Taipei",
+    rows: [["Regular", 525, 825], ["After-hours", 900, 1740]] },
+};
+// Minutes a timezone is ahead of UTC at instant `at` (DST-aware).
+function _tzOffset(tz, at) {
+  const f = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const p = {}; f.formatToParts(at).forEach(x => p[x.type] = x.value);
+  const asUTC = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second);
+  return Math.round((asUTC - at.getTime()) / 60000);
+}
+const _hm = (min) => { min = ((min % 1440) + 1440) % 1440;
+  return String(Math.floor(min / 60)).padStart(2, "0") + ":" + String(min % 60).padStart(2, "0"); };
+// Convert an exchange-tz wall-clock range to the viewer's local wall-clock,
+// tagging any endpoint that lands on a different local day (+1d / -1d).
+function _mcRange(tz, s, e) {
+  const now = new Date();
+  const delta = (-now.getTimezoneOffset()) - _tzOffset(tz, now);
+  const sa = s + delta, ea = e + delta, base = Math.floor(sa / 1440);
+  const mark = (v) => { const d = Math.floor(v / 1440) - base;
+    return d === 0 ? "" : (d > 0 ? ` (+${d}d)` : ` (${d}d)`); };
+  return _hm(sa) + mark(sa) + "–" + _hm(ea) + mark(ea);
+}
+function mcBuildTips() {
+  for (const id in MC_SESSIONS) {
+    const row = document.getElementById(id); if (!row) continue;
+    let tip = row.querySelector(".mc-tip");
+    if (!tip) { tip = document.createElement("div"); tip.className = "mc-tip"; row.appendChild(tip); }
+    const cfg = MC_SESSIONS[id];
+    let html = '<div class="mc-tip-h">' + cfg.name + " · your local time</div>";
+    for (const [label, s, e] of cfg.rows)
+      html += '<div class="mc-tip-r"><span class="mc-tip-k">' + label +
+        '</span><span class="mc-tip-v">' + _mcRange(cfg.tz, s, e) + "</span></div>";
+    tip.innerHTML = html;
+  }
+}
+
+updateMarketClock(); mcBuildTips();
+setInterval(() => { updateMarketClock(); mcBuildTips(); }, 15000);

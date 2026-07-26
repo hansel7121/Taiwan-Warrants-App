@@ -35,55 +35,120 @@ function toggleSelectAllIV() {
   document.querySelector("#tab-ivsurface .sm").textContent = allSelectedIV ? "Deselect All" : "Select All";
 }
 
-function toggleAddStock() {
-  const form = document.getElementById("addStockForm");
-  form.style.display = form.style.display === "none" ? "flex" : "none";
+// ---------------------------------------------------------------------------
+// Unified Add / Remove product UI (Phase 5.5). Warrant = code + an
+// auto-looked-up name shown as a confirm step before adding. TW/US option =
+// every field entered manually (no auto-lookup — ADR ratios / commodity IDs
+// aren't reliably derivable). All three refresh every derived select
+// afterward via initProductSelects(), since add/remove can change the
+// cross-market intersections too.
+// ---------------------------------------------------------------------------
+
+function toggleAddProduct(kind) {
+  const form = document.getElementById("addForm_" + kind);
+  if (form) form.style.display = form.style.display === "none" ? "flex" : "none";
 }
 
-async function addStock() {
-  const code = document.getElementById("newStockCode").value.trim();
-  const name = document.getElementById("newStockName").value.trim();
-  if (!code) return;
-  const select = document.getElementById("stockSelect");
-  for (let opt of select.options) {
-    if (opt.value === code) { toggleAddStock(); return; }
-  }
-  const option = document.createElement("option");
-  option.value = code;
-  option.textContent = name ? `${code} ${name}` : code;
-  option.selected = true;
-  select.appendChild(option);
-  document.getElementById("newStockCode").value = "";
-  document.getElementById("newStockName").value = "";
-  toggleAddStock();
-  await saveCustomStocks();
-}
-
-async function loadCustomStocks() {
+async function lookupWarrantName() {
+  const code = document.getElementById("newWarrantCode").value.trim();
+  const resultEl = document.getElementById("warrantLookupResult");
+  if (!code) { resultEl.textContent = ""; resultEl.dataset.name = ""; return; }
   try {
-    const res = await api("/get_custom_stocks");
-    const stocks = await res.json();
-    const select = document.getElementById("stockSelect");
-    stocks.forEach(s => {
-      for (let opt of select.options) { if (opt.value === s.code) return; }
-      const option = document.createElement("option");
-      option.value = s.code;
-      option.textContent = s.name ? `${s.code} ${s.name}` : s.code;
-      select.appendChild(option);
-    });
-  } catch (e) {}
+    const res = await api(`/lookup_warrant_stock?code=${encodeURIComponent(code)}`);
+    const data = await res.json();
+    resultEl.dataset.name = data.name || "";
+    resultEl.textContent = data.name
+      ? `Found: ${data.code} ${data.name}`
+      : `${code}: name not found (will add with no name)`;
+  } catch (e) {
+    resultEl.textContent = "Lookup failed";
+    resultEl.dataset.name = "";
+  }
 }
 
-async function saveCustomStocks() {
-  const select = document.getElementById("stockSelect");
-  const custom = Array.from(select.options)
-    .filter(o => !DEFAULT_STOCKS.includes(o.value))
-    .map(o => ({ code: o.value, name: o.textContent.replace(o.value, "").trim() }));
-  await api("/save_custom_stocks", {
+async function addWarrantStock() {
+  const codeEl = document.getElementById("newWarrantCode");
+  const code = codeEl.value.trim();
+  if (!code) return;
+  const resultEl = document.getElementById("warrantLookupResult");
+  const name = resultEl.dataset.name || "";
+  await api("/add_warrant_stock", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(custom),
+    body: JSON.stringify({ code, name }),
   });
+  codeEl.value = "";
+  resultEl.textContent = "";
+  resultEl.dataset.name = "";
+  toggleAddProduct("warrant");
+  await initProductSelects();
+}
+
+async function addTwOptionProduct() {
+  const code = document.getElementById("newTwCode").value.trim();
+  const commodityIds = document.getElementById("newTwCommodityIds").value.trim();
+  const ticker = document.getElementById("newTwTicker").value.trim();
+  const exerciseRatio = document.getElementById("newTwExerciseRatio").value.trim();
+  const name = document.getElementById("newTwName").value.trim();
+  if (!code || !commodityIds || !ticker || !exerciseRatio) return;
+  await api("/add_tw_option_product", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      code,
+      commodity_ids: commodityIds.split(",").map(s => s.trim()).filter(Boolean),
+      ticker,
+      exercise_ratio: Number(exerciseRatio),
+      name: name || null,
+    }),
+  });
+  ["newTwCode", "newTwCommodityIds", "newTwTicker", "newTwExerciseRatio", "newTwName"]
+    .forEach(id => { document.getElementById(id).value = ""; });
+  toggleAddProduct("tw_option");
+  await initProductSelects();
+}
+
+async function addUsOptionProduct() {
+  const code = document.getElementById("newUsCode").value.trim();
+  const adrTicker = document.getElementById("newUsAdrTicker").value.trim();
+  const fxTicker = document.getElementById("newUsFxTicker").value.trim();
+  const adrRatio = document.getElementById("newUsAdrRatio").value.trim();
+  const name = document.getElementById("newUsName").value.trim();
+  if (!code || !adrTicker || !fxTicker || !adrRatio) return;
+  await api("/add_us_option_product", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      code, adr_ticker: adrTicker, fx_ticker: fxTicker,
+      adr_ratio: Number(adrRatio), name: name || null,
+    }),
+  });
+  ["newUsCode", "newUsAdrTicker", "newUsFxTicker", "newUsAdrRatio", "newUsName"]
+    .forEach(id => { document.getElementById(id).value = ""; });
+  toggleAddProduct("us_option");
+  await initProductSelects();
+}
+
+const PRODUCT_REMOVE = {
+  warrant:   { selectId: "stockSelect",       url: "/remove_warrant_stock" },
+  tw_option: { selectId: "optionStockSelect", url: "/remove_tw_option_product" },
+  us_option: { selectId: "optionUsSelect",    url: "/remove_us_option_product" },
+};
+
+async function removeSelectedProduct(kind) {
+  const cfg = PRODUCT_REMOVE[kind];
+  const select = document.getElementById(cfg.selectId);
+  const codes = Array.from(select.selectedOptions).map(o => o.value);
+  if (!codes.length) return;
+  if (!confirm(`Remove ${codes.join(", ")} from the tracked list? This cannot be undone.`)) return;
+  for (const code of codes) {
+    await api(cfg.url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+  }
+  await initProductSelects();
 }
 
 function getFilters() {
@@ -99,7 +164,7 @@ function getFilters() {
   };
 }
 
-async function fetchData() {
+async function readWarrant() {
   const filters = getFilters();
   if (!filters.stock_codes.length) {
     document.getElementById("status").textContent = "Please select at least one stock.";
@@ -109,7 +174,7 @@ async function fetchData() {
   document.getElementById("tableContainer").innerHTML = "";
   document.getElementById("downloadBtn").style.display = "none";
 
-  const res = await api("/fetch", {
+  const res = await api("/read_warrant", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(filters),
@@ -122,11 +187,43 @@ async function fetchData() {
   return data;
 }
 
-function refreshWarrants() {
+function syncWarrant() {
   return refreshNow("warrants",
     document.getElementById("status"),
     document.getElementById("refreshWarrantsBtn"),
-    fetchData);
+    readWarrant,
+    document.getElementById("tableContainer"),
+    document.getElementById("readWarrantBtn"));
+}
+
+// Dedicated handler for the slow universe re-scrape. Unlike syncWarrant()
+// this does NOT go through refreshNow(): the route isn't in that helper's
+// routeMap, the wording is about listed securities (not prices), and there's
+// no price table to re-read afterward. The /sync_universe route runs
+// synchronously and blocks until the scrape+store completes, so the POST
+// resolving means the sync is done. Mirrors refreshNow's UX: disable the
+// button while in flight, re-enable + restore on completion, surface errors.
+async function syncUniverse() {
+  const statusEl = document.getElementById("status");
+  const btn = document.getElementById("syncUniverseBtn");
+  if (!btn) return;
+  const origLabel = btn.textContent;
+  const wasDisabled = btn.disabled;
+  btn.disabled = true;
+  btn.textContent = "Syncing…";
+  if (statusEl) statusEl.textContent = "Re-scraping listed securities… this takes a few minutes";
+  try {
+    await api("/sync_universe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (statusEl) statusEl.textContent = "Universe updated — listed securities re-scraped.";
+  } catch (e) {
+    if (statusEl) statusEl.textContent = "Universe sync failed: " + (e && e.message ? e.message : e);
+  } finally {
+    btn.disabled = wasDisabled;
+    btn.textContent = origLabel;
+  }
 }
 
 function renderTable(rows) {
@@ -173,7 +270,7 @@ function sortByColumn(key, asc) {
 }
 
 async function downloadCSV() {
-  const res = await api("/download", {
+  const res = await api("/read_warrant_csv", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(getFilters()),
@@ -190,10 +287,8 @@ function setIVSource(src) {
   const isOpt = src === "options";
   document.getElementById("iv-warrants-controls").style.display = isOpt ? "none" : "flex";
   document.getElementById("iv-options-controls").style.display  = isOpt ? "flex" : "none";
-  document.getElementById("iv-src-warrants").style.background = isOpt ? "var(--surface)" : "var(--accent)";
-  document.getElementById("iv-src-warrants").style.color = isOpt ? "var(--muted)" : "#fff";
-  document.getElementById("iv-src-options").style.background  = isOpt ? "var(--accent)" : "var(--surface)";
-  document.getElementById("iv-src-options").style.color  = isOpt ? "#fff" : "var(--muted)";
+  document.getElementById("iv-src-warrants").classList.toggle("active", !isOpt);
+  document.getElementById("iv-src-options").classList.toggle("active", isOpt);
   document.getElementById("iv-plot").innerHTML = "";
   document.getElementById("iv-status").textContent = "";
 }
@@ -349,6 +444,10 @@ function setOptMarket(m, btn) {
   btn.classList.add("active");
   document.getElementById("optionStockSelect").style.display = m === "tw" ? "" : "none";
   document.getElementById("optionUsSelect").style.display   = m === "us" ? "" : "none";
+  document.getElementById("twProductBtnRow").style.display = m === "tw" ? "" : "none";
+  document.getElementById("usProductBtnRow").style.display = m === "us" ? "" : "none";
+  document.getElementById("addForm_tw_option").style.display = "none";
+  document.getElementById("addForm_us_option").style.display = "none";
   // Min Leverage is a warrant/TW-option metric; US chain has no leverage col.
   const lev = document.getElementById("optMinLeverage").closest("label");
   if (lev) lev.style.display = m === "us" ? "none" : "";
@@ -369,7 +468,7 @@ function getOptionsFilters() {
   };
 }
 
-async function fetchOptionsData() {
+async function readOption() {
   const filters = getOptionsFilters();
   if (!filters.stock_codes.length) {
     document.getElementById("opt-status").textContent = "Please select at least one product.";
@@ -379,7 +478,7 @@ async function fetchOptionsData() {
   document.getElementById("opt-tableContainer").innerHTML = "";
   document.getElementById("optDownloadBtn").style.display = "none";
 
-  const res = await api(_optMarket === "us" ? "/us_options" : "/fetch_options", {
+  const res = await api(_optMarket === "us" ? "/read_us_option" : "/read_tw_option", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(filters),
@@ -396,12 +495,29 @@ async function fetchOptionsData() {
   return data;
 }
 
-function refreshOptions() {
-  const kind = _optMarket === "us" ? "us_options" : "tw_options";
+function syncOption() {
+  // Freeze the market this sync targets. readOption() reads the LIVE
+  // _optMarket when it runs, so if the user switches TW<->US mid-sync, this
+  // sync's trailing read must not fire — it would be an unrequested fetch for
+  // whatever market the user has since switched to, clobbering their view.
+  const market = _optMarket;
+  const kind = market === "us" ? "us_options" : "tw_options";
+  const statusEl = document.getElementById("opt-status");
+  const syncingMsg = "Syncing market data… this may take a bit";
   return refreshNow(kind,
-    document.getElementById("opt-status"),
+    statusEl,
     document.getElementById("refreshOptionsBtn"),
-    fetchOptionsData);
+    () => {
+      if (_optMarket !== market) {
+        // User moved to the other market while this sync was running — the
+        // data is safely stored either way; just don't render it here.
+        if (statusEl.textContent === syncingMsg) statusEl.textContent = "";
+        return;
+      }
+      return readOption();
+    },
+    document.getElementById("opt-tableContainer"),
+    document.getElementById("readOptionBtn"));
 }
 
 function renderOptionsTable(rows) {
@@ -470,7 +586,7 @@ async function downloadOptionsCSV() {
     a.href = url; a.download = "us_options.csv"; a.click();
     return;
   }
-  const res = await api("/download_options", {
+  const res = await api("/read_tw_option_csv", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(getOptionsFilters()),
