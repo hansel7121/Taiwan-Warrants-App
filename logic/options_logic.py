@@ -1,5 +1,6 @@
 import io
 import re
+import threading
 import time
 from datetime import datetime, timezone
 import requests
@@ -24,23 +25,31 @@ _CACHE_TTL = 1800  # 30 minutes
 
 _PRODUCT_CACHE_TTL = 300  # 5 min; add/remove routes also invalidate directly
 _commodity_map_cache = {"data": None, "ts": 0.0}
+# Guards _commodity_map_cache. This is the one process-wide structure the arb
+# scan reads from every worker thread, so the check-then-populate below must be
+# atomic — otherwise a cold cache under concurrent readers triggers redundant
+# db_products fetches (dict writes are atomic under the GIL, so no corruption,
+# but the lock keeps the populate single-flighted and consistent).
+_commodity_map_lock = threading.Lock()
 
 
 def _commodity_map():
     """{code: {commodity_ids, ticker, exercise_ratio, name}} from tw_option_products, cached."""
     now = time.time()
-    if _commodity_map_cache["data"] is not None and now - _commodity_map_cache["ts"] < _PRODUCT_CACHE_TTL:
-        return _commodity_map_cache["data"]
-    from services import db_products
-    data = {row["code"]: row for row in db_products.list_tw_option_products()}
-    _commodity_map_cache["data"] = data
-    _commodity_map_cache["ts"] = now
-    return data
+    with _commodity_map_lock:
+        if _commodity_map_cache["data"] is not None and now - _commodity_map_cache["ts"] < _PRODUCT_CACHE_TTL:
+            return _commodity_map_cache["data"]
+        from services import db_products
+        data = {row["code"]: row for row in db_products.list_tw_option_products()}
+        _commodity_map_cache["data"] = data
+        _commodity_map_cache["ts"] = now
+        return data
 
 
 def invalidate_commodity_map_cache():
     """Called by the add/remove product routes (Phase 5.3) so a change is visible immediately."""
-    _commodity_map_cache["data"] = None
+    with _commodity_map_lock:
+        _commodity_map_cache["data"] = None
 
 
 def _live_cache_as_of(stock_codes):
@@ -266,6 +275,8 @@ def _parse_and_compute(raw_df, underlying_price, exercise_ratio, compute_iv=True
     vol_arr = df["volume"].to_numpy()
     oi_arr = df["oi"].to_numpy()
     live_arr = df["is_live"].to_numpy()
+    ask_live_arr = df["ask_live"].to_numpy()
+    bid_live_arr = df["bid_live"].to_numpy()
     exp_list = list(df["expiry_date"])
 
     # Pre-skip: T<=0 or S<=0 or K<=0 or ask NaN drops the row unconditionally.
@@ -340,6 +351,8 @@ def _parse_and_compute(raw_df, underlying_price, exercise_ratio, compute_iv=True
                 if not np.isnan(lev)
                 else None,
                 "is_live": bool(live_arr[i]),
+                "ask_live": bool(ask_live_arr[i]),
+                "bid_live": bool(bid_live_arr[i]),
             }
         )
 
@@ -491,6 +504,8 @@ def scrape_mis_tw_option(code, compute_iv=True, keep_noniv=False, force=False):
         last = _mis_num(q.get("CLastPrice"))
         settle = _mis_num(q.get("SettlementPrice"))
         is_live = bool(pd.notna(bid) and pd.notna(ask))
+        ask_live = bool(pd.notna(ask) and ask > 0)
+        bid_live = bool(pd.notna(bid) and bid > 0)
         # Fall back ask -> last -> settle so a leg is never dropped off-hours.
         if pd.isna(ask):
             ask = last if pd.notna(last) else settle
@@ -528,6 +543,8 @@ def scrape_mis_tw_option(code, compute_iv=True, keep_noniv=False, force=False):
             "delta_calc": None,
             "leverage_calc": None,
             "is_live": is_live,
+            "ask_live": ask_live,
+            "bid_live": bid_live,
             "quote_time": quote_time,
         })
         a_ask.append(ask); a_bid.append(bid if pd.notna(bid) else np.nan)

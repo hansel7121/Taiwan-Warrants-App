@@ -9,6 +9,7 @@ Market data comes only through the logic modules' fetchers (warrant_logic,
 options_logic, us_options_logic), which own their own in-process caches; this
 module keeps no cache of its own.
 """
+from concurrent.futures import ThreadPoolExecutor
 from services import applog
 import numpy as np
 import pandas as pd
@@ -203,7 +204,7 @@ def build_straddle_arb(stock_codes, option_type, max_strike_diff_pct, max_dte_di
             if opt_df.empty:
                 errors.append(f"{code}: {oerr or 'no options'}")
                 continue
-            opt_df = opt_df[opt_df["is_live"]]
+            opt_df = opt_df[opt_df["ask_live"] | opt_df["bid_live"]]
             if min_volume > 0:
                 opt_df = opt_df[opt_df["volume"] >= min_volume]
         except Exception as e:
@@ -422,13 +423,14 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             # hidden behind a closer-but-unprofitable "best".
             for _, opt in candidates.iterrows():
                 # Each arb direction executes against only ONE side of the option
-                # book, so a one-sided quote is still a valid benchmark. This fork
-                # emits only is_live (not ask_live/bid_live), so derive per-side
-                # liveness inline from the raw bid/ask — the missing side arrives
-                # settlement-backfilled and is not an executable price. Each
-                # formula below then requires the side it actually trades.
-                opt_ask_live = pd.notna(opt.get("ask")) and float(opt.get("ask") or 0) > 0
-                opt_bid_live = pd.notna(opt.get("bid")) and float(opt.get("bid") or 0) > 0
+                # book, so a one-sided quote is still a valid benchmark. The chain
+                # now carries per-side liveness flagged BEFORE the settlement/last
+                # fallback backfilled the missing side, so read them directly —
+                # opt["ask"]/["bid"] are post-fallback and can't tell a genuine
+                # quote from a stale settlement mark. Each formula below then
+                # requires the side it actually trades.
+                opt_ask_live = bool(opt.get("ask_live", False))
+                opt_bid_live = bool(opt.get("bid_live", False))
                 if not (opt_ask_live or opt_bid_live):
                     continue
                 opt_bid_per_share = round(float(opt["bid"]), 4) if opt_bid_live else None
@@ -639,8 +641,11 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
             Ko = float(opt["strike"])
             To = int(opt["days_to_expiry"]) / 365.0
             bond_pv = round(Ko * float(np.exp(-r * To)), 4)
-            opt_bid_ps = round(float(opt["bid"]), 4) if pd.notna(opt.get("bid")) and float(opt.get("bid", 0)) > 0 else None
-            opt_ask_ps = round(float(opt["ask"]), 4) if pd.notna(opt.get("ask")) and float(opt.get("ask", 0)) > 0 else None
+            # Gate on per-side liveness flagged BEFORE the settlement/last
+            # fallback: opt["bid"]/["ask"] are post-fallback, so a missing side
+            # carries a stale settlement mark that is not an executable price.
+            opt_bid_ps = round(float(opt["bid"]), 4) if bool(opt.get("bid_live", False)) else None
+            opt_ask_ps = round(float(opt["ask"]), 4) if bool(opt.get("ask_live", False)) else None
 
             # Option-leg IV (display only) — use the OPTION's put/call flag.
             is_put_opt = opp == "Put"
@@ -914,15 +919,19 @@ def _match_butterflies(warrant_df, opt_df, opt_contract_size, positive_loose=Fal
 
 def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
                   positive_loose=False, min_volume=0, strategy="same_type"):
-    all_rows = []
-    errors = []
+    stock_codes = list(stock_codes)
 
-    for i, code in enumerate(stock_codes, 1):
+    def _process(i, code):
+        """Fetch + match one stock code. Returns (rows, error_or_None).
+
+        Runs in a worker thread — every fetch (read_warrant / read_tw_option)
+        and the match helpers hit only their modules' own lock-guarded / read-
+        mostly caches, so this is safe to run concurrently across codes.
+        """
         pos = f"({i}/{len(stock_codes)})"
         if code not in options_logic._commodity_map():
-            errors.append(f"{code}: no options data available")
             applog.log("ARB", f"{code} {pos} skipped: no options data available")
-            continue
+            return [], f"{code}: no options data available"
 
         cfg = options_logic._commodity_map()[code]
         opt_contract_size = cfg["exercise_ratio"]
@@ -934,9 +943,8 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
             [code], option_type, 0, 365, 0, 1e9, 0, compute_iv=False
         )
         if warrant_df.empty:
-            errors.append(f"{code}: {err or 'no warrants'}")
             applog.log("ARB", f"{code} {pos} skipped: {err or 'no warrants'}")
-            continue
+            return [], f"{code}: {err or 'no warrants'}"
 
         # PCP pairs a warrant with the OPPOSITE-type option; butterfly pairs each
         # type against its own body option. Both want the full chain regardless of
@@ -944,17 +952,15 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
         opt_type_fetch = "All" if strategy in ("pcp", "butterfly") else option_type
         opt_df, opt_err, _meta = options_logic.read_tw_option([code], opt_type_fetch, min_days=1, compute_iv=False)
         if opt_df.empty:
-            errors.append(f"{code}: {opt_err or 'no options'}")
             applog.log("ARB", f"{code} {pos} option fetch failed: {opt_err}")
-            continue
-        opt_df = opt_df[opt_df["is_live"]]
+            return [], f"{code}: {opt_err or 'no options'}"
+        opt_df = opt_df[opt_df["ask_live"] | opt_df["bid_live"]]
         if min_volume > 0:
             opt_df = opt_df[opt_df["volume"] >= min_volume]
 
         if opt_df.empty:
-            errors.append(f"{code}: no live options")
             applog.log("ARB", f"{code} {pos} skipped: no live options")
-            continue
+            return [], f"{code}: no live options"
 
         if strategy == "pcp":
             rows = _match_warrants_pcp(
@@ -978,7 +984,25 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
             f"{code} {pos} warrants={len(warrant_df)} options={len(opt_df)} "
             f"matched={len(rows)} strategy={strategy}",
         )
-        all_rows.extend(rows)
+        return rows, None
+
+    # Fan out the per-code fetch+match across a small pool (upstream CMoney /
+    # TAIFEX rate limits mean a handful of workers, not the 100 warrant_logic
+    # uses for its own intra-code fetch). Results are collected in submission
+    # order so the pre-sort row order is identical to the old sequential loop.
+    all_rows = []
+    errors = []
+    if stock_codes:
+        max_workers = min(6, len(stock_codes))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = list(executor.map(
+                lambda ic: _process(ic[0], ic[1]),
+                list(enumerate(stock_codes, 1)),
+            ))
+        for rows, err in results:
+            all_rows.extend(rows)
+            if err:
+                errors.append(err)
 
     if not all_rows:
         msg = "; ".join(errors) if errors else "No matches found"
@@ -1047,7 +1071,7 @@ def match_warrant_us_option(stock_codes, option_type, max_strike_diff_pct, max_d
             errors.append(f"{code}: {opt_err or 'no US options'}")
             applog.log("ARB", f"{code} {pos} US option fetch failed: {opt_err}")
             continue
-        opt_df = opt_df[opt_df["is_live"]]
+        opt_df = opt_df[opt_df["ask_live"] | opt_df["bid_live"]]
         if min_volume > 0:
             opt_df = opt_df[opt_df["volume"] >= min_volume]
 

@@ -316,11 +316,12 @@ async function loadAdrPremium(row) {
 
   // ADF unit-root test: proves (or disproves) the premium is mean-reverting.
   // Null = unit root (random walk); p < 0.05 rejects it => mean-reverting,
-  // which is the trade's whole thesis. Half-life = days to revert halfway.
+  // which is the trade's whole thesis. Half-life = trading days to revert halfway.
   const adfEl = document.getElementById("us-prem-adf");
   const a = s.adf;
   if (!a || a.pvalue == null) {
-    adfEl.innerHTML = `<span style="color:var(--muted)">ADF test: not enough data.</span>`;
+    const why = a && a.reason ? " (" + a.reason + ")" : "";
+    adfEl.innerHTML = `<span style="color:var(--muted)">ADF test: not enough data${why}.</span>`;
   } else {
     const ok = a.stationary;
     const col = ok ? "var(--put)" : "var(--call)";

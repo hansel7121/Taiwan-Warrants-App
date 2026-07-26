@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import yfinance as yf
+from statsmodels.tsa.stattools import adfuller
 
 from services import applog
 from services import db_market
@@ -297,31 +298,33 @@ def _adf_test(series):
     """Augmented Dickey-Fuller unit-root test + AR(1) half-life on the premium
     LEVEL series. ADF null = unit root (random walk, NOT mean-reverting); a low
     p-value (< 0.05) rejects it => the premium is stationary / mean-reverting,
-    which is the whole thesis of the trade. Half-life = trading days for a
-    premium deviation to decay halfway back to its mean.
+    which is the whole thesis of the ADR-basis trade. Half-life = trading days
+    for a premium deviation to decay halfway back to its mean.
+
+    Returns all fields as None (with a `reason`) for a degenerate/short series
+    rather than raising, mirroring how the regime stats fall back to 0.0.
     """
     x = np.asarray(series, dtype=float)
     x = x[np.isfinite(x)]
     out = {"stat": None, "pvalue": None, "nobs": int(len(x)), "usedlag": None,
-           "crit": {}, "half_life": None, "stationary": None}
+           "crit": {}, "half_life": None, "stationary": None, "reason": None}
     if len(x) < 30:
+        out["reason"] = "too few observations (need >= 30)"
         return out
     try:
-        # Lazy import: statsmodels is heavy on the 512MB host, so keep it out of
-        # module-import cost and degrade gracefully if it isn't installed.
-        from statsmodels.tsa.stattools import adfuller
         stat, pval, usedlag, nobs, crit, _ = adfuller(x, autolag="AIC")
-    except Exception:
+    except Exception as e:
+        out["reason"] = f"adfuller failed: {e}"
         return out
     out.update({"stat": float(stat), "pvalue": float(pval), "usedlag": int(usedlag),
                 "nobs": int(nobs), "crit": {k: float(v) for k, v in crit.items()},
                 "stationary": bool(pval < 0.05)})
-    # AR(1) half-life: Δp_t = a + b·p_{t-1}; mean-revert speed φ = 1 + b (b < 0),
-    # half-life = −ln2 / ln(1 + b). Only defined when the level pulls back (b<0).
-    dp = np.diff(x)
-    b = float(np.polyfit(x[:-1], dp, 1)[0])
-    if b < 0:
-        out["half_life"] = float(-np.log(2) / np.log(1.0 + b))
+    # AR(1) half-life via OLS of the level on its own lag: p_t = a + phi*p_{t-1}.
+    # Mean-reversion requires 0 < phi < 1; then half_life = -ln2 / ln(phi).
+    # phi <= 0 or phi >= 1 => not mean-reverting => half_life stays None.
+    phi = float(np.polyfit(x[:-1], x[1:], 1)[0])
+    if 0.0 < phi < 1.0:
+        out["half_life"] = float(-np.log(2.0) / np.log(phi))
     return out
 
 
@@ -672,6 +675,8 @@ def scrape_yfinance_us_option(stock_code, option_type="All", min_days=1, max_day
                     "volume": int(vol_raw[j]) if pd.notna(vol_raw[j]) else 0,
                     "oi": int(oi_raw[j]) if pd.notna(oi_raw[j]) else 0,
                     "is_live": bool(is_live[j]),
+                    "ask_live": bool(ask_live[j]),
+                    "bid_live": bool(bid_live[j]),
                     # USD reference (for display / auditing)
                     "strike_usd": round(float(Kx), 4),
                     "bid_usd": round(float(bx), 4) if bok else None,
@@ -767,5 +772,5 @@ def us_options_scan(stock_codes, option_type, min_days, max_days, min_volume):
         df = df.assign(product=stock_codes[0] if len(stock_codes) == 1 else None)
     cols = ["product", "contract", "type", "strike_usd", "adr_price",
             "days_to_expiry", "bid_usd", "ask_usd", "iv_ask", "iv_bid",
-            "delta_calc", "volume", "oi", "fx", "is_live"]
+            "delta_calc", "volume", "oi", "fx", "is_live", "ask_live", "bid_live"]
     return df[[c for c in cols if c in df.columns]], None, meta

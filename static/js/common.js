@@ -143,11 +143,19 @@ function switchTab(tab, btn) {
 // different view was active. Runs after auth in _boot.
 
 function restoreView() {
+  // Home is the landing tab (rendered active in the HTML). Only act when a
+  // different tab was saved before the last reload.
   const tab = _readView("ws_activeTab");
-  if (tab && tab !== "options") {
+  if (tab && tab !== "home") {
     const btn = document.querySelector(`.tab-bar button[onclick*="switchTab('${tab}'"]`);
-    if (btn) { switchTab(tab, btn); if (tab === "portfolio") loadPortfolioOnce(); }
+    if (btn) {
+      switchTab(tab, btn);
+      if (tab === "portfolio") loadPortfolioOnce();
+    }
   }
+  // Whatever landed active: if it's Home, populate it now.
+  if (document.getElementById("tab-home")?.classList.contains("active")
+      && typeof loadHomeOnce === "function") loadHomeOnce();
   if (_readView("ws_optMarket") === "us") {
     const b = document.getElementById("optmkt-btn-us");
     if (b) setOptMarket("us", b);

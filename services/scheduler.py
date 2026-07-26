@@ -49,12 +49,13 @@ TW_OPTION_COLS = [
     "stock_code", "source", "contract", "type", "underlying_price", "ask", "bid",
     "days_to_expiry", "strike", "exercise_ratio", "bid_size", "ask_size",
     "volume", "oi", "time_value_am", "iv_ask", "iv_bid", "delta_calc",
-    "leverage_calc", "is_live", "quote_time",
+    "leverage_calc", "is_live", "ask_live", "bid_live", "quote_time",
 ]
 US_OPTION_COLS = [
     "stock_code", "contract", "type", "underlying_price", "strike",
     "days_to_expiry", "bid", "ask", "iv_ask", "iv_bid", "delta_calc", "volume",
-    "oi", "is_live", "strike_usd", "bid_usd", "ask_usd", "adr_price", "fx",
+    "oi", "is_live", "ask_live", "bid_live", "strike_usd", "bid_usd", "ask_usd",
+    "adr_price", "fx",
 ]
 
 # Columns typed `integer` in supabase/schema.sql. keep_noniv=True leaves NaNs in
@@ -285,6 +286,17 @@ def sync_suggestions():
 
         if strategy == "pcp" and "executable" in df.columns:
             df = df[df["executable"]]
+        elif strategy == "same_type" and {"trade", "riskless"} <= set(df.columns):
+            # Risk-free only. match_warrant_tw_option still emits (a) the
+            # non-executable short-warrant direction and (b) the UNFAVORABLE
+            # capped-loss side, which its strike gate admits within
+            # max_strike_diff_pct (arb_logic.py: strike_ok = favorable | within-cap).
+            # A suggestion must be a true arb, so keep only the long-warrant /
+            # short-option side on the FAVORABLE strike: residual vertical pays
+            # >= 0 at every spot (option strike above the warrant's for calls /
+            # below for puts), priced richer per share (price_diff>0) and shorter
+            # dated (opt_dte <= warrant_dte, already enforced for this direction).
+            df = df[(df["trade"] == "Buy Warrant / Sell Option") & df["riskless"]]
         if df.empty:
             print(f"SCHED: suggestions {arb_type} 0 active (no executable rows)", flush=True)
             db_suggestions.mark_stale(arb_type, [])
