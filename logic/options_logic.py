@@ -1,5 +1,6 @@
 import io
 import re
+import threading
 import time
 from datetime import datetime, timezone
 import requests
@@ -24,23 +25,31 @@ _CACHE_TTL = 1800  # 30 minutes
 
 _PRODUCT_CACHE_TTL = 300  # 5 min; add/remove routes also invalidate directly
 _commodity_map_cache = {"data": None, "ts": 0.0}
+# Guards _commodity_map_cache. This is the one process-wide structure the arb
+# scan reads from every worker thread, so the check-then-populate below must be
+# atomic — otherwise a cold cache under concurrent readers triggers redundant
+# db_products fetches (dict writes are atomic under the GIL, so no corruption,
+# but the lock keeps the populate single-flighted and consistent).
+_commodity_map_lock = threading.Lock()
 
 
 def _commodity_map():
     """{code: {commodity_ids, ticker, exercise_ratio, name}} from tw_option_products, cached."""
     now = time.time()
-    if _commodity_map_cache["data"] is not None and now - _commodity_map_cache["ts"] < _PRODUCT_CACHE_TTL:
-        return _commodity_map_cache["data"]
-    from services import db_products
-    data = {row["code"]: row for row in db_products.list_tw_option_products()}
-    _commodity_map_cache["data"] = data
-    _commodity_map_cache["ts"] = now
-    return data
+    with _commodity_map_lock:
+        if _commodity_map_cache["data"] is not None and now - _commodity_map_cache["ts"] < _PRODUCT_CACHE_TTL:
+            return _commodity_map_cache["data"]
+        from services import db_products
+        data = {row["code"]: row for row in db_products.list_tw_option_products()}
+        _commodity_map_cache["data"] = data
+        _commodity_map_cache["ts"] = now
+        return data
 
 
 def invalidate_commodity_map_cache():
     """Called by the add/remove product routes (Phase 5.3) so a change is visible immediately."""
-    _commodity_map_cache["data"] = None
+    with _commodity_map_lock:
+        _commodity_map_cache["data"] = None
 
 
 def _live_cache_as_of(stock_codes):
