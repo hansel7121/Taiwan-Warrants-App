@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services import scheduler
 from services import db_market
+from services import memlog
 
 TW = ZoneInfo("Asia/Taipei")
 NY = ZoneInfo("America/New_York")
@@ -67,7 +68,7 @@ _COLS = {
     "warrants": set(scheduler.warrant_logic.COL_ORDER),
     "tw_options": set(scheduler.TW_OPTION_COLS),
     "us_options": set(scheduler.US_OPTION_COLS),
-    "warrant_universe": {"code", "name", "start", "market"},
+    "warrant_universe": {"code", "name", "start", "market", "type"},
 }
 
 
@@ -129,7 +130,10 @@ def writer_assertions():
         print(f"  [FAIL] warrants only {n} rows (want > 1000)")
 
     print(" sync_tw_option()")
-    scheduler.sync_tw_option()
+    # Calling the bare core writer bypasses scheduler._job(), which is the only
+    # place memlog.measure() is applied — wrap it here so peak RSS still prints.
+    with memlog.measure("tw_options_fetch"):
+        scheduler.sync_tw_option()
     df, n = _read_twice("tw_options")
     _check_cols("tw_options", df)
     if n > 0:
@@ -138,7 +142,8 @@ def writer_assertions():
         print("  [note] tw_options 0 rows — acceptable off-hours, SKIP >0 assertion")
 
     print(" sync_us_option()")
-    scheduler.sync_us_option()
+    with memlog.measure("us_options_fetch"):
+        scheduler.sync_us_option()
     df, n = _read_twice("us_options")
     _check_cols("us_options", df)
     if n > 0:
