@@ -691,24 +691,31 @@ def scrape_tw_option(
     shape as read_tw_option, mirroring warrant_logic's scrape_cmoney_warrant.
     """
     dfs = []
-    errors = []
+    # A code with no chain (unsupported, or every source returned an empty file)
+    # is a normal empty scan; only a code whose every SOURCE raised is a genuine
+    # failure. Keeping the two apart is what lets callers tell "nothing to show"
+    # from "the data feed is down".
+    skip_reasons = []
+    hard_errors = []
     for code in stock_codes:
         if code not in _commodity_map():
-            errors.append(f"{code}: not supported")
+            skip_reasons.append(f"{code}: not supported")
             applog.log("OPT", f"{code} not supported")
             continue
         cfg = _commodity_map()[code]
         df = None
+        source_errors = []
         # Primary: MIS intraday quotes. Fallback: EOD data-download file.
         try:
             df = scrape_mis_tw_option(code, compute_iv=compute_iv, keep_noniv=keep_noniv,
                                    force=True)
             applog.log("OPT", f"{code} source=MIS {len(df)} contracts")
         except Exception as e:
-            errors.append(f"{code}: MIS {e}")
+            source_errors.append(f"MIS {e}")
             # MIS is the primary intraday source; falling back to EOD means the
             # data is up to a day stale, so the fallback itself is the signal.
-            applog.log("OPT", f"{code} MIS failed ({e}) — falling back to TAIFEX EOD")
+            applog.log("OPT", f"{code} MIS failed ({e}) — falling back to TAIFEX EOD",
+                       level="WARN")
             df = None
         if df is None or df.empty:
             try:
@@ -718,21 +725,27 @@ def scrape_tw_option(
                                         keep_noniv=keep_noniv)
                 applog.log("OPT", f"{code} source=EOD {len(df)} contracts spot={S}")
             except Exception as e:
-                errors.append(f"{code}: EOD {e}")
-                applog.log("OPT", f"{code} EOD failed: {e}")
+                source_errors.append(f"EOD {e}")
+                applog.log("OPT", f"{code} EOD failed: {e}", level="ERROR")
                 df = None
         if df is not None and not df.empty:
             dfs.append(df)
+        elif source_errors:
+            hard_errors.append(f"{code}: {'; '.join(source_errors)}")
+        else:
+            skip_reasons.append(f"{code}: no contracts returned")
 
     as_of = _live_cache_as_of(stock_codes)
     meta = {
         "as_of": datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None,
         "cached": False,
+        "hard_error": "; ".join(hard_errors) if hard_errors else None,
     }
 
     if not dfs:
-        err_msg = "; ".join(errors) if errors else "No data returned"
-        applog.log("OPT", f"{','.join(stock_codes)} -> no data: {err_msg}")
+        err_msg = "; ".join(hard_errors or skip_reasons) or "No data returned"
+        applog.log("OPT", f"{','.join(stock_codes)} -> no data: {err_msg}",
+                   level="ERROR" if hard_errors else "INFO")
         return pd.DataFrame(), err_msg, meta
 
     result = pd.concat(dfs, ignore_index=True)

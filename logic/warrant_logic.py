@@ -393,6 +393,12 @@ def _cmoney_session():
 
 
 def fetch_one_cmoney(code, cmkey):
+    """Returns (code, data_or_KEY_EXPIRED_or_None, exception_message_or_None).
+
+    The exception message is carried out instead of being swallowed: a network /
+    CMoney outage otherwise looks identical to "this code simply has no
+    warrants", and the scanner ends up reporting a silent 0 rows.
+    """
     try:
         r = _cmoney_session().get(
             CMONEY_URL,
@@ -407,19 +413,27 @@ def fetch_one_cmoney(code, cmkey):
         )
         data = r.json()
         if "Warrant" in data and "Stock" in data:
-            return code, data
+            return code, data, None
         if data.get("Error") == -3:
-            return code, "KEY_EXPIRED"
-    except Exception:
-        pass
-    return code, None
+            return code, "KEY_EXPIRED", None
+    except Exception as e:
+        return code, None, str(e)
+    return code, None, None
 
 
-def get_cmoney_prices(codes):
+def get_cmoney_prices(codes, errors_out=None):
+    """Fetch raw CMoney payloads for `codes`.
+
+    `errors_out`, when given a list, receives the distinct exception messages
+    raised while fetching — the caller uses them to tell a real outage from a
+    genuinely empty result. Kept as an out-param so the (results) return shape
+    stays what every existing caller expects.
+    """
     global _cmoney_key
     cmkey = get_cmoney_key()
 
     results = {}
+    errors = {}
     key_expired = False
 
     with ThreadPoolExecutor(max_workers=100) as executor:
@@ -427,32 +441,48 @@ def get_cmoney_prices(codes):
             executor.submit(fetch_one_cmoney, code, cmkey): code for code in codes
         }
         for future in as_completed(futures):
-            code, data = future.result()
+            code, data, err = future.result()
             if data == "KEY_EXPIRED":
                 key_expired = True
             elif data is not None:
                 results[code] = data
+            elif err:
+                errors[err] = errors.get(err, 0) + 1
 
     if key_expired:
-        applog.log("WARR", f"cmkey expired (Error -3) — refreshing key, retrying {len(codes)} codes")
+        applog.log("WARR", f"cmkey expired (Error -3) — refreshing key, retrying {len(codes)} codes",
+                   level="WARN")
         cmkey = scrape_cmoney_key()
         results = {}
+        errors = {}
         with ThreadPoolExecutor(max_workers=100) as executor:
             futures = {
                 executor.submit(fetch_one_cmoney, code, cmkey): code for code in codes
             }
             for future in as_completed(futures):
-                code, data = future.result()
+                code, data, err = future.result()
                 if data and data != "KEY_EXPIRED":
                     results[code] = data
+                elif err:
+                    errors[err] = errors.get(err, 0) + 1
 
     # Aggregate only: fetch_one_cmoney fans out over 100 threads, so a per-code
-    # failure line would be thousands of lines for one request.
+    # failure line would be thousands of lines for one request. Exceptions are
+    # deduplicated by message for the same reason.
     applog.log(
         "WARR",
         f"cmoney {len(codes)} requested, {len(results)} ok, "
         f"{len(codes) - len(results)} failed",
+        level="ERROR" if (errors and not results) else "INFO",
     )
+    if errors:
+        applog.log(
+            "WARR",
+            "cmoney fetch errors: " + "; ".join(f"{m} (x{n})" for m, n in errors.items()),
+            level="ERROR" if not results else "WARN",
+        )
+        if errors_out is not None:
+            errors_out.extend(f"{m} (x{n})" for m, n in errors.items())
     return results
 
 
@@ -954,12 +984,16 @@ def _warrant_codes_for(stock_codes):
     return code_map
 
 
-def get_warrant_results(stock_codes, force=False):
+def get_warrant_results(stock_codes, force=False, errors_out=None):
     """Cached raw CMoney results for the given underlyings.
 
     Returns (results, as_of_ts, cached): merged {warrant_code: result}, the
     oldest cache timestamp involved, and whether everything was served from
     cache (False when any underlying was fetched live in this call).
+
+    `errors_out`, when given a list, collects genuine CMoney fetch failures
+    (see get_cmoney_prices) so the caller can report an outage as an error
+    rather than as an empty result.
     """
     now = time.time()
     with _warrant_cache_lock:
@@ -985,7 +1019,7 @@ def get_warrant_results(stock_codes, force=False):
                 f"{' (forced)' if force else ''}",
             )
             t0 = time.time()
-            fetched = get_cmoney_prices(all_codes) if all_codes else {}
+            fetched = get_cmoney_prices(all_codes, errors_out=errors_out) if all_codes else {}
             applog.log(
                 "WARR",
                 f"{','.join(need)} fetched {len(fetched)}/{len(all_codes)} codes "
@@ -1015,6 +1049,7 @@ def get_warrant_results(stock_codes, force=False):
                     "WARR",
                     f"{','.join(failed)} fetch failed (0/{len(all_codes)} codes ok) "
                     f"— not caching, will retry next request",
+                    level="ERROR",
                 )
     merged, as_of = {}, None
     with _warrant_cache_lock:
@@ -1133,14 +1168,24 @@ def scrape_cmoney_warrant(
     if isinstance(stock_codes, str):
         stock_codes = [stock_codes]
 
-    cmoney_results, as_of, cached = get_warrant_results(stock_codes, force=True)
+    fetch_errors = []
+    cmoney_results, as_of, cached = get_warrant_results(
+        stock_codes, force=True, errors_out=fetch_errors
+    )
     meta = {
         "as_of": datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None,
         "cached": cached,
+        # Set only when CMoney itself failed — an empty result with no
+        # hard_error means "this underlying has no warrants", not an outage.
+        "hard_error": "; ".join(fetch_errors) if fetch_errors else None,
     }
 
     codes_s = ",".join(stock_codes)
     if not cmoney_results:
+        if fetch_errors:
+            err = "CMoney fetch failed: " + "; ".join(fetch_errors)
+            applog.log("WARR", f"{codes_s} -> 0 rows ({err})", level="ERROR")
+            return pd.DataFrame(), err, meta
         applog.log("WARR", f"{codes_s} -> 0 rows (no warrants found)")
         return pd.DataFrame(), "No warrants found", meta
 

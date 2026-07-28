@@ -473,20 +473,30 @@ def read_us_option(stock_codes, option_type="All", min_days=1, max_days=365,
                 return pd.DataFrame(), "No US options in range", meta
             return result, None, meta
 
-    dfs, errors, as_ofs = [], [], []
+    # scrape_yfinance_us_option already flags which of its failure modes is a
+    # genuine fetch failure (meta["hard_error"]); trust that rather than
+    # re-deriving it from the message text here.
+    dfs, skip_reasons, hard_errors, as_ofs = [], [], [], []
     for code in stock_codes:
         df, err, meta = scrape_yfinance_us_option(
             code, option_type, min_days, max_days, compute_iv, keep_noniv,
         )
         if err:
-            errors.append(f"{code}: {err}")
+            if meta.get("hard_error"):
+                hard_errors.append(f"{code}: {err}")
+            else:
+                skip_reasons.append(f"{code}: {err}")
         if df is not None and not df.empty:
             dfs.append(df.assign(stock_code=code))
         if meta.get("as_of"):
             as_ofs.append(meta["as_of"])
-    combined_meta = {"as_of": min(as_ofs) if as_ofs else None, "cached": False}
+    combined_meta = {
+        "as_of": min(as_ofs) if as_ofs else None,
+        "cached": False,
+        "hard_error": "; ".join(hard_errors) if hard_errors else None,
+    }
     if not dfs:
-        err_msg = "; ".join(errors) if errors else "No US options in range"
+        err_msg = "; ".join(hard_errors or skip_reasons) or "No US options in range"
         return pd.DataFrame(), err_msg, combined_meta
     result = pd.concat(dfs, ignore_index=True)
     return result, None, combined_meta
@@ -502,8 +512,11 @@ def scrape_yfinance_us_option(stock_code, option_type="All", min_days=1, max_day
     cache-hit path stays warm. Never raises — returns (df, error_or_None, meta),
     mirroring warrant_logic.scrape_cmoney_warrant / options_logic.scrape_tw_option.
     """
+    # meta["hard_error"] marks a genuine yfinance/price failure, as opposed to
+    # "this code has no chain / nothing in range", which is a normal empty scan.
     if stock_code not in _adr_map():
-        return pd.DataFrame(), f"{stock_code}: no US ADR mapping", {"as_of": None, "cached": False}
+        return (pd.DataFrame(), f"{stock_code}: no US ADR mapping",
+                {"as_of": None, "cached": False, "hard_error": None})
 
     cfg = _adr_map()[stock_code]
     cache_key = (stock_code, compute_iv, keep_noniv)
@@ -514,17 +527,21 @@ def scrape_yfinance_us_option(stock_code, option_type="All", min_days=1, max_day
         adr = _last_price(cfg["adr_ticker"])     # USD per ADR
         fx = _last_price(cfg["fx_ticker"])       # TWD per USD
     except Exception as e:
-        applog.log("USOPT", f"{stock_code} price fetch failed: {e}")
-        return pd.DataFrame(), str(e), {"as_of": None, "cached": False}
+        applog.log("USOPT", f"{stock_code} price fetch failed: {e}", level="ERROR")
+        return (pd.DataFrame(), str(e),
+                {"as_of": None, "cached": False, "hard_error": str(e)})
 
     meta = {
         "as_of": datetime.fromtimestamp(t0, tz=timezone.utc).isoformat(),
         "cached": False,
+        "hard_error": None,
     }
 
     if adr <= 0 or fx <= 0:
-        applog.log("USOPT", f"{stock_code} bad ADR price ({adr}) or FX ({fx})")
-        return pd.DataFrame(), "bad ADR price or FX", meta
+        # No usable ADR/FX print at all — the upstream feed is broken, not a
+        # chain that happens to be empty.
+        applog.log("USOPT", f"{stock_code} bad ADR price ({adr}) or FX ({fx})", level="ERROR")
+        return pd.DataFrame(), "bad ADR price or FX", {**meta, "hard_error": "bad ADR price or FX"}
 
     # Underlying value expressed per Taiwan share, in TWD — the same basis the
     # warrant leg uses (so strike_diff_pct etc. are apples-to-apples).

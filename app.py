@@ -19,6 +19,7 @@ import signal
 import subprocess
 import time
 import threading
+import traceback
 import webbrowser
 import numpy as np
 import pandas as pd
@@ -382,18 +383,27 @@ def read_warrant():
     max_tv_pct = float(data.get("max_tv_pct", 100.0))
     min_volume = int(data.get("min_volume", 0))
 
-    df, error, meta = warrant_logic.read_warrant(
-        stock_codes,
-        option_type,
-        min_days,
-        max_days,
-        min_leverage,
-        max_tv_pct,
-        min_volume,
-    )
-    if error and df.empty:
+    try:
+        df, error, meta = warrant_logic.read_warrant(
+            stock_codes,
+            option_type,
+            min_days,
+            max_days,
+            min_leverage,
+            max_tv_pct,
+            min_volume,
+        )
+    except Exception as e:
+        applog.log("WARR", f"read_warrant failed: {e}\n{traceback.format_exc()}", level="ERROR")
+        return jsonify({"rows": [], "count": 0, "error": str(e)})
+    # Only a genuine fetch failure is an error. An empty result with no
+    # hard_error means the filters simply passed nothing through, which the
+    # frontend must render neutrally.
+    hard_error = meta.pop("hard_error", None)
+    if df.empty:
         applog.set_rows(0)
-        return jsonify({"rows": [], "count": 0, "error": error, **meta})
+        return jsonify({"rows": [], "count": 0,
+                        "error": error if hard_error else None, **meta})
     applog.set_rows(len(df))
     return jsonify({"rows": df.to_dict(orient="records"), "count": len(df), **meta})
 
@@ -439,12 +449,18 @@ def read_tw_option():
     max_days = int(data.get("max_days", 365))
     min_leverage = float(data.get("min_leverage", 0.0))
     min_volume = int(data.get("min_volume", 0))
-    df, error, meta = options_logic.read_tw_option(
-        stock_codes, option_type, min_days, max_days, min_leverage, min_volume
-    )
-    if error and df.empty:
+    try:
+        df, error, meta = options_logic.read_tw_option(
+            stock_codes, option_type, min_days, max_days, min_leverage, min_volume
+        )
+    except Exception as e:
+        applog.log("OPT", f"read_tw_option failed: {e}\n{traceback.format_exc()}", level="ERROR")
+        return jsonify({"rows": [], "count": 0, "error": str(e)})
+    hard_error = meta.pop("hard_error", None)
+    if df.empty:
         applog.set_rows(0)
-        return jsonify({"rows": [], "count": 0, "error": error, **meta})
+        return jsonify({"rows": [], "count": 0,
+                        "error": error if hard_error else None, **meta})
     # Use pandas JSON serialisation so NaN → null (browser JSON.parse rejects bare NaN)
     rows = json.loads(df.to_json(orient="records"))
     applog.set_rows(len(df))
@@ -460,10 +476,16 @@ def read_us_option():
     min_days = data.get("min_days", 0)
     max_days = data.get("max_days", 365)
     min_volume = data.get("min_volume", 0)
-    df, error, meta = us_options_logic.us_options_scan(stock_codes, option_type, min_days, max_days, min_volume)
-    if error and df.empty:
+    try:
+        df, error, meta = us_options_logic.us_options_scan(stock_codes, option_type, min_days, max_days, min_volume)
+    except Exception as e:
+        applog.log("USOPT", f"read_us_option failed: {e}\n{traceback.format_exc()}", level="ERROR")
+        return jsonify({"rows": [], "count": 0, "error": str(e)})
+    hard_error = meta.pop("hard_error", None)
+    if df.empty:
         applog.set_rows(0)
-        return jsonify({"rows": [], "count": 0, "error": error, **meta})
+        return jsonify({"rows": [], "count": 0,
+                        "error": error if hard_error else None, **meta})
     rows = json.loads(df.to_json(orient="records"))
     applog.set_rows(len(df))
     return jsonify({"rows": rows, "count": len(df), **meta})
@@ -656,7 +678,8 @@ def match_warrant_us_option():
         applog.set_rows(len(rows))
         return jsonify({"rows": rows, "count": len(rows)})
     except Exception as e:
-        applog.log("ARB", f"match_warrant_us_option failed: {e}")
+        applog.log("ARB", f"match_warrant_us_option failed: {e}\n{traceback.format_exc()}",
+                   level="ERROR")
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
@@ -705,7 +728,8 @@ def match_tw_us_option():
         applog.set_rows(len(rows))
         return jsonify({"rows": rows, "count": len(rows)})
     except Exception as e:
-        applog.log("ARB", f"match_tw_us_option failed: {e}")
+        applog.log("ARB", f"match_tw_us_option failed: {e}\n{traceback.format_exc()}",
+                   level="ERROR")
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
@@ -760,7 +784,8 @@ def match_warrant_tw_option():
         as_of_iso = datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None
         return jsonify({"rows": rows, "count": len(rows), "as_of": as_of_iso})
     except Exception as e:
-        applog.log("ARB", f"match_warrant_tw_option failed: {e}")
+        applog.log("ARB", f"match_warrant_tw_option failed: {e}\n{traceback.format_exc()}",
+                   level="ERROR")
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
@@ -821,7 +846,8 @@ def straddle_arbitrage():
         as_of_iso = datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None
         return jsonify({"rows": rows, "count": len(rows), "as_of": as_of_iso})
     except Exception as e:
-        applog.log("ARB", f"straddle_arbitrage failed: {e}")
+        applog.log("ARB", f"straddle_arbitrage failed: {e}\n{traceback.format_exc()}",
+                   level="ERROR")
         return jsonify({"rows": [], "count": 0, "error": str(e)})
 
 
