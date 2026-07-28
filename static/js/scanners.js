@@ -170,7 +170,7 @@ async function readWarrant() {
     document.getElementById("status").textContent = "Please select at least one stock.";
     return;
   }
-  document.getElementById("status").textContent = "Fetching…";
+  document.getElementById("status").textContent = "Reading…";
   document.getElementById("tableContainer").innerHTML = "";
   document.getElementById("downloadBtn").style.display = "none";
 
@@ -474,7 +474,7 @@ async function readOption() {
     document.getElementById("opt-status").textContent = "Please select at least one product.";
     return;
   }
-  document.getElementById("opt-status").textContent = _optMarket === "us" ? "Fetching US ADR options (Yahoo, ~15 min delayed)…" : "Fetching…";
+  document.getElementById("opt-status").textContent = _optMarket === "us" ? "Reading US ADR options (Yahoo, ~15 min delayed)…" : "Reading…";
   document.getElementById("opt-tableContainer").innerHTML = "";
   document.getElementById("optDownloadBtn").style.display = "none";
 
