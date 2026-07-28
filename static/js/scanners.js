@@ -180,6 +180,13 @@ async function readWarrant() {
     body: JSON.stringify(filters),
   });
   const data = await res.json();
+  // The backend only sets `error` for a genuine fetch failure; a clean scan
+  // that matched nothing comes back count:0 with no error and must not be
+  // dressed up as one (same distinction arb.js makes).
+  if (data.error) {
+    document.getElementById("status").textContent = "Error: " + data.error;
+    return;
+  }
   currentData = data.rows;
   setStatusWithAge("warrants", "status", `${data.count} warrants`, data);
   document.getElementById("downloadBtn").style.display = "inline-block";
@@ -484,12 +491,15 @@ async function readOption() {
     body: JSON.stringify(filters),
   });
   const data = await res.json();
+  // `error` is now set only for a genuine fetch failure — a clean scan that
+  // matched nothing arrives as count:0 with no error and reads neutrally.
   if (data.error) {
     document.getElementById("opt-status").textContent = "Error: " + data.error;
     return;
   }
   currentOptionsData = data.rows;
-  setStatusWithAge("options", "opt-status", `${data.count} options`, data);
+  setStatusWithAge("options", "opt-status",
+    data.count ? `${data.count} options` : "No options match filters", data);
   document.getElementById("optDownloadBtn").style.display = "inline-block";
   renderOptionsTable(currentOptionsData);
   return data;

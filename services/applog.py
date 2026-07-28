@@ -29,10 +29,14 @@ def _current_id():
     return None
 
 
-def log(prefix, msg):
+def log(prefix, msg, level="INFO"):
+    """Emit one log line. `level` ("INFO"/"WARN"/"ERROR") is prefixed so the
+    Render log stream can be grepped by severity — a genuine fetch failure has
+    to be findable among the normal per-code chatter."""
     try:
         rid = _current_id()
-        print(f"{prefix}: [{rid}] {msg}" if rid else f"{prefix}: {msg}", flush=True)
+        head = f"[{level}] {prefix}"
+        print(f"{head}: [{rid}] {msg}" if rid else f"{head}: {msg}", flush=True)
     except Exception:
         pass
 
@@ -42,7 +46,7 @@ _once_seen: dict = {}  # key -> epoch of the last line logged under it
 ONCE_TTL = 300
 
 
-def log_once(prefix, msg, key):
+def log_once(prefix, msg, key, level="INFO"):
     """log(), but at most once per request under `key`.
 
     For facts about process-wide state (which universe is in effect) that hold
@@ -67,7 +71,7 @@ def log_once(prefix, msg, key):
                 _once_seen[key] = now
     except Exception:
         pass  # fail open: a broken guard must not swallow the line
-    log(prefix, msg)
+    log(prefix, msg, level)
 
 
 def redact(secret, keep=6):

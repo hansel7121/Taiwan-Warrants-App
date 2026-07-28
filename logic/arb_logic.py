@@ -178,7 +178,11 @@ def build_straddle_arb(stock_codes, option_type, max_strike_diff_pct, max_dte_di
     the same failure the Direct arb guards against with ``opt_dte <= warrant_dte``.
     """
     all_rows = []
-    errors = []
+    # Only a genuine data-fetch failure is an error. "This code has no warrants
+    # / no live options / no package survived the filters" is a normal empty
+    # scan and must not be raised as one (see match_warrant_tw_option).
+    skip_reasons = []
+    hard_errors = []
     # Stage counters so a zero-row scan can explain WHICH filter emptied it
     # rather than failing with a bare "no matches".
     diag = {"legs": 0, "longs": 0, "shorts": 0, "pairs": 0,
@@ -187,30 +191,39 @@ def build_straddle_arb(stock_codes, option_type, max_strike_diff_pct, max_dte_di
 
     for code in stock_codes:
         if code not in options_logic._commodity_map():
-            errors.append(f"{code}: no options data available")
+            skip_reasons.append(f"{code}: no options data available")
             continue
 
         # Warrant leg needs its solved iv_ask/iv_bid, so compute_iv=True; the
         # option leg's IV is recomputed here at ratio=1.0, so its fetch skips it.
-        warrant_df, werr, _meta = warrant_logic.read_warrant(
+        warrant_df, werr, wmeta = warrant_logic.read_warrant(
             [code], "All", 0, 365, 0, 1e9, 0, compute_iv=True
         )
         if warrant_df.empty:
-            errors.append(f"{code}: {werr or 'no warrants'}")
+            msg = f"{code}: {werr or 'no warrants'}"
+            if (wmeta or {}).get("hard_error"):
+                hard_errors.append(msg)
+            else:
+                skip_reasons.append(msg)
             continue
         try:
-            opt_df, oerr, _meta = options_logic.read_tw_option([code], "All", min_days=1, compute_iv=False)
+            opt_df, oerr, ometa = options_logic.read_tw_option([code], "All", min_days=1, compute_iv=False)
             if opt_df.empty:
-                errors.append(f"{code}: {oerr or 'no options'}")
+                msg = f"{code}: {oerr or 'no options'}"
+                if (ometa or {}).get("hard_error"):
+                    hard_errors.append(msg)
+                else:
+                    skip_reasons.append(msg)
                 continue
             opt_df = opt_df[opt_df["ask_live"] | opt_df["bid_live"]]
             if min_volume > 0:
                 opt_df = opt_df[opt_df["volume"] >= min_volume]
         except Exception as e:
-            errors.append(f"{code}: {e}")
+            hard_errors.append(f"{code}: {e}")
+            applog.log("ARB", f"{code} straddle leg fetch failed: {e}", level="ERROR")
             continue
         if opt_df.empty:
-            errors.append(f"{code}: no live options")
+            skip_reasons.append(f"{code}: no live options")
             continue
 
         legs = _straddle_legs(warrant_df, opt_df, loose=loose,
@@ -319,9 +332,16 @@ def build_straddle_arb(stock_codes, option_type, max_strike_diff_pct, max_dte_di
         elif diag["shorts"] == 0:
             why += (". No short packages: the short leg needs a live two-sided "
                     "option quote (or enable Debug: allow short warrants)")
-        if errors:
-            why += " | " + "; ".join(errors)
-        raise RuntimeError(why)
+        if skip_reasons:
+            why += " | " + "; ".join(skip_reasons)
+        if hard_errors:
+            # A leg's data source actually failed — that IS an error.
+            raise RuntimeError(why + " | " + "; ".join(hard_errors))
+        # Every leg was read fine; nothing survived the filters. Most scans end
+        # here (a vol edge is rare), so this is a normal empty result, not a
+        # failure — keep the stage diagnosis in the log and return empty.
+        applog.log("ARB", why)
+        return pd.DataFrame()
 
     result = pd.DataFrame(all_rows).sort_values("iv_edge_pts", ascending=False)
     return result.head(200)
@@ -933,25 +953,33 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
     # product count instead of being ~constant. No time-value cap / IV solve on
     # the arb path: a positive price arb only needs warrant ask + option bid, so
     # nothing should drop a leg over time value or a non-converging IV.
-    all_warrant_df, warrant_err, _meta = (
+    all_warrant_df, warrant_err, warrant_meta = (
         warrant_logic.read_warrant(stock_codes, option_type, 0, 365, 0, 1e9, 0, compute_iv=False)
         if stock_codes else (pd.DataFrame(), None, None)
     )
-    all_opt_df, opt_err, _meta = (
+    all_opt_df, opt_err, opt_meta = (
         options_logic.read_tw_option(stock_codes, opt_type_fetch, min_days=1, compute_iv=False)
         if stock_codes else (pd.DataFrame(), None, None)
     )
+    # A fetch that actually failed (CMoney/TAIFEX down) is an error for every
+    # code in the scan; an empty frame with no hard_error just means there was
+    # nothing to read.
+    warrant_hard = (warrant_meta or {}).get("hard_error")
+    opt_hard = (opt_meta or {}).get("hard_error")
     if not all_opt_df.empty:
         all_opt_df = all_opt_df[all_opt_df["ask_live"] | all_opt_df["bid_live"]]
         if min_volume > 0:
             all_opt_df = all_opt_df[all_opt_df["volume"] >= min_volume]
 
     def _process(i, code):
-        """Match one stock code against the pre-fetched frames. Returns (rows, error_or_None)."""
+        """Match one stock code against the pre-fetched frames.
+
+        Returns (rows, skip_reason_or_None, hard_error_or_None).
+        """
         pos = f"({i}/{len(stock_codes)})"
         if code not in options_logic._commodity_map():
             applog.log("ARB", f"{code} {pos} skipped: no options data available")
-            return [], f"{code}: no options data available"
+            return [], f"{code}: no options data available", None
 
         cfg = options_logic._commodity_map()[code]
         opt_contract_size = cfg["exercise_ratio"]
@@ -961,16 +989,20 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
             if not all_warrant_df.empty else all_warrant_df
         )
         if warrant_df.empty:
-            applog.log("ARB", f"{code} {pos} skipped: {warrant_err or 'no warrants'}")
-            return [], f"{code}: {warrant_err or 'no warrants'}"
+            msg = f"{code}: {warrant_err or 'no warrants'}"
+            applog.log("ARB", f"{code} {pos} skipped: {warrant_err or 'no warrants'}",
+                       level="ERROR" if warrant_hard else "INFO")
+            return ([], None, msg) if warrant_hard else ([], msg, None)
 
         opt_df = (
             all_opt_df[all_opt_df["stock_code"].astype(str) == str(code)]
             if not all_opt_df.empty else all_opt_df
         )
         if opt_df.empty:
-            applog.log("ARB", f"{code} {pos} skipped: no live options")
-            return [], f"{code}: {opt_err or 'no options'}"
+            msg = f"{code}: {opt_err or 'no options'}"
+            applog.log("ARB", f"{code} {pos} skipped: no live options",
+                       level="ERROR" if opt_hard else "INFO")
+            return ([], None, msg) if opt_hard else ([], msg, None)
 
         if strategy == "pcp":
             rows = _match_warrants_pcp(
@@ -994,29 +1026,33 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
             f"{code} {pos} warrants={len(warrant_df)} options={len(opt_df)} "
             f"matched={len(rows)} strategy={strategy}",
         )
-        return rows, None
+        return rows, None, None
 
     # Plain loop, not a thread pool: _process is now pure in-memory pandas
     # (the fetch happened once, above), so there is no I/O left to overlap —
     # a ThreadPoolExecutor here bought nothing but GIL contention that helped
     # peg the single-worker deploy's CPU cap.
     all_rows = []
-    errors = []
+    skip_reasons = []
+    hard_errors = []
     for i, code in enumerate(stock_codes, 1):
-        rows, err = _process(i, code)
+        rows, skip, hard = _process(i, code)
         all_rows.extend(rows)
-        if err:
-            errors.append(err)
+        if skip:
+            skip_reasons.append(skip)
+        if hard:
+            hard_errors.append(hard)
 
     if not all_rows:
-        if errors:
-            # Every code failed for a real reason (bad code, no data source
-            # coverage) — a genuine error.
-            raise RuntimeError("; ".join(errors))
+        if hard_errors:
+            # A data source actually failed — a genuine error.
+            raise RuntimeError("; ".join(hard_errors))
         # Every code was read and matched fine; the filter just passed nothing
         # through. That is a normal, common scan outcome (most of the time
         # there is no arb), not a failure — return an empty result instead of
         # raising so the caller doesn't render it as an error.
+        if skip_reasons:
+            applog.log("ARB", "no matches; " + "; ".join(skip_reasons))
         return pd.DataFrame()
 
     result = pd.DataFrame(all_rows)
@@ -1054,40 +1090,49 @@ def match_warrant_us_option(stock_codes, option_type, max_strike_diff_pct, max_d
         bond (_match_warrants_pcp with r=R_US, synthetic_underlying="option").
     """
     all_rows = []
-    errors = []
+    # Skip reasons never gate the raise; only genuine fetch failures do
+    # (see match_warrant_tw_option).
+    skip_reasons = []
+    hard_errors = []
 
     for i, code in enumerate(stock_codes, 1):
         pos = f"({i}/{len(stock_codes)})"
         if code not in us_options_logic._adr_map():
-            errors.append(f"{code}: no US ADR mapping")
+            skip_reasons.append(f"{code}: no US ADR mapping")
             applog.log("ARB", f"{code} {pos} skipped: no US ADR mapping")
             continue
 
         contract_size = us_options_logic.contract_tw_shares(code)  # TW shares/contract
 
         # No time-value cap and no IV solve on the arb path (see match_warrant_tw_option).
-        warrant_df, err, _meta = warrant_logic.read_warrant(
+        warrant_df, err, wmeta = warrant_logic.read_warrant(
             [code], option_type, 0, 365, 0, 1e9, 0, compute_iv=False
         )
         if warrant_df.empty:
-            errors.append(f"{code}: {err or 'no warrants'}")
-            applog.log("ARB", f"{code} {pos} skipped: {err or 'no warrants'}")
+            msg = f"{code}: {err or 'no warrants'}"
+            hard = bool((wmeta or {}).get("hard_error"))
+            (hard_errors if hard else skip_reasons).append(msg)
+            applog.log("ARB", f"{code} {pos} skipped: {err or 'no warrants'}",
+                       level="ERROR" if hard else "INFO")
             continue
 
         # PCP pairs a warrant with the OPPOSITE-type option, so the option
         # fetch must include both types regardless of the warrant filter.
         opt_type_fetch = "All" if strategy == "pcp" else option_type
-        opt_df, opt_err, _meta = us_options_logic.read_us_option([code], opt_type_fetch, min_days=1, compute_iv=False)
+        opt_df, opt_err, ometa = us_options_logic.read_us_option([code], opt_type_fetch, min_days=1, compute_iv=False)
         if opt_df.empty:
-            errors.append(f"{code}: {opt_err or 'no US options'}")
-            applog.log("ARB", f"{code} {pos} US option fetch failed: {opt_err}")
+            msg = f"{code}: {opt_err or 'no US options'}"
+            hard = bool((ometa or {}).get("hard_error"))
+            (hard_errors if hard else skip_reasons).append(msg)
+            applog.log("ARB", f"{code} {pos} no US options: {opt_err}",
+                       level="ERROR" if hard else "INFO")
             continue
         opt_df = opt_df[opt_df["ask_live"] | opt_df["bid_live"]]
         if min_volume > 0:
             opt_df = opt_df[opt_df["volume"] >= min_volume]
 
         if opt_df.empty:
-            errors.append(f"{code}: no live US options")
+            skip_reasons.append(f"{code}: no live US options")
             applog.log("ARB", f"{code} {pos} skipped: no live US options")
             continue
 
@@ -1112,10 +1157,12 @@ def match_warrant_us_option(stock_codes, option_type, max_strike_diff_pct, max_d
         all_rows.extend(rows)
 
     if not all_rows:
-        if errors:
-            raise RuntimeError("; ".join(errors))
+        if hard_errors:
+            raise RuntimeError("; ".join(hard_errors))
         # Every code was read and matched fine; the filter just passed nothing
         # through — a normal empty scan, not a failure. See match_warrant_tw_option.
+        if skip_reasons:
+            applog.log("ARB", "no matches; " + "; ".join(skip_reasons))
         return pd.DataFrame()
 
     result = pd.DataFrame(all_rows)
@@ -1307,16 +1354,19 @@ def match_tw_us_option(stock_codes, option_type, max_strike_diff_pct, max_dte_di
                            positive_loose=False, min_volume=0):
     """Match Taiwan listed options against US ADR options on the same underlying."""
     all_rows = []
-    errors = []
+    # Skip reasons never gate the raise; only genuine fetch failures do
+    # (see match_warrant_tw_option).
+    skip_reasons = []
+    hard_errors = []
 
     for i, code in enumerate(stock_codes, 1):
         pos = f"({i}/{len(stock_codes)})"
         if code not in options_logic._commodity_map():
-            errors.append(f"{code}: no Taiwan options")
+            skip_reasons.append(f"{code}: no Taiwan options")
             applog.log("ARB", f"{code} {pos} skipped: no Taiwan options")
             continue
         if code not in us_options_logic._adr_map():
-            errors.append(f"{code}: no US ADR options")
+            skip_reasons.append(f"{code}: no US ADR options")
             applog.log("ARB", f"{code} {pos} skipped: no US ADR options")
             continue
 
@@ -1327,25 +1377,31 @@ def match_tw_us_option(stock_codes, option_type, max_strike_diff_pct, max_dte_di
         # quote on the TW option leg — fall back to the last settlement
         # snapshot so the scan still works when TAIFEX is closed. (Off-hours
         # prices are stale marks, not executable until the market reopens.)
-        tw_df, tw_err, _meta = options_logic.read_tw_option([code], option_type, min_days=1, compute_iv=False)
+        tw_df, tw_err, tw_meta = options_logic.read_tw_option([code], option_type, min_days=1, compute_iv=False)
         if tw_df.empty:
-            errors.append(f"{code}: TW options {tw_err or 'no data'}")
-            applog.log("ARB", f"{code} {pos} TW option fetch failed: {tw_err}")
+            msg = f"{code}: TW options {tw_err or 'no data'}"
+            hard = bool((tw_meta or {}).get("hard_error"))
+            (hard_errors if hard else skip_reasons).append(msg)
+            applog.log("ARB", f"{code} {pos} no TW options: {tw_err}",
+                       level="ERROR" if hard else "INFO")
             continue
         if min_volume > 0:
             tw_df = tw_df[tw_df["volume"] >= min_volume]
 
-        us_df, us_err, _meta = us_options_logic.read_us_option([code], option_type, min_days=1, compute_iv=False)
+        us_df, us_err, us_meta = us_options_logic.read_us_option([code], option_type, min_days=1, compute_iv=False)
         if us_df.empty:
-            errors.append(f"{code}: US options {us_err or 'no data'}")
-            applog.log("ARB", f"{code} {pos} US option fetch failed: {us_err}")
+            msg = f"{code}: US options {us_err or 'no data'}"
+            hard = bool((us_meta or {}).get("hard_error"))
+            (hard_errors if hard else skip_reasons).append(msg)
+            applog.log("ARB", f"{code} {pos} no US options: {us_err}",
+                       level="ERROR" if hard else "INFO")
             continue
         us_df = us_df[us_df["is_live"]]
         if min_volume > 0:
             us_df = us_df[us_df["volume"] >= min_volume]
 
         if tw_df.empty or us_df.empty:
-            errors.append(f"{code}: no live options on one leg")
+            skip_reasons.append(f"{code}: no live options on one leg")
             applog.log("ARB", f"{code} {pos} skipped: no live options on one leg")
             continue
 
@@ -1363,10 +1419,12 @@ def match_tw_us_option(stock_codes, option_type, max_strike_diff_pct, max_dte_di
         all_rows.extend(rows)
 
     if not all_rows:
-        if errors:
-            raise RuntimeError("; ".join(errors))
+        if hard_errors:
+            raise RuntimeError("; ".join(hard_errors))
         # Every code was read and matched fine; the filter just passed nothing
         # through — a normal empty scan, not a failure. See match_warrant_tw_option.
+        if skip_reasons:
+            applog.log("ARB", "no matches; " + "; ".join(skip_reasons))
         return pd.DataFrame()
 
     result = pd.DataFrame(all_rows)
