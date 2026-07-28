@@ -37,7 +37,7 @@ pip install -r requirements.txt
 TZ=Asia/Taipei python app.py                 # http://127.0.0.1:5001
 
 # Production-style (what deployment runs)
-TZ=Asia/Taipei gunicorn -w 1 --threads 8 --timeout 180 -b 0.0.0.0:5001 wsgi:app
+TZ=Asia/Taipei gunicorn -w 1 --threads 8 --timeout 240 -b 0.0.0.0:5001 wsgi:app
 ```
 
 Stop the dev server with `Ctrl+C` (or `pkill -f "python app.py"`).

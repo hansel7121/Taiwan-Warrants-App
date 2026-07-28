@@ -865,22 +865,6 @@ def universe_status():
         }
 
 
-def _ensure_universe_fetch():
-    """Kick a background scrape if the universe is stale and none is running.
-
-    Never blocks: the scheduler is opt-in (ENABLE_SCHEDULER) and off in
-    production, so this is what actually gets the fresh universe loaded there.
-    Requests keep being served off the bundled fallback until it lands.
-    """
-    now = time.time()
-    with _universe_lock:
-        if _universe_codes and now - _universe_ts < UNIVERSE_TTL:
-            return
-        if _universe_fetching and now - _universe_fetch_started < UNIVERSE_FETCH_STALL:
-            return
-    threading.Thread(target=scrape_twse_universe, daemon=True).start()
-
-
 def _universe():
     """Fresh ISIN listing if we have one, else the bundled twstock snapshot.
 
@@ -931,7 +915,6 @@ def _warrant_codes_for(stock_codes):
     prefixes the warrant name. This replaces a hand-maintained issuer-char
     whitelist that silently dropped every warrant of any issuer not listed.
     """
-    _ensure_universe_fetch()
     codes = _universe()
     today = datetime.today()
     real_names = [v.name for v in codes.values() if "權證" not in v.type]

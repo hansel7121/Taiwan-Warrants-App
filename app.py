@@ -602,9 +602,11 @@ def iv_surface():
 
 @app.route("/universe_status")
 def universe_status():
-    # Kick/keep-alive the live ISIN scrape (also retries after a failed build),
-    # then report progress for the "Building Warrant Universe" bar.
-    warrant_logic._ensure_universe_fetch()
+    # Read-only: reports progress for the "Building Warrant Universe" bar.
+    # Does NOT kick a scrape — that only happens via the scheduler's daily
+    # 07:00 TPE cron or the manual "Sync Universe" button (/sync_universe),
+    # so polling this route on every page load can't itself trigger a live
+    # TWSE re-scrape.
     return jsonify(warrant_logic.universe_status())
 
 

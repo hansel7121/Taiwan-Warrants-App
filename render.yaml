@@ -6,7 +6,13 @@ services:
     plan: starter
     buildCommand: pip install -r requirements.txt
     # Exactly 1 worker: market-data caches live in process memory + APScheduler.
-    startCommand: gunicorn -w 1 --threads 8 --timeout 180 -b 0.0.0.0:$PORT wsgi:app
+    # timeout 240 (was 180): heavy sync work (universe scrape, arb match) can
+    # peg the starter plan's 0.5 vCPU cap long enough that gunicorn's arbiter
+    # can't service its heartbeat and kills the worker mid-request (502s +
+    # worker restarts observed in production). More headroom, paired with
+    # services/scheduler.py's sync lock and fewer arb_logic threads, which cut
+    # the actual CPU contention causing the stalls.
+    startCommand: gunicorn -w 1 --threads 8 --timeout 240 -b 0.0.0.0:$PORT wsgi:app
     healthCheckPath: /healthz
     envVars:
       - key: PYTHON_VERSION

@@ -9,7 +9,6 @@ Market data comes only through the logic modules' fetchers (warrant_logic,
 options_logic, us_options_logic), which own their own in-process caches; this
 module keeps no cache of its own.
 """
-from concurrent.futures import ThreadPoolExecutor
 from services import applog
 import numpy as np
 import pandas as pd
@@ -921,13 +920,34 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
                   positive_loose=False, min_volume=0, strategy="same_type"):
     stock_codes = list(stock_codes)
 
-    def _process(i, code):
-        """Fetch + match one stock code. Returns (rows, error_or_None).
+    # PCP pairs a warrant with the OPPOSITE-type option; butterfly pairs each
+    # type against its own body option. Both want the full chain regardless of
+    # the warrant filter, so fetch every type and filter downstream.
+    opt_type_fetch = "All" if strategy in ("pcp", "butterfly") else option_type
 
-        Runs in a worker thread — every fetch (read_warrant / read_tw_option)
-        and the match helpers hit only their modules' own lock-guarded / read-
-        mostly caches, so this is safe to run concurrently across codes.
-        """
+    # Fetch ONCE for every selected code, not per-code: read_warrant/read_tw_option
+    # already accept a list and the underlying Supabase snapshot read
+    # (db_market.read_snapshot) already filters server-side on `codes` in one
+    # query — the old per-code loop paid a redundant md_batches round-trip +
+    # paginated read for every single selected stock, so wall time scaled with
+    # product count instead of being ~constant. No time-value cap / IV solve on
+    # the arb path: a positive price arb only needs warrant ask + option bid, so
+    # nothing should drop a leg over time value or a non-converging IV.
+    all_warrant_df, warrant_err, _meta = (
+        warrant_logic.read_warrant(stock_codes, option_type, 0, 365, 0, 1e9, 0, compute_iv=False)
+        if stock_codes else (pd.DataFrame(), None, None)
+    )
+    all_opt_df, opt_err, _meta = (
+        options_logic.read_tw_option(stock_codes, opt_type_fetch, min_days=1, compute_iv=False)
+        if stock_codes else (pd.DataFrame(), None, None)
+    )
+    if not all_opt_df.empty:
+        all_opt_df = all_opt_df[all_opt_df["ask_live"] | all_opt_df["bid_live"]]
+        if min_volume > 0:
+            all_opt_df = all_opt_df[all_opt_df["volume"] >= min_volume]
+
+    def _process(i, code):
+        """Match one stock code against the pre-fetched frames. Returns (rows, error_or_None)."""
         pos = f"({i}/{len(stock_codes)})"
         if code not in options_logic._commodity_map():
             applog.log("ARB", f"{code} {pos} skipped: no options data available")
@@ -936,31 +956,21 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
         cfg = options_logic._commodity_map()[code]
         opt_contract_size = cfg["exercise_ratio"]
 
-        # No time-value cap and no IV solve on the arb path: a positive price
-        # arb only needs warrant ask + option bid, so nothing should drop a leg
-        # over time value or a non-converging IV.
-        warrant_df, err, _meta = warrant_logic.read_warrant(
-            [code], option_type, 0, 365, 0, 1e9, 0, compute_iv=False
+        warrant_df = (
+            all_warrant_df[all_warrant_df["underlying_code"].astype(str) == str(code)]
+            if not all_warrant_df.empty else all_warrant_df
         )
         if warrant_df.empty:
-            applog.log("ARB", f"{code} {pos} skipped: {err or 'no warrants'}")
-            return [], f"{code}: {err or 'no warrants'}"
+            applog.log("ARB", f"{code} {pos} skipped: {warrant_err or 'no warrants'}")
+            return [], f"{code}: {warrant_err or 'no warrants'}"
 
-        # PCP pairs a warrant with the OPPOSITE-type option; butterfly pairs each
-        # type against its own body option. Both want the full chain regardless of
-        # the warrant filter, so fetch every type and filter downstream.
-        opt_type_fetch = "All" if strategy in ("pcp", "butterfly") else option_type
-        opt_df, opt_err, _meta = options_logic.read_tw_option([code], opt_type_fetch, min_days=1, compute_iv=False)
-        if opt_df.empty:
-            applog.log("ARB", f"{code} {pos} option fetch failed: {opt_err}")
-            return [], f"{code}: {opt_err or 'no options'}"
-        opt_df = opt_df[opt_df["ask_live"] | opt_df["bid_live"]]
-        if min_volume > 0:
-            opt_df = opt_df[opt_df["volume"] >= min_volume]
-
+        opt_df = (
+            all_opt_df[all_opt_df["stock_code"].astype(str) == str(code)]
+            if not all_opt_df.empty else all_opt_df
+        )
         if opt_df.empty:
             applog.log("ARB", f"{code} {pos} skipped: no live options")
-            return [], f"{code}: no live options"
+            return [], f"{code}: {opt_err or 'no options'}"
 
         if strategy == "pcp":
             rows = _match_warrants_pcp(
@@ -986,27 +996,28 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
         )
         return rows, None
 
-    # Fan out the per-code fetch+match across a small pool (upstream CMoney /
-    # TAIFEX rate limits mean a handful of workers, not the 100 warrant_logic
-    # uses for its own intra-code fetch). Results are collected in submission
-    # order so the pre-sort row order is identical to the old sequential loop.
+    # Plain loop, not a thread pool: _process is now pure in-memory pandas
+    # (the fetch happened once, above), so there is no I/O left to overlap —
+    # a ThreadPoolExecutor here bought nothing but GIL contention that helped
+    # peg the single-worker deploy's CPU cap.
     all_rows = []
     errors = []
-    if stock_codes:
-        max_workers = min(6, len(stock_codes))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            results = list(executor.map(
-                lambda ic: _process(ic[0], ic[1]),
-                list(enumerate(stock_codes, 1)),
-            ))
-        for rows, err in results:
-            all_rows.extend(rows)
-            if err:
-                errors.append(err)
+    for i, code in enumerate(stock_codes, 1):
+        rows, err = _process(i, code)
+        all_rows.extend(rows)
+        if err:
+            errors.append(err)
 
     if not all_rows:
-        msg = "; ".join(errors) if errors else "No matches found"
-        raise RuntimeError(msg)
+        if errors:
+            # Every code failed for a real reason (bad code, no data source
+            # coverage) — a genuine error.
+            raise RuntimeError("; ".join(errors))
+        # Every code was read and matched fine; the filter just passed nothing
+        # through. That is a normal, common scan outcome (most of the time
+        # there is no arb), not a failure — return an empty result instead of
+        # raising so the caller doesn't render it as an error.
+        return pd.DataFrame()
 
     result = pd.DataFrame(all_rows)
     if strategy == "pcp" and "executable" in result.columns:
@@ -1101,8 +1112,11 @@ def match_warrant_us_option(stock_codes, option_type, max_strike_diff_pct, max_d
         all_rows.extend(rows)
 
     if not all_rows:
-        msg = "; ".join(errors) if errors else "No matches found"
-        raise RuntimeError(msg)
+        if errors:
+            raise RuntimeError("; ".join(errors))
+        # Every code was read and matched fine; the filter just passed nothing
+        # through — a normal empty scan, not a failure. See match_warrant_tw_option.
+        return pd.DataFrame()
 
     result = pd.DataFrame(all_rows)
     if strategy == "pcp" and "executable" in result.columns:
@@ -1349,8 +1363,11 @@ def match_tw_us_option(stock_codes, option_type, max_strike_diff_pct, max_dte_di
         all_rows.extend(rows)
 
     if not all_rows:
-        msg = "; ".join(errors) if errors else "No matches found"
-        raise RuntimeError(msg)
+        if errors:
+            raise RuntimeError("; ".join(errors))
+        # Every code was read and matched fine; the filter just passed nothing
+        # through — a normal empty scan, not a failure. See match_warrant_tw_option.
+        return pd.DataFrame()
 
     result = pd.DataFrame(all_rows)
     if "price_diff_pct" in result.columns:

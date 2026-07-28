@@ -53,7 +53,7 @@ function onUsStrategyChange() {
 }
 
 async function matchWarrantUsOption() {
-  document.getElementById("us-status").textContent = "Fetching warrants and UMC options…";
+  document.getElementById("us-status").textContent = "Reading warrants and UMC options…";
   document.getElementById("us-tableContainer").innerHTML = "";
   document.getElementById("usDownloadBtn").style.display = "none";
   let data;
@@ -166,7 +166,7 @@ function getTwUsFilters() {
 }
 
 async function matchTwUsOption() {
-  document.getElementById("twus-status").textContent = "Fetching Taiwan + US options…";
+  document.getElementById("twus-status").textContent = "Reading Taiwan + US options…";
   document.getElementById("twus-tableContainer").innerHTML = "";
   document.getElementById("twusDownloadBtn").style.display = "none";
   let data;
@@ -642,7 +642,7 @@ function onArbStrategyChange() {
 }
 
 async function fetchArbData() {
-  document.getElementById("arb-status").textContent = "Fetching warrants and options…";
+  document.getElementById("arb-status").textContent = "Reading warrants and options…";
   document.getElementById("arb-tableContainer").innerHTML = "";
   document.getElementById("arbDownloadBtn").style.display = "none";
   let data;
@@ -859,7 +859,7 @@ function getStraddleFilters() {
 
 async function fetchStraddleData() {
   const st = document.getElementById("straddle-status");
-  st.textContent = "Fetching warrants and options…";
+  st.textContent = "Reading warrants and options…";
   document.getElementById("straddle-tableContainer").innerHTML = "";
   document.getElementById("straddleDownloadBtn").style.display = "none";
   let data;

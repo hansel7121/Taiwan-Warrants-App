@@ -75,6 +75,7 @@ _TZ_NY = ZoneInfo("America/New_York")
 _scheduler = None
 _start_lock = threading.Lock()
 _force_refresh_lock = threading.Lock()  # guards the force_refresh debounce check+set
+_sync_lock = threading.Lock()  # serializes ALL sync work (scheduled + manual); see _job
 _last_run: dict = {}  # job name -> epoch of last completed run
 
 
@@ -337,16 +338,27 @@ def sync_suggestions():
 # Job / gate wrappers used at registration time
 # ---------------------------------------------------------------------------
 def _job(name, fn):
-    """Run one refresh job with logging; never let an exception kill the scheduler."""
+    """Run one refresh job with logging; never let an exception kill the scheduler.
+
+    Serialized on _sync_lock: this is the one choke point every scheduled cron
+    job AND every manual /sync_X route (via force_refresh -> _FORCE_MAP -> the
+    same _run_* wrappers) funnels through. Without it, a manual click could run
+    concurrently with a due cron tick — doubling CPU load on the single-worker
+    process (a real cause of the CPU-pegged 502s seen in production) and racing
+    db_market.write_snapshot for the same category (two concurrent writers'
+    DELETE-OLD steps can each drop the OTHER's just-flipped batch). Blocking
+    here just means a concurrent call waits its turn instead of racing.
+    """
     t0 = time.time()
-    try:
-        with memlog.measure(name):
-            fn()
-        _last_run[name] = time.time()
-        print(f"SCHED: {name} ok in {time.time() - t0:.1f}s", flush=True)
-    except Exception as e:
-        print(f"SCHED: {name} FAILED after {time.time() - t0:.1f}s: {e}", flush=True)
-        traceback.print_exc()
+    with _sync_lock:
+        try:
+            with memlog.measure(name):
+                fn()
+            _last_run[name] = time.time()
+            print(f"SCHED: {name} ok in {time.time() - t0:.1f}s", flush=True)
+        except Exception as e:
+            print(f"SCHED: {name} FAILED after {time.time() - t0:.1f}s: {e}", flush=True)
+            traceback.print_exc()
 
 
 def _gated(market, fn):
@@ -408,11 +420,11 @@ def force_refresh(kind):
         return {"ok": False, "error": f"unknown kind: {kind}"}
     # The check-then-set below must be atomic: two near-simultaneous requests
     # for the same kind could otherwise both read a stale _last_run before
-    # either writes it, both slip past the debounce, and both run the scraper
-    # concurrently — racing each other's write_snapshot() for the same
-    # category. The lock only guards this tiny check+mark; the actual
-    # scrape+store runs outside it so different kinds (or the next window's
-    # same kind) are never serialized by it.
+    # either writes it, both slip past the debounce, and both dispatch. The
+    # lock only guards this tiny check+mark; the dispatched work itself (via
+    # _FORCE_MAP -> _run_* -> _job) is serialized against every OTHER sync —
+    # manual or scheduled — by _job's _sync_lock, so two different kinds (or a
+    # manual call racing a scheduled tick) still never run concurrently.
     with _force_refresh_lock:
         now = time.time()
         if now - _last_run.get(kind, 0) < FORCE_DEBOUNCE_SECONDS:
