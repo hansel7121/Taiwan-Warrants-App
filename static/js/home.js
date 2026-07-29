@@ -89,8 +89,8 @@ function renderHomeKpis() {
     kpi("", "Open positions", s.open.length, "", soonFoot) +
     kpi("", "Capital deployed", s.deployed >= 1e6 ? _hnf(s.deployed / 1e6, 2) + "M" : _hnf(s.deployed),
         "", "NT$ · long-warrant legs") +
-    kpi(sug.length ? "g" : "", "Live arb suggestions", sug.length, sug.length ? "pos" : "",
-        sug.length ? "risk-free · background scan" : "none right now");
+    kpi(sug.length ? "g" : "", "Logged arb suggestions", sug.length, sug.length ? "pos" : "",
+        sug.length ? "Direct Match · background scan" : "none logged yet");
 }
 
 // ── Open positions, soonest expiry first ─────────────────────────────
@@ -190,7 +190,7 @@ function renderHomeSuggestions() {
   const sug = ((typeof suggestionsData !== "undefined" && suggestionsData) || []).slice(0, 6);
   const label = (typeof _ARB_TYPE_LABEL !== "undefined" && _ARB_TYPE_LABEL) || {};
   if (!sug.length) {
-    c.innerHTML = `<p class="home-empty">No risk-free arbs right now. The scanner refreshes every 15 min during TWSE hours.</p>`;
+    c.innerHTML = `<p class="home-empty">No arb suggestions logged yet. The scanner appends every Direct Match arb it finds (every 15 min during TWSE hours).</p>`;
     return;
   }
   c.innerHTML = sug.map((s, i) => {
@@ -200,9 +200,12 @@ function renderHomeSuggestions() {
       ? `K${_hnf(r.warrant_strike, 0)}→${_hnf(r.opt_strike, 0)}` : "";
     const dte = r.opt_dte != null ? ` · ${r.opt_dte}d` : "";
     const lots = r.board_lots != null ? ` · ${_hnf(r.board_lots, 1)} 張` : "";
+    // Direction-aware: rows now include both "Buy Warrant / Sell Option" and
+    // the reversed "Buy Option / Sell Warrant", so label each leg by the trade.
+    const bw = String(r.trade || "").startsWith("Buy Warrant");
     return `<div class="home-srow" onclick="openDirectModal(suggestionsData[${i}].legs)" title="Click for the full breakdown">
       <div class="home-leg">
-        <div class="home-leg-t"><span class="pos">Buy</span> ${r.warrant_name || r.warrant_code || ""} <span class="home-muted">/</span> <span class="neg">Sell</span> ${r.option_contract || ""}</div>
+        <div class="home-leg-t"><span class="${bw ? "pos" : "neg"}">${bw ? "Buy" : "Sell"}</span> ${r.warrant_name || r.warrant_code || ""} <span class="home-muted">/</span> <span class="${bw ? "neg" : "pos"}">${bw ? "Sell" : "Buy"}</span> ${r.option_contract || ""}</div>
         <div class="home-leg-l">${label[s.arb_type] || s.arb_type} · ${strikes}${dte}${lots}</div>
       </div>
       <div class="home-edge">
@@ -231,8 +234,8 @@ function renderHomeAttention() {
       msg: `Warrant leg didn't fill at quote; residual directional exposure left open.` });
   });
   if (sug.length) items.push({ cls: "info", ic: "✦",
-    title: `${sug.length} risk-free suggestion${sug.length === 1 ? "" : "s"} available.`,
-    msg: sug[0].price_diff_pct != null ? `Best edge ${_hsign(sug[0].price_diff_pct, 2)}% — click through to enter.` : "Click through to review and enter." });
+    title: `${sug.length} arb suggestion${sug.length === 1 ? "" : "s"} logged.`,
+    msg: sug[0].price_diff_pct != null ? `Newest edge ${_hsign(sug[0].price_diff_pct, 2)}% — click through to review.` : "Click through to review." });
   if (!items.length) {
     c.innerHTML = `<p class="home-empty">Nothing needs attention. 🎉</p>`;
     return;

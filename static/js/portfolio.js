@@ -421,7 +421,7 @@ const _ARB_TYPE_LABEL = { direct_same_type: "Call-Call / Put-Put", direct_pcp: "
 function renderSuggestions() {
   const c = document.getElementById("portfolio-suggestionsContainer");
   if (!suggestionsData.length) {
-    c.innerHTML = "<p style='padding:16px;color:var(--muted)'>No active suggestions right now. The scanner runs every 15 min during TWSE hours.</p>";
+    c.innerHTML = "<p style='padding:16px;color:var(--muted)'>No suggestions logged yet. The scanner appends every Direct Match arb it finds (every 15 min during TWSE hours) and keeps it here.</p>";
     return;
   }
   const th = "padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;border-bottom:1px solid var(--border);text-align:left";

@@ -5,33 +5,46 @@ db_products.py: no internal try/except, callers decide how to handle failures.
 from services import db
 
 
-def upsert_suggestions(rows):
-    """Upsert by id, bumping last_seen_at/status='active' on every touched row."""
-    if not rows:
-        return
-    payload = [{**row, "status": "active", "last_seen_at": db._now()} for row in rows]
-    db._run(lambda c: c.table("arb_suggestions").upsert(payload).execute())
+def existing_ids(ids):
+    """Return the subset of `ids` already present in arb_suggestions, as a set.
 
-
-def mark_stale(arb_type, touched_ids):
-    """Flip status='stale' for any active row of `arb_type` not in touched_ids."""
-    q = (
+    Used by the append-only scanner to skip re-inserting a trade it has already
+    logged (so the stored row's frozen prices + first_seen_at are preserved)."""
+    if not ids:
+        return set()
+    r = db._run(
         lambda c: c.table("arb_suggestions")
-        .update({"status": "stale"})
-        .eq("arb_type", arb_type)
-        .eq("status", "active")
-        .not_.in_("id", list(touched_ids) or [""])
+        .select("id")
+        .in_("id", list(ids))
         .execute()
     )
-    db._run(q)
+    return {row["id"] for row in (r.data or [])}
+
+
+def insert_suggestions(rows):
+    """Plain insert (NOT upsert) of brand-new suggestions — the append-only log.
+
+    Caller has already filtered out ids that exist (see existing_ids), so this
+    never overwrites a logged row. first_seen_at is stamped here as the append
+    minute; status='active' since rows only leave via manual Remove / Clear."""
+    if not rows:
+        return
+    now = db._now()
+    payload = [{**row, "status": "active", "first_seen_at": now, "last_seen_at": now}
+               for row in rows]
+    db._run(lambda c: c.table("arb_suggestions").insert(payload).execute())
 
 
 def list_active_suggestions():
+    # Newest-appended first: the tab reads as a running log ordered by when each
+    # trade was captured (first_seen_at). All rows are 'active' (append-only; the
+    # scanner never marks anything stale), so the status filter is a no-op guard
+    # that still excludes anything a future flow might soft-delete.
     r = db._run(
         lambda c: c.table("arb_suggestions")
         .select("*")
         .eq("status", "active")
-        .order("price_diff_pct", desc=True)
+        .order("first_seen_at", desc=True)
         .execute()
     )
     return r.data or []

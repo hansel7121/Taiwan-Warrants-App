@@ -248,90 +248,88 @@ def sync_us_option():
     db_market.write_snapshot("us_options", out)
 
 
-# Direct tab's two strategies -> arb_suggestions arb_type tags, matching the
-# exact mode strings static/js/arb.js already passes to openArbModal(row, mode)
-# at the Find Arb tab (openArbModal(row, "direct") / (row, "pcp")) so the
-# Suggestions sub-tab can route a stored row into that same modal unchanged.
-_SUGGEST_STRATEGIES = (("direct_same_type", "same_type"), ("direct_pcp", "pcp"))
+# Every stored suggestion is tagged with this arb_type, matching the "direct"
+# mode string static/js/arb.js passes to openArbModal(row, "direct") at the Find
+# Arb tab, so the Suggestions sub-tab routes a stored row into that same modal
+# unchanged. Only Direct Match / Call-Call·Put-Put (same_type) is scanned.
+_SUGGEST_ARB_TYPE = "direct_same_type"
 
 
 def sync_suggestions():
-    """Scan the Direct tab's two strategies, persist positive-edge rows as suggestions.
+    """Append-only log of Arb Finder → Direct Match (Call-Call/Put-Put) output.
 
-    Only match_warrant_tw_option (not the US-option or TW/US cross-market
-    matchers) — both legs must be TW-listed so the suggest job's own
-    tw_equity gate (services/scheduler.py:start) actually bounds when a
-    suggested trade is executable. Every row _match_warrants_to_options /
-    _match_warrants_pcp returns is already profitable per its own
-    direction-specific sign convention (that's what "match" means for these
-    functions — same as what the Find Arb tab itself displays); the PCP
-    matcher additionally emits NON-EXECUTABLE debug rows (short-warrant side,
-    executable=False) that must be dropped here since warrants can't be
-    shorted.
+    Runs match_warrant_tw_option with strategy="same_type" on the Arb Finder
+    tab's DEFAULT parameters (SUGGEST_MAX_STRIKE_DIFF_PCT / SUGGEST_MAX_DTE_DIFF
+    already equal arbMaxStrikePct=3 / arbMaxDteDiff=5, type All, min_volume 0,
+    loose off) — i.e. exactly what a user manually clicking Find Arb every 15
+    minutes would see. EVERY row is captured verbatim (both directions —
+    "Buy Warrant / Sell Option" and the un-executable "Buy Option / Sell Warrant"
+    — and both riskless and capped-loss); no filtering, mirroring the tab.
+
+    The table is a permanent APPEND-ONLY log: each distinct trade is stored once
+    with the exact legs/prices seen at first sighting and the minute it was
+    appended (first_seen_at). A trade's identity is its long+short legs
+    (warrant_code + option_contract + direction); a later scan that re-finds the
+    same identity is IGNORED (prices frozen, not refreshed). Nothing is ever
+    auto-removed — only the manual Remove / Clear controls delete rows.
+
+    Runs under the tw_equity gate (see start()) so it only fires during TWSE
+    hours, and serialized on _sync_lock (see _job) so this read-existing-ids /
+    insert-new sequence never races a concurrent scan.
     """
     codes = sorted(set(warrant_universe()) & set(tw_option_codes()))
     if not codes:
         print("SCHED: suggestions: no warrant/tw_option overlap, skipping", flush=True)
         return
 
-    for arb_type, strategy in _SUGGEST_STRATEGIES:
-        try:
-            df = arb_logic.match_warrant_tw_option(
-                codes, "All", SUGGEST_MAX_STRIKE_DIFF_PCT, SUGGEST_MAX_DTE_DIFF,
-                positive_loose=False, min_volume=0, strategy=strategy,
-            )
-        except RuntimeError as e:
-            print(f"SCHED: suggestions {arb_type} no matches: {e}", flush=True)
-            db_suggestions.mark_stale(arb_type, [])
-            continue
+    try:
+        df = arb_logic.match_warrant_tw_option(
+            codes, "All", SUGGEST_MAX_STRIKE_DIFF_PCT, SUGGEST_MAX_DTE_DIFF,
+            positive_loose=False, min_volume=0, strategy="same_type",
+        )
+    except RuntimeError as e:
+        # RuntimeError == "no matches" here (arb_logic raises it on an empty
+        # scan). Append-only: nothing to add, nothing to remove — just log.
+        print(f"SCHED: suggestions no matches: {e}", flush=True)
+        return
 
-        if strategy == "pcp" and "executable" in df.columns:
-            df = df[df["executable"]]
-        elif strategy == "same_type" and {"trade", "riskless"} <= set(df.columns):
-            # Risk-free only. match_warrant_tw_option still emits (a) the
-            # non-executable short-warrant direction and (b) the UNFAVORABLE
-            # capped-loss side, which its strike gate admits within
-            # max_strike_diff_pct (arb_logic.py: strike_ok = favorable | within-cap).
-            # A suggestion must be a true arb, so keep only the long-warrant /
-            # short-option side on the FAVORABLE strike: residual vertical pays
-            # >= 0 at every spot (option strike above the warrant's for calls /
-            # below for puts), priced richer per share (price_diff>0) and shorter
-            # dated (opt_dte <= warrant_dte, already enforced for this direction).
-            df = df[(df["trade"] == "Buy Warrant / Sell Option") & df["riskless"]]
-        if df.empty:
-            print(f"SCHED: suggestions {arb_type} 0 active (no executable rows)", flush=True)
-            db_suggestions.mark_stale(arb_type, [])
-            continue
+    # Build a candidate row + stable id for every match. Direction is part of the
+    # identity: a pair that flips long/short between scans is a genuinely
+    # different trade, so it gets its own log entry. (_match_warrants_to_options
+    # already emits at most one direction per (warrant, option) pair per scan via
+    # its `seen` set.)
+    recs = json.loads(df.to_json(orient="records"))
+    candidates = {}
+    for row in recs:
+        direction = "bw" if str(row.get("trade", "")).startswith("Buy Warrant") else "bo"
+        sug_id = f"{_SUGGEST_ARB_TYPE}:{direction}:{row['warrant_code']}:{row['option_contract']}"
+        candidates[sug_id] = {
+            "id": sug_id,
+            "arb_type": _SUGGEST_ARB_TYPE,
+            "legs": row,
+            "price_diff": row["price_diff"],
+            "price_diff_pct": row.get("price_diff_pct"),
+            # Both legs are live: opt_df was is_live-filtered before matching and
+            # the job only runs while tw_equity is open. Kept as a field so a
+            # future gate relaxation stays expressible without a schema change.
+            "legs_status": {"warrant": "live", "option": "live"},
+        }
+    if not candidates:
+        print("SCHED: suggestions no rows", flush=True)
+        return
 
-        # Each (warrant_code, option_contract) pair yields at most one row per
-        # arb_type: same_type dedupes pairs across its two directions
-        # (arb_logic.py's `seen` set) and pcp keeps only the single executable
-        # side per pair — so this pair is already a stable, deterministic
-        # opportunity identity; no need to also encode strike/expiry/direction.
-        recs = json.loads(df.to_json(orient="records"))
-        rows = []
-        touched_ids = []
-        for row in recs:
-            sug_id = f"{arb_type}:{row['warrant_code']}:{row['option_contract']}"
-            touched_ids.append(sug_id)
-            rows.append({
-                "id": sug_id,
-                "arb_type": arb_type,
-                "legs": row,
-                "price_diff": row["price_diff"],
-                "price_diff_pct": row.get("price_diff_pct"),
-                # The suggest job itself only runs while tw_equity is open
-                # (see the "tw_equity" gate at registration below), and
-                # opt_df was already filtered to is_live rows before either
-                # matcher ran — so both legs are live for every row this job
-                # ever produces. Kept as a field (not hardcoded away) since a
-                # future relaxation of the job's own gate should make this
-                # meaningful again rather than requiring a schema change.
-                "legs_status": {"warrant": "live", "option": "live"},
-            })
-        db_suggestions.upsert_suggestions(rows)
-        db_suggestions.mark_stale(arb_type, touched_ids)
-        print(f"SCHED: suggestions {arb_type} {len(rows)} active", flush=True)
+    # Dedup against the log: insert only ids not already stored, so an existing
+    # entry's frozen prices + first_seen_at are never touched.
+    already = db_suggestions.existing_ids(list(candidates))
+    new_rows = [r for cid, r in candidates.items() if cid not in already]
+    if new_rows:
+        db_suggestions.insert_suggestions(new_rows)
+    print(
+        f"SCHED: suggestions +{len(new_rows)} new, "
+        f"{len(candidates) - len(new_rows)} already logged "
+        f"({len(candidates)} found this scan)",
+        flush=True,
+    )
 
 
 # ---------------------------------------------------------------------------
