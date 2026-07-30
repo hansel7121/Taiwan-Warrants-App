@@ -388,14 +388,18 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             candidates["max_loss_per_share"] = np.where(
                 favorable, 0.0, (candidates["strike"] - w["strike"]).abs()
             )
-            # max_strike_diff_pct bounds that MAX LOSS, not similarity. On the
-            # favorable side the loss is already zero however far the strike sits,
-            # so the cap must not apply there — a deep-OTM option whose per-share
-            # price still beats the warrant is a riskless arb. Only the
-            # unfavorable side, where the spread can be clawed back at expiry,
-            # needs the cap. (The far favorable side is self-policing: as Ko runs
-            # from Kw the option cheapens per share and the price test rejects it.)
-            strike_ok = favorable | (candidates["strike_diff_pct"] <= max_strike_diff_pct)
+            # Only the favorable side is emitted, so every row out of this
+            # matcher is a true riskless arb: the residual vertical pays >= 0 at
+            # every spot and the entry credit is never clawed back at expiry.
+            # The unfavorable side (capped loss up to |Kw - Ko|) is deliberately
+            # NOT emitted — callers want pure arb only. Consequence:
+            # max_strike_diff_pct no longer gates anything in THIS function; it
+            # is retained in the signature because callers pass it positionally
+            # and _match_warrants_pcp still uses it. No distance cap is needed
+            # either — the far favorable side is self-policing: as Ko runs from
+            # Kw the option cheapens per share and the price test below rejects
+            # it.
+            strike_ok = favorable
 
             # Never hold the SHORT leg as the longer-dated one — the long
             # (hedge) leg would expire first, leaving a naked short position.
