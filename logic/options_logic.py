@@ -728,8 +728,11 @@ def scrape_tw_option(
                 source_errors.append(f"EOD {e}")
                 applog.log("OPT", f"{code} EOD failed: {e}", level="ERROR")
                 df = None
+        # Tag each per-code frame with its originating code so batch callers can
+        # split the concatenated result back apart (arb_logic filters on this).
+        # .assign (not in-place) because df may be the cached object itself.
         if df is not None and not df.empty:
-            dfs.append(df)
+            dfs.append(df.assign(stock_code=code))
         elif source_errors:
             hard_errors.append(f"{code}: {'; '.join(source_errors)}")
         else:
