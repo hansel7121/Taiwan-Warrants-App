@@ -10,6 +10,9 @@ from services import db_products
 from services import db_suggestions
 from services import store
 from logic import arb_logic
+# Aliased: the route functions below are named iv_surface / close_quote.
+from logic import iv_surface as iv_surface_logic
+from logic import close_quote as close_quote_logic
 from services.auth import require_auth
 import os
 import io
@@ -21,10 +24,8 @@ import time
 import threading
 import traceback
 import webbrowser
-import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
-from scipy.interpolate import griddata
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
 app = Flask(
@@ -199,48 +200,16 @@ def close_quote():
     settles at intrinsic, so it needs no quote here.
     """
     d = request.json or {}
-    mode = d.get("mode")
     survivor = d.get("survivor")
-    us_code = d.get("us_stock_code")
-    out = {
-        "ok": True, "survivor": survivor, "source": "model",
-        "current_premium": None, "current_fx": None, "adr_ratio": None,
-        "warrant_bid": None, "opt_last_usd": None,
-    }
-
-    # Live ADR premium + FX drive the option leg for US / TW-US trades.
-    if mode in ("us", "twus") and us_code:
-        try:
-            s = us_options_logic.adr_premium_scenario(us_code, 30)
-            out["current_premium"] = s.get("current_premium")
-            out["current_fx"] = (s.get("fx") or {}).get("current_fx")
-            out["adr_ratio"] = us_options_logic._adr_map().get(us_code, {}).get("adr_ratio")
-        except Exception:
-            pass
-
-    try:
-        if survivor == "warrant" and mode in ("direct", "us"):
-            # A real warrant (not a TW option): CMoney has a live bid.
-            code = d.get("warrant_code")
-            res = warrant_logic.get_cmoney_prices([code]) if code else {}
-            w = (res.get(code) or {}).get("Warrant") if res else None
-            if w:
-                bid = float(w.get("BuyPr1") or 0)
-                if bid > 0:
-                    out["warrant_bid"] = bid
-                    out["source"] = "market"
-        elif survivor == "option" and mode in ("us", "twus") and us_code:
-            last = us_options_logic.us_option_last(
-                us_code, d.get("opt_type"), float(d.get("opt_strike") or 0),
-                d.get("opt_expiry_iso"), out["current_fx"], out["adr_ratio"],
-            )
-            if last:
-                out["opt_last_usd"] = last
-                out["source"] = "market"
-    except Exception:
-        pass
-
-    return jsonify(out)
+    quote = close_quote_logic.resolve_survivor(
+        d.get("mode"), survivor,
+        warrant_code=d.get("warrant_code"),
+        us_code=d.get("us_stock_code"),
+        opt_type=d.get("opt_type"),
+        opt_strike=d.get("opt_strike"),
+        opt_expiry_iso=d.get("opt_expiry_iso"),
+    )
+    return jsonify({"ok": True, "survivor": survivor, **quote})
 
 
 @app.route("/list_warrant_stocks")
@@ -553,16 +522,12 @@ def iv_surface_options():
     z = (df["iv_ask"].values * 100).tolist()
     labels = df["contract"].tolist()
 
-    xi = np.linspace(min(x), max(x), 60)
-    yi = np.linspace(min(y), max(y), 60)
-    xi_grid, yi_grid = np.meshgrid(xi, yi)
-    zi = griddata((x, y), z, (xi_grid, yi_grid), method="linear")
-    zi = np.where(np.isnan(zi), None, zi)
+    xi, yi, zi = iv_surface_logic.interpolate_grid(x, y, z, resolution=80)
 
     return jsonify({
-        "x": xi.tolist(),
-        "y": yi.tolist(),
-        "z": zi.tolist(),
+        "x": xi,
+        "y": yi,
+        "z": zi,
         "scatter_x": x,
         "scatter_y": y,
         "scatter_z": z,
@@ -588,11 +553,7 @@ def iv_surface():
     codes = df_clean["warrant_code"].astype(str).tolist()
     names = df_clean["warrant_name"].tolist()
 
-    xi = np.linspace(min(x), max(x), 80)
-    yi = np.linspace(min(y), max(y), 80)
-    xi_grid, yi_grid = np.meshgrid(xi, yi)
-    zi = griddata((x, y), z, (xi_grid, yi_grid), method="linear")
-    zi = np.where(np.isnan(zi), None, zi)
+    xi, yi, zi = iv_surface_logic.interpolate_grid(x, y, z, resolution=80)
 
     highlight = None
     if highlight_code:
@@ -608,9 +569,9 @@ def iv_surface():
 
     return jsonify(
         {
-            "x": xi.tolist(),
-            "y": yi.tolist(),
-            "z": zi.tolist(),
+            "x": xi,
+            "y": yi,
+            "z": zi,
             "scatter_x": x,
             "scatter_y": y,
             "scatter_z": z,
@@ -677,6 +638,11 @@ def match_warrant_us_option():
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
         applog.set_rows(len(rows))
         return jsonify({"rows": rows, "count": len(rows)})
+    except arb_logic.NoMatchesError:
+        # Clean scan that matched nothing — a normal outcome, not an error:
+        # render as "no rows", never as a red error banner.
+        applog.set_rows(0)
+        return jsonify({"rows": [], "count": 0})
     except Exception as e:
         applog.log("ARB", f"match_warrant_us_option failed: {e}\n{traceback.format_exc()}",
                    level="ERROR")
@@ -698,6 +664,9 @@ def match_warrant_us_option_csv():
         df = arb_logic.match_warrant_us_option(stock_codes, option_type, max_strike_diff_pct,
                                 max_dte_diff, positive_loose=positive_loose,
                                 min_volume=min_volume, strategy=strategy)
+    except arb_logic.NoMatchesError:
+        # Clean scan, nothing matched — download an empty CSV, not an error.
+        df = pd.DataFrame()
     except Exception:
         df = pd.DataFrame()
     output = io.StringIO()
@@ -727,6 +696,10 @@ def match_tw_us_option():
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
         applog.set_rows(len(rows))
         return jsonify({"rows": rows, "count": len(rows)})
+    except arb_logic.NoMatchesError:
+        # Clean scan that matched nothing — a normal outcome, not an error.
+        applog.set_rows(0)
+        return jsonify({"rows": [], "count": 0})
     except Exception as e:
         applog.log("ARB", f"match_tw_us_option failed: {e}\n{traceback.format_exc()}",
                    level="ERROR")
@@ -747,6 +720,9 @@ def match_tw_us_option_csv():
         df = arb_logic.match_tw_us_option(stock_codes, option_type, max_strike_diff_pct,
                                     max_dte_diff, positive_loose=positive_loose,
                                     min_volume=min_volume)
+    except arb_logic.NoMatchesError:
+        # Clean scan, nothing matched — download an empty CSV, not an error.
+        df = pd.DataFrame()
     except Exception:
         df = pd.DataFrame()
     output = io.StringIO()
@@ -783,6 +759,17 @@ def match_warrant_tw_option():
         applog.set_rows(len(rows))
         as_of_iso = datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None
         return jsonify({"rows": rows, "count": len(rows), "as_of": as_of_iso})
+    except arb_logic.NoMatchesError:
+        # Clean scan that matched nothing — a normal outcome, not an error.
+        # Same shape as a successful zero-row scan, as_of included.
+        as_of = min(
+            (t for t in (warrant_logic.cache_as_of(stock_codes),
+                         options_logic.data_as_of(stock_codes)) if t),
+            default=None,
+        )
+        applog.set_rows(0)
+        as_of_iso = datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None
+        return jsonify({"rows": [], "count": 0, "as_of": as_of_iso})
     except Exception as e:
         applog.log("ARB", f"match_warrant_tw_option failed: {e}\n{traceback.format_exc()}",
                    level="ERROR")
@@ -804,6 +791,9 @@ def match_warrant_tw_option_csv():
         df = arb_logic.match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
                            positive_loose=positive_loose, min_volume=min_volume,
                            strategy=strategy)
+    except arb_logic.NoMatchesError:
+        # Clean scan, nothing matched — download an empty CSV, not an error.
+        df = pd.DataFrame()
     except Exception:
         df = pd.DataFrame()
     output = io.StringIO()

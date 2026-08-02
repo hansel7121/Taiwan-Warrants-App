@@ -155,3 +155,13 @@ These are the domain rules that govern all pricing, sizing, and P&L math in this
 | Warrant | unit | × 1,000 (units per 張) | shares delivered **per unit** | American-exercisable (traded, not exercised) | Cash | ❌ Long-only — cannot write/short |
 | TW equity option | point / share | × 2,000 (contract size) | shares delivered **per contract** | European | Cash | ✅ |
 | US ADR option (compare) | point / share | × 100 (US contract) | shares **per contract** | American | Physical | ✅ (short = early-assignment risk) |
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as GitHub issues in this repo (hansel7121/Taiwan-Warrants-App), managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context layout: `CONTEXT.md` + `docs/adr/` at the repo root, created lazily as terms/decisions get resolved. See `docs/agents/domain.md`.

@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from services import applog
 from services import memlog
 from services import db_market
+from logic.ttl_cache import TTLCache
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -629,9 +630,8 @@ def build_warrant_df(cmoney_results, compute_iv=True, keep_noniv=False):
 # Raw CMoney results cached per underlying so the background scheduler can
 # refresh them off the request path. Fetch-on-miss: the first request after
 # boot (or for an uncached stock) behaves exactly like the old live path.
-_warrant_cache: dict = {}  # stock_code -> (timestamp, {warrant_code: result})
-_warrant_cache_lock = threading.Lock()
 WARRANT_CACHE_TTL = 1800  # safety margin over the 15-min scheduled refresh
+_warrant_cache = TTLCache("warrants", WARRANT_CACHE_TTL)  # stock_code -> {warrant_code: result}
 
 
 # ── Listed-security universe ─────────────────────────────────────────────────
@@ -641,14 +641,17 @@ WARRANT_CACHE_TTL = 1800  # safety margin over the 15-min scheduled refresh
 # scraped from enumerates *currently listed* securities, so re-scraping it live
 # fixes both halves at once. Held in memory only: __update_codes() would rewrite
 # CSVs inside site-packages, which is ephemeral on Render anyway.
-_universe_codes: dict = {}  # code -> twstock fetch.ROW
-_universe_ts = 0.0
+UNIVERSE_TTL = 86400
+# Single-keyed: one entry ("all") holding the whole {code -> twstock fetch.ROW}
+# map, swapped atomically by the scraper.
+_universe_cache = TTLCache("warrant_universe", UNIVERSE_TTL)
 _universe_fetching = False
 _universe_fetch_started = 0.0
 _universe_progress = 0        # 0-100, drives the frontend progress bar
 _universe_error = None        # last scrape error message, or None
+# Guards the scrape's progress/in-flight state only; the codes themselves live
+# in _universe_cache, which does its own locking.
 _universe_lock = threading.Lock()
-UNIVERSE_TTL = 86400
 # The ISIN scrape is slow and highly variable (2-6 min per market observed) and
 # twstock's fetch_data passes no timeout, so a stalled socket could pin the
 # in-flight flag forever. Age it out instead of blocking refreshes for good.
@@ -749,7 +752,7 @@ def _stream_isin(url, prog_band=None):
 
 def scrape_twse_universe():
     """Scheduler hook: re-scrape the ISIN listing and swap it into the cache."""
-    global _universe_codes, _universe_ts, _universe_fetching, _universe_fetch_started
+    global _universe_fetching, _universe_fetch_started
     global _universe_progress, _universe_error
     with _universe_lock:
         if _universe_fetching and time.time() - _universe_fetch_started < UNIVERSE_FETCH_STALL:
@@ -787,27 +790,18 @@ def scrape_twse_universe():
             return
         fresh_w = sum(1 for v in merged.values() if "權證" in v.type)
         bundled_w = sum(1 for v in twstock.codes.values() if "權證" in v.type)
+        # The results cached so far were resolved against whatever universe was
+        # in effect — the bundled fallback on the first request after boot.
+        # Replacing it silently would leave them stale for a full
+        # WARRANT_CACHE_TTL, so decide here whether they must be dropped.
+        current = _universe_cache.fresh("all")
+        in_effect = current[1] if current else twstock.codes
+        changed = merged.keys() != in_effect.keys()
+        _universe_cache.set("all", merged)
         with _universe_lock:
-            # The results cached so far were resolved against whatever universe
-            # was in effect — the bundled fallback on the first request after
-            # boot. Replacing it silently would leave them stale for a full
-            # WARRANT_CACHE_TTL, so decide here whether they must be dropped.
-            in_effect = (
-                _universe_codes
-                if _universe_codes and time.time() - _universe_ts < UNIVERSE_TTL
-                else twstock.codes
-            )
-            changed = merged.keys() != in_effect.keys()
-            _universe_codes = merged
-            _universe_ts = time.time()
             _universe_progress = 100
-        # Cleared outside _universe_lock: these two locks are never nested
-        # anywhere else, and nesting them here would be the only place that
-        # could order them against the request path.
         if changed:
-            with _warrant_cache_lock:
-                dropped = len(_warrant_cache)
-                _warrant_cache.clear()
+            dropped = _warrant_cache.invalidate()
             applog.log("WARR", f"universe changed, warrant cache "
                                f"invalidated ({dropped} entries dropped)")
         print(
@@ -828,13 +822,13 @@ def universe_rows():
     """Expose the in-memory merged universe as plain rows for the snapshot writer.
 
     Returns a list of {"code","name","start","market"} dicts from the current
-    _universe_codes (twstock StockCodeInfo namedtuples). `start` is a
+    scraped universe (twstock StockCodeInfo namedtuples). `start` is a
     "YYYY/MM/DD" string; normalise it to an ISO "YYYY-MM-DD" string (JSON-safe
     and castable by the md_warrant_universe.start date column), or None when it
     is missing/unparseable. Empty list if no universe has been scraped yet.
     """
-    with _universe_lock:
-        rows = list(_universe_codes.values())
+    entry = _universe_cache.entry("all")
+    rows = list(entry[1].values()) if entry else []
     out = []
     for r in rows:
         try:
@@ -883,14 +877,16 @@ def _universe_from_supabase():
 
 def universe_status():
     """Progress-bar payload for the frontend: ready / building / progress / error."""
+    entry = _universe_cache.entry("all")
+    codes = entry[1] if entry else {}
+    ready = _universe_cache.fresh("all") is not None
     with _universe_lock:
-        ready = bool(_universe_codes) and time.time() - _universe_ts < UNIVERSE_TTL
         return {
             "ready": ready,
             "building": _universe_fetching and not ready,
             "progress": 100 if ready else _universe_progress,
-            "codes": len(_universe_codes),
-            "warrants": sum(1 for v in _universe_codes.values() if "權證" in v.type),
+            "codes": len(codes),
+            "warrants": sum(1 for v in codes.values() if "權證" in v.type),
             "error": _universe_error,
         }
 
@@ -905,14 +901,16 @@ def _universe():
     The happy path stays silent — 'fetching N codes' already covers it.
     """
     now = time.time()
+    hit = _universe_cache.fresh("all")
+    if hit is not None:
+        return hit[1]
+    scraped = _universe_cache.entry("all")
     with _universe_lock:
-        if _universe_codes and now - _universe_ts < UNIVERSE_TTL:
-            return _universe_codes
         if _universe_fetching and now - _universe_fetch_started < UNIVERSE_FETCH_STALL:
             why = "scrape in flight"
         elif not _universe_fetch_started:
             why = "no scrape yet"
-        elif _universe_ts:
+        elif scraped:
             why = "last scrape expired"
         else:
             why = "last scrape failed"
@@ -996,17 +994,18 @@ def get_warrant_results(stock_codes, force=False, errors_out=None):
     rather than as an empty result.
     """
     now = time.time()
-    with _warrant_cache_lock:
-        need = [
-            sc for sc in stock_codes
-            if force or sc not in _warrant_cache
-            or now - _warrant_cache[sc][0] >= WARRANT_CACHE_TTL
-        ]
-        hits = [
-            (sc, int(now - _warrant_cache[sc][0]))
-            for sc in stock_codes
-            if sc not in need and sc in _warrant_cache
-        ]
+    # One snapshot of the cache for the need/hit split, so the two lists are
+    # decided against the same state.
+    snap = {k: ts for k, ts, _v in _warrant_cache.items()}
+    need = [
+        sc for sc in stock_codes
+        if force or sc not in snap or now - snap[sc] >= WARRANT_CACHE_TTL
+    ]
+    hits = [
+        (sc, int(now - snap[sc]))
+        for sc in stock_codes
+        if sc not in need and sc in snap
+    ]
     for sc, age in hits:
         applog.log("WARR", f"{sc} cache hit (age {age}s)")
     if need:
@@ -1027,23 +1026,23 @@ def get_warrant_results(stock_codes, force=False, errors_out=None):
             )
             ts = time.time()
             failed = []
-            with _warrant_cache_lock:
-                for sc in need:
-                    sc_codes = code_map.get(sc, [])
-                    sc_results = {c: fetched[c] for c in sc_codes if c in fetched}
-                    # A stock that HAS warrant codes but returned none was a
-                    # wholesale fetch failure (cmoney unreachable / cmkey fetch
-                    # failed), not a stock with no warrants. Caching that empty
-                    # result would pin "no warrants found" for WARRANT_CACHE_TTL
-                    # and block retries, keeping the app dark long after cmoney
-                    # recovers — so skip it and let the next request retry. Any
-                    # prior good entry is left in place (its stale timestamp
-                    # keeps it "expired", so it still serves last-known-good and
-                    # retries). sc_codes empty == genuinely no warrants: cache it.
-                    if sc_codes and not sc_results:
-                        failed.append(sc)
-                        continue
-                    _warrant_cache[sc] = (ts, sc_results)
+            for sc in need:
+                sc_codes = code_map.get(sc, [])
+                sc_results = {c: fetched[c] for c in sc_codes if c in fetched}
+                # A stock that HAS warrant codes but returned none was a
+                # wholesale fetch failure (cmoney unreachable / cmkey fetch
+                # failed), not a stock with no warrants. Caching that empty
+                # result would pin "no warrants found" for WARRANT_CACHE_TTL
+                # and block retries, keeping the app dark long after cmoney
+                # recovers — so skip it and let the next request retry. Any
+                # prior good entry is left in place (its stale timestamp
+                # keeps it "expired", so it still serves last-known-good and
+                # retries). sc_codes empty == genuinely no warrants: cache it.
+                if sc_codes and not sc_results:
+                    failed.append(sc)
+                    continue
+                # One shared `ts` across the batch: as_of below takes the min.
+                _warrant_cache.set(sc, sc_results, ts=ts)
             if failed:
                 applog.log(
                     "WARR",
@@ -1052,20 +1051,23 @@ def get_warrant_results(stock_codes, force=False, errors_out=None):
                     level="ERROR",
                 )
     merged, as_of = {}, None
-    with _warrant_cache_lock:
-        for sc in stock_codes:
-            ent = _warrant_cache.get(sc)
-            if not ent:
-                continue
-            merged.update(ent[1])
-            as_of = ent[0] if as_of is None else min(as_of, ent[0])
+    for sc in stock_codes:
+        # entry(), not fresh(): an expired entry is still served as
+        # last-known-good when the refetch above failed.
+        ent = _warrant_cache.entry(sc)
+        if not ent:
+            continue
+        merged.update(ent[1])
+        as_of = ent[0] if as_of is None else min(as_of, ent[0])
     return merged, as_of, not need
 
 
 def cache_as_of(stock_codes):
     """Oldest warrant-cache timestamp (epoch) for these codes, or None."""
-    with _warrant_cache_lock:
-        ts = [_warrant_cache[sc][0] for sc in stock_codes if sc in _warrant_cache]
+    ts = [
+        ent[0] for ent in (_warrant_cache.entry(sc) for sc in stock_codes)
+        if ent is not None
+    ]
     return min(ts) if ts else None
 
 
