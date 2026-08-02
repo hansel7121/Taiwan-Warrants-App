@@ -15,6 +15,7 @@ from logic import arb_logic
 from logic import options_logic
 from logic import us_options_logic
 from logic import warrant_logic
+from services import applog
 
 CODE = "2330"
 
@@ -113,3 +114,50 @@ def test_tw_us_hard_error_raises_plain_runtime_error(stub_maps, monkeypatch):
 def test_no_matches_error_is_a_runtime_error_subclass():
     """Existing broad `except RuntimeError` callers keep working."""
     assert issubclass(arb_logic.NoMatchesError, RuntimeError)
+
+
+# ── the shared empty-scan tail, called directly ──────────────────────────────
+# All three orchestrators end their per-code loop in _finish_empty_scan; these
+# pin its behavior without going through a fetcher.
+
+def test_finish_empty_scan_hard_errors_win_over_skips():
+    """A real data-source failure outranks any soft skips collected alongside."""
+    with pytest.raises(RuntimeError) as exc:
+        arb_logic._finish_empty_scan(["src A down", "src B down"], ["2330: no data"])
+
+    assert not isinstance(exc.value, arb_logic.NoMatchesError)
+    assert str(exc.value) == "src A down; src B down"
+
+
+def test_finish_empty_scan_skips_only_raises_no_matches_with_reasons():
+    with pytest.raises(arb_logic.NoMatchesError) as exc:
+        arb_logic._finish_empty_scan([], ["2330: no data", "2303: no data"])
+
+    assert str(exc.value) == "no matches; 2330: no data; 2303: no data"
+
+
+def test_finish_empty_scan_bare_raises_no_matches_without_suffix():
+    with pytest.raises(arb_logic.NoMatchesError) as exc:
+        arb_logic._finish_empty_scan([], [])
+
+    assert str(exc.value) == "no matches"
+
+
+def test_finish_empty_scan_logs_skip_reasons_once(monkeypatch):
+    logged = []
+    monkeypatch.setattr(applog, "log", lambda *a: logged.append(a))
+
+    with pytest.raises(arb_logic.NoMatchesError):
+        arb_logic._finish_empty_scan([], ["2330: no data"])
+
+    assert logged == [("ARB", "no matches; 2330: no data")]
+
+
+def test_finish_empty_scan_does_not_log_when_no_skip_reasons(monkeypatch):
+    logged = []
+    monkeypatch.setattr(applog, "log", lambda *a: logged.append(a))
+
+    with pytest.raises(arb_logic.NoMatchesError):
+        arb_logic._finish_empty_scan([], [])
+
+    assert logged == []

@@ -23,6 +23,27 @@ class NoMatchesError(RuntimeError):
     its own exception unmasked."""
 
 
+def _finish_empty_scan(hard_errors, skip_reasons):
+    """Bucket a per-code scan that produced no rows, and always raise.
+
+    If a data source actually failed, that is a genuine error and propagates as
+    a plain RuntimeError. Otherwise every code was read and matched fine and the
+    filter simply passed nothing through — a normal, common scan outcome (most
+    of the time there is no arb), not a failure — so it gets its own exception
+    type that callers can catch narrowly, leaving genuine failures unmasked.
+
+    Shared by all three orchestrators (match_warrant_tw_option,
+    match_warrant_us_option, match_tw_us_option).
+    """
+    if hard_errors:
+        raise RuntimeError("; ".join(hard_errors))
+    if skip_reasons:
+        applog.log("ARB", "no matches; " + "; ".join(skip_reasons))
+    raise NoMatchesError(
+        "no matches" + ("; " + "; ".join(skip_reasons) if skip_reasons else "")
+    )
+
+
 # ── Straddle arbitrage (volatility relative-value) ───────────────────────────
 # A "straddle package" = one call leg + one put leg on the same underlying (their
 # strikes may differ within ΔK — a strangle — so packages carry net delta). We
@@ -1054,18 +1075,7 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
             hard_errors.append(hard)
 
     if not all_rows:
-        if hard_errors:
-            # A data source actually failed — a genuine error.
-            raise RuntimeError("; ".join(hard_errors))
-        # Every code was read and matched fine; the filter just passed nothing
-        # through. That is a normal, common scan outcome (most of the time
-        # there is no arb), not a failure — so it gets its own exception type
-        # that callers can catch narrowly, leaving genuine failures unmasked.
-        if skip_reasons:
-            applog.log("ARB", "no matches; " + "; ".join(skip_reasons))
-        raise NoMatchesError(
-            "no matches" + ("; " + "; ".join(skip_reasons) if skip_reasons else "")
-        )
+        _finish_empty_scan(hard_errors, skip_reasons)
 
     result = pd.DataFrame(all_rows)
     if strategy == "pcp" and "executable" in result.columns:
@@ -1169,15 +1179,7 @@ def match_warrant_us_option(stock_codes, option_type, max_strike_diff_pct, max_d
         all_rows.extend(rows)
 
     if not all_rows:
-        if hard_errors:
-            raise RuntimeError("; ".join(hard_errors))
-        # Every code was read and matched fine; the filter just passed nothing
-        # through — a normal empty scan, not a failure. See match_warrant_tw_option.
-        if skip_reasons:
-            applog.log("ARB", "no matches; " + "; ".join(skip_reasons))
-        raise NoMatchesError(
-            "no matches" + ("; " + "; ".join(skip_reasons) if skip_reasons else "")
-        )
+        _finish_empty_scan(hard_errors, skip_reasons)
 
     result = pd.DataFrame(all_rows)
     if strategy == "pcp" and "executable" in result.columns:
@@ -1433,15 +1435,7 @@ def match_tw_us_option(stock_codes, option_type, max_strike_diff_pct, max_dte_di
         all_rows.extend(rows)
 
     if not all_rows:
-        if hard_errors:
-            raise RuntimeError("; ".join(hard_errors))
-        # Every code was read and matched fine; the filter just passed nothing
-        # through — a normal empty scan, not a failure. See match_warrant_tw_option.
-        if skip_reasons:
-            applog.log("ARB", "no matches; " + "; ".join(skip_reasons))
-        raise NoMatchesError(
-            "no matches" + ("; " + "; ".join(skip_reasons) if skip_reasons else "")
-        )
+        _finish_empty_scan(hard_errors, skip_reasons)
 
     result = pd.DataFrame(all_rows)
     if "price_diff_pct" in result.columns:
