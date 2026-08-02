@@ -30,6 +30,7 @@ from logic.warrant_logic import (
     implied_vol, bs_delta, calc_real_leverage,
     implied_vol_vec, bs_delta_vec, _refine_iv_for_rounding,
 )
+from logic.ttl_cache import TTLCache
 
 # One US option contract covers 100 ADRs. The number of ordinary (Taiwan)
 # shares per ADR ("adr_ratio") is per-listing, so contract size in Taiwan
@@ -39,24 +40,22 @@ US_CONTRACT_ADRS = 100
 R_US = 0.04  # US benchmark rate for BS/IV on the ADR leg
 
 _PRODUCT_CACHE_TTL = 300  # 5 min; add/remove routes also invalidate directly
-_adr_map_cache = {"data": None, "ts": 0.0}
+_adr_map_cache = TTLCache("us_option_products", _PRODUCT_CACHE_TTL)
+
+
+def _load_adr_map():
+    from services import db_products
+    return {row["code"]: row for row in db_products.list_us_option_products()}
 
 
 def _adr_map():
     """{code: {adr_ticker, fx_ticker, adr_ratio, name}} from us_option_products, cached."""
-    now = time.time()
-    if _adr_map_cache["data"] is not None and now - _adr_map_cache["ts"] < _PRODUCT_CACHE_TTL:
-        return _adr_map_cache["data"]
-    from services import db_products
-    data = {row["code"]: row for row in db_products.list_us_option_products()}
-    _adr_map_cache["data"] = data
-    _adr_map_cache["ts"] = now
-    return data
+    return _adr_map_cache.get_or_set("all", _load_adr_map)
 
 
 def invalidate_adr_map_cache():
     """Called by the add/remove product routes (Phase 5.3) so a change is visible immediately."""
-    _adr_map_cache["data"] = None
+    _adr_map_cache.invalidate()
 
 
 def contract_tw_shares(stock_code):
@@ -65,8 +64,8 @@ def contract_tw_shares(stock_code):
 
 # Full option chain per (stock_code, compute_iv); day-range and type filters
 # are applied per call so one scheduler warm-up serves every filter combo.
-_cache: dict = {}
 _CACHE_TTL = 1200  # refreshed every 15 min by the scheduler (Yahoo is ~15 min delayed anyway)
+_cache = TTLCache("us_option_chains", _CACHE_TTL)
 
 
 def data_as_of(stock_code):
@@ -81,7 +80,7 @@ def data_as_of(stock_code):
             return datetime.fromisoformat(iso).timestamp()
         return None
     ts_list = [
-        ts for (code, _civ), (ts, _df) in _cache.items() if code == stock_code
+        ts for key, ts, _df in _cache.items() if key[0] == stock_code
     ]
     return min(ts_list) if ts_list else None
 
@@ -717,7 +716,7 @@ def scrape_yfinance_us_option(stock_code, option_type="All", min_days=1, max_day
         + (f" ({failed_exp} expiries failed)" if failed_exp else ""),
     )
     df = pd.DataFrame(rows).sort_values(["days_to_expiry", "strike"]).reset_index(drop=True)
-    _cache[cache_key] = (time.time(), df.copy())
+    _cache.set(cache_key, df.copy())
     filtered = _apply_us_option_filters(df, option_type, min_days, max_days)
     if filtered.empty:
         return pd.DataFrame(), "no US options in range", meta
