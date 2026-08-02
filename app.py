@@ -677,6 +677,11 @@ def match_warrant_us_option():
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
         applog.set_rows(len(rows))
         return jsonify({"rows": rows, "count": len(rows)})
+    except arb_logic.NoMatchesError:
+        # Clean scan that matched nothing — a normal outcome, not an error:
+        # render as "no rows", never as a red error banner.
+        applog.set_rows(0)
+        return jsonify({"rows": [], "count": 0})
     except Exception as e:
         applog.log("ARB", f"match_warrant_us_option failed: {e}\n{traceback.format_exc()}",
                    level="ERROR")
@@ -698,6 +703,9 @@ def match_warrant_us_option_csv():
         df = arb_logic.match_warrant_us_option(stock_codes, option_type, max_strike_diff_pct,
                                 max_dte_diff, positive_loose=positive_loose,
                                 min_volume=min_volume, strategy=strategy)
+    except arb_logic.NoMatchesError:
+        # Clean scan, nothing matched — download an empty CSV, not an error.
+        df = pd.DataFrame()
     except Exception:
         df = pd.DataFrame()
     output = io.StringIO()
@@ -727,6 +735,10 @@ def match_tw_us_option():
         rows = json.loads(df.to_json(orient="records")) if not df.empty else []
         applog.set_rows(len(rows))
         return jsonify({"rows": rows, "count": len(rows)})
+    except arb_logic.NoMatchesError:
+        # Clean scan that matched nothing — a normal outcome, not an error.
+        applog.set_rows(0)
+        return jsonify({"rows": [], "count": 0})
     except Exception as e:
         applog.log("ARB", f"match_tw_us_option failed: {e}\n{traceback.format_exc()}",
                    level="ERROR")
@@ -747,6 +759,9 @@ def match_tw_us_option_csv():
         df = arb_logic.match_tw_us_option(stock_codes, option_type, max_strike_diff_pct,
                                     max_dte_diff, positive_loose=positive_loose,
                                     min_volume=min_volume)
+    except arb_logic.NoMatchesError:
+        # Clean scan, nothing matched — download an empty CSV, not an error.
+        df = pd.DataFrame()
     except Exception:
         df = pd.DataFrame()
     output = io.StringIO()
@@ -783,6 +798,17 @@ def match_warrant_tw_option():
         applog.set_rows(len(rows))
         as_of_iso = datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None
         return jsonify({"rows": rows, "count": len(rows), "as_of": as_of_iso})
+    except arb_logic.NoMatchesError:
+        # Clean scan that matched nothing — a normal outcome, not an error.
+        # Same shape as a successful zero-row scan, as_of included.
+        as_of = min(
+            (t for t in (warrant_logic.cache_as_of(stock_codes),
+                         options_logic.data_as_of(stock_codes)) if t),
+            default=None,
+        )
+        applog.set_rows(0)
+        as_of_iso = datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None
+        return jsonify({"rows": [], "count": 0, "as_of": as_of_iso})
     except Exception as e:
         applog.log("ARB", f"match_warrant_tw_option failed: {e}\n{traceback.format_exc()}",
                    level="ERROR")
@@ -804,6 +830,9 @@ def match_warrant_tw_option_csv():
         df = arb_logic.match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
                            positive_loose=positive_loose, min_volume=min_volume,
                            strategy=strategy)
+    except arb_logic.NoMatchesError:
+        # Clean scan, nothing matched — download an empty CSV, not an error.
+        df = pd.DataFrame()
     except Exception:
         df = pd.DataFrame()
     output = io.StringIO()

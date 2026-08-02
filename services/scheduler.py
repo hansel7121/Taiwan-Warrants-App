@@ -288,9 +288,12 @@ def sync_suggestions():
             codes, "All", SUGGEST_MAX_STRIKE_DIFF_PCT, SUGGEST_MAX_DTE_DIFF,
             positive_loose=False, min_volume=0, strategy="same_type",
         )
-    except RuntimeError as e:
-        # RuntimeError == "no matches" here (arb_logic raises it on an empty
-        # scan). Append-only: nothing to add, nothing to remove — just log.
+    except arb_logic.NoMatchesError as e:
+        # The scan ran clean and simply matched nothing — arb_logic's own
+        # signal for that, deliberately narrower than RuntimeError so a
+        # genuine data-source failure falls through to _job and gets logged
+        # loudly instead of hiding here. Append-only: nothing to add,
+        # nothing to remove — just log.
         print(f"SCHED: suggestions no matches: {e}", flush=True)
         return
 

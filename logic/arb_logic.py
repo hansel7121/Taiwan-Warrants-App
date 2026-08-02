@@ -17,6 +17,12 @@ from logic import us_options_logic
 from logic import warrant_logic
 
 
+class NoMatchesError(RuntimeError):
+    """Raised by an orchestrator when a scan completed cleanly but matched
+    nothing — distinct from a hard data-source failure, which propagates as
+    its own exception unmasked."""
+
+
 # ── Straddle arbitrage (volatility relative-value) ───────────────────────────
 # A "straddle package" = one call leg + one put leg on the same underlying (their
 # strikes may differ within ΔK — a strangle — so packages carry net delta). We
@@ -1053,11 +1059,13 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
             raise RuntimeError("; ".join(hard_errors))
         # Every code was read and matched fine; the filter just passed nothing
         # through. That is a normal, common scan outcome (most of the time
-        # there is no arb), not a failure — return an empty result instead of
-        # raising so the caller doesn't render it as an error.
+        # there is no arb), not a failure — so it gets its own exception type
+        # that callers can catch narrowly, leaving genuine failures unmasked.
         if skip_reasons:
             applog.log("ARB", "no matches; " + "; ".join(skip_reasons))
-        return pd.DataFrame()
+        raise NoMatchesError(
+            "no matches" + ("; " + "; ".join(skip_reasons) if skip_reasons else "")
+        )
 
     result = pd.DataFrame(all_rows)
     if strategy == "pcp" and "executable" in result.columns:
@@ -1167,7 +1175,9 @@ def match_warrant_us_option(stock_codes, option_type, max_strike_diff_pct, max_d
         # through — a normal empty scan, not a failure. See match_warrant_tw_option.
         if skip_reasons:
             applog.log("ARB", "no matches; " + "; ".join(skip_reasons))
-        return pd.DataFrame()
+        raise NoMatchesError(
+            "no matches" + ("; " + "; ".join(skip_reasons) if skip_reasons else "")
+        )
 
     result = pd.DataFrame(all_rows)
     if strategy == "pcp" and "executable" in result.columns:
@@ -1429,7 +1439,9 @@ def match_tw_us_option(stock_codes, option_type, max_strike_diff_pct, max_dte_di
         # through — a normal empty scan, not a failure. See match_warrant_tw_option.
         if skip_reasons:
             applog.log("ARB", "no matches; " + "; ".join(skip_reasons))
-        return pd.DataFrame()
+        raise NoMatchesError(
+            "no matches" + ("; " + "; ".join(skip_reasons) if skip_reasons else "")
+        )
 
     result = pd.DataFrame(all_rows)
     if "price_diff_pct" in result.columns:
