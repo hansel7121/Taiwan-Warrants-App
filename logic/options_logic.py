@@ -1,6 +1,5 @@
 import io
 import re
-import threading
 import time
 from datetime import datetime, timezone
 import requests
@@ -13,43 +12,38 @@ from logic.warrant_logic import (
     implied_vol, bs_delta, calc_real_leverage,
     implied_vol_vec, bs_delta_vec, _refine_iv_for_rounding,
 )
+from logic.ttl_cache import TTLCache
 
 R = 0.01875  # Taiwan CBC benchmark rate
 
 TAIFEX_URL = "https://www.taifex.com.tw/cht/3/optDataDown"
 
-# Module-level cache: (commodity_id -> (timestamp, DataFrame))
-_taifex_cache: dict = {}
-_spot_cache: dict = {}
+# Module-level caches: commodity_id -> DataFrame / ticker -> price.
 _CACHE_TTL = 1800  # 30 minutes
+_taifex_cache = TTLCache("tw_option_eod", _CACHE_TTL)
+_spot_cache = TTLCache("tw_spot_price", _CACHE_TTL)
 
+# The product map is the one process-wide structure the arb scan reads from
+# every worker thread, so the check-then-populate must be atomic — otherwise a
+# cold cache under concurrent readers triggers redundant db_products fetches.
+# TTLCache single-flights it by construction.
 _PRODUCT_CACHE_TTL = 300  # 5 min; add/remove routes also invalidate directly
-_commodity_map_cache = {"data": None, "ts": 0.0}
-# Guards _commodity_map_cache. This is the one process-wide structure the arb
-# scan reads from every worker thread, so the check-then-populate below must be
-# atomic — otherwise a cold cache under concurrent readers triggers redundant
-# db_products fetches (dict writes are atomic under the GIL, so no corruption,
-# but the lock keeps the populate single-flighted and consistent).
-_commodity_map_lock = threading.Lock()
+_commodity_map_cache = TTLCache("tw_option_products", _PRODUCT_CACHE_TTL)
+
+
+def _load_commodity_map():
+    from services import db_products
+    return {row["code"]: row for row in db_products.list_tw_option_products()}
 
 
 def _commodity_map():
     """{code: {commodity_ids, ticker, exercise_ratio, name}} from tw_option_products, cached."""
-    now = time.time()
-    with _commodity_map_lock:
-        if _commodity_map_cache["data"] is not None and now - _commodity_map_cache["ts"] < _PRODUCT_CACHE_TTL:
-            return _commodity_map_cache["data"]
-        from services import db_products
-        data = {row["code"]: row for row in db_products.list_tw_option_products()}
-        _commodity_map_cache["data"] = data
-        _commodity_map_cache["ts"] = now
-        return data
+    return _commodity_map_cache.get_or_set("all", _load_commodity_map)
 
 
 def invalidate_commodity_map_cache():
     """Called by the add/remove product routes (Phase 5.3) so a change is visible immediately."""
-    with _commodity_map_lock:
-        _commodity_map_cache["data"] = None
+    _commodity_map_cache.invalidate()
 
 
 def _live_cache_as_of(stock_codes):
@@ -64,13 +58,13 @@ def _live_cache_as_of(stock_codes):
         if not cfg:
             continue
         mis_ts = [
-            ts for (cid, _kind), (ts, _rows) in _mis_cache.items()
+            ts for (cid, _kind), ts, _rows in _mis_cache.items()
             if cid in cfg["commodity_ids"]
         ]
         if mis_ts:
             ts_list.append(min(mis_ts))
             continue
-        eod = _taifex_cache.get(",".join(cfg["commodity_ids"]))
+        eod = _taifex_cache.entry(",".join(cfg["commodity_ids"]))
         if eod:
             ts_list.append(eod[0])
     return min(ts_list) if ts_list else None
@@ -104,13 +98,17 @@ def _decode(content):
 
 def _fetch_taifex(commodity_ids: list[str], force=False) -> pd.DataFrame:
     cache_key = ",".join(commodity_ids)
-    now = time.time()
-    if not force and cache_key in _taifex_cache:
-        ts, cached_df = _taifex_cache[cache_key]
-        if now - ts < _CACHE_TTL:
-            applog.log("OPT", f"EOD {cache_key} cache hit (age {int(now - ts)}s)")
-            return cached_df
+    if not force:
+        hit = _taifex_cache.fresh(cache_key)
+        if hit is not None:
+            applog.log("OPT", f"EOD {cache_key} cache hit (age {int(time.time() - hit[0])}s)")
+            return hit[1]
+    return _taifex_cache.get_or_set(
+        cache_key, lambda: _download_taifex(commodity_ids, cache_key), force=force
+    )
 
+
+def _download_taifex(commodity_ids: list[str], cache_key: str) -> pd.DataFrame:
     applog.log("OPT", f"EOD {cache_key} fetching TAIFEX download")
     t0 = time.time()
     today = pd.Timestamp.today()
@@ -156,19 +154,13 @@ def _fetch_taifex(commodity_ids: list[str], force=False) -> pd.DataFrame:
         "OPT",
         f"EOD {cache_key} fetched {len(df)} rows in {time.time() - t0:.1f}s",
     )
-    _taifex_cache[cache_key] = (now, df)
     return df
 
 
 def _get_spot(ticker, force=False):
-    now = time.time()
-    if not force and ticker in _spot_cache:
-        ts, price = _spot_cache[ticker]
-        if now - ts < _CACHE_TTL:
-            return price
-    price = yf.Ticker(ticker).fast_info["last_price"]
-    _spot_cache[ticker] = (now, price)
-    return price
+    return _spot_cache.get_or_set(
+        ticker, lambda: yf.Ticker(ticker).fast_info["last_price"], force=force
+    )
 
 
 def _clean_num(series, fill=np.nan):
@@ -365,7 +357,7 @@ def _parse_and_compute(raw_df, underlying_price, exercise_ratio, compute_iv=True
 # source. We use it as the PRIMARY source and fall back to EOD on any failure.
 MIS_URL = "https://mis.taifex.com.tw/futures/api/getQuoteList"
 _MIS_TTL = 60  # intraday: refresh often
-_mis_cache: dict = {}
+_mis_cache = TTLCache("tw_option_mis", _MIS_TTL)
 
 # Contract SymbolID = [3-char product][5-digit strike][month-letter][week/yr].
 #   month-letter A–L = call Jan–Dec, M–X = put Jan–Dec.
@@ -417,10 +409,15 @@ def _mis_num(v):
 def _fetch_mis_quotes(cid, kind, force=False):
     """Raw MIS QuoteList for one product code, with a short in-proc cache."""
     key = (cid, kind)
-    now = time.time()
-    if not force and key in _mis_cache and now - _mis_cache[key][0] < _MIS_TTL:
-        applog.log("OPT", f"MIS {cid} cache hit (age {int(now - _mis_cache[key][0])}s)")
-        return _mis_cache[key][1]
+    if not force:
+        hit = _mis_cache.fresh(key)
+        if hit is not None:
+            applog.log("OPT", f"MIS {cid} cache hit (age {int(time.time() - hit[0])}s)")
+            return hit[1]
+    return _mis_cache.get_or_set(key, lambda: _download_mis_quotes(cid, kind), force=force)
+
+
+def _download_mis_quotes(cid, kind):
     applog.log("OPT", f"MIS {cid} fetching quotes")
     t0 = time.time()
     headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0",
@@ -445,7 +442,6 @@ def _fetch_mis_quotes(cid, kind, force=False):
         "OPT",
         f"MIS {cid} fetched {len(rows)} quotes in {time.time() - t0:.1f}s",
     )
-    _mis_cache[key] = (now, rows)
     return rows
 
 

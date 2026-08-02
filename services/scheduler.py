@@ -29,6 +29,7 @@ from services import db_market
 from services import db_products
 from services import db_suggestions
 from logic import arb_logic
+from logic import ttl_cache
 from logic import warrant_logic
 from logic import options_logic
 from logic import us_options_logic
@@ -357,6 +358,23 @@ def _job(name, fn):
         except Exception as e:
             print(f"SCHED: {name} FAILED after {time.time() - t0:.1f}s: {e}", flush=True)
             traceback.print_exc()
+        finally:
+            _log_cache_stats(name)
+
+
+def _log_cache_stats(name):
+    """Emit the aggregate in-process cache footprint after every job.
+
+    memlog's MEM: lines say how much the process is holding; this says WHICH
+    cache is holding it. Every OOM restart on the 512 MB host so far has had to
+    be diagnosed without that second half. Logged on failure too — the run that
+    dies is the one whose footprint matters. Never raises: a stats fault must
+    not surface as a job failure.
+    """
+    try:
+        print(f"CACHE: after {name} | {ttl_cache.format_stats()}", flush=True)
+    except Exception:
+        pass
 
 
 def _gated(market, fn):

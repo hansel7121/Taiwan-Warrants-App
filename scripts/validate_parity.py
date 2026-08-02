@@ -50,7 +50,7 @@ def both(fn, *args, **kw):
     # us_options checks its snapshot branch before the in-proc _cache, but clear
     # it anyway so the supabase call provably cannot be served from a live-mode
     # cache entry.
-    us_options_logic._cache.clear()
+    us_options_logic._cache.invalidate()
     _mark_supabase(True)
     try:
         supa = fn(*args, **kw)
@@ -72,7 +72,7 @@ def _both_try(fn, *args, **kw):
         live = _Raised(e)
     finally:
         _mark_supabase(False)
-    us_options_logic._cache.clear()
+    us_options_logic._cache.invalidate()
     _mark_supabase(True)
     try:
         supa = fn(*args, **kw)
