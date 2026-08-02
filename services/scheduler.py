@@ -191,61 +191,79 @@ def sync_warrant():
     db_market.write_snapshot("warrants", df)
 
 
-def sync_tw_option():
-    """Fetch each TW option product (superset-with-IV), align, write one batch."""
+def _sync_option_products(codes, scraper, cols, int_cols, *, label,
+                          set_source=False):
+    """Fetch one option product per code, tag + align them, return one frame.
+
+    The per-market differences (which scraper, its day window / arg shape, the
+    column lists, the log wording) are all parameters; the loop below — one dead
+    product must not sink the batch — is the single shared implementation behind
+    sync_tw_option and sync_us_option.
+
+    `scraper` is a fully-bound callable taking just the code and returning the
+    scrapers' usual (df, err, meta) triple, so the helper never needs to know
+    about list-wrapping or min_days/max_days. `label` is the singular product
+    name used in per-code log lines ("tw_option"); the "skipping write" line
+    uses `label + "s"`, matching today's messages byte-for-byte.
+
+    Returns the coerced, column-aligned DataFrame ready for write_snapshot, or
+    None when there was nothing to write (caller skips the write entirely).
+    """
     frames = []
-    for code in tw_option_codes():
+    for code in codes:
         try:
-            df, err, _meta = options_logic.scrape_tw_option(
-                [code], "All", min_days=0, max_days=365,
-                compute_iv=True, keep_noniv=True,
-            )
+            df, err, _meta = scraper(code)
         except Exception as e:
             # One dead product must not sink the batch.
-            print(f"SCHED: tw_option {code} failed: {e}", flush=True)
+            print(f"SCHED: {label} {code} failed: {e}", flush=True)
             continue
         if df is None or df.empty:
             if err:
-                print(f"SCHED: tw_option {code} empty ({err})", flush=True)
+                print(f"SCHED: {label} {code} empty ({err})", flush=True)
             continue
         df = df.copy()
         df["stock_code"] = code
-        # Provenance is informational and nullable; leaving it null is the
-        # accepted Step-3 scope (we don't infer mis/eod here).
-        df["source"] = None
+        if set_source:
+            # Provenance is informational and nullable; leaving it null is the
+            # accepted Step-3 scope (we don't infer mis/eod here).
+            df["source"] = None
         frames.append(df)
     if not frames:
-        print("SCHED: tw_options empty, skipping write", flush=True)
+        print(f"SCHED: {label}s empty, skipping write", flush=True)
+        return None
+    out = pd.concat(frames, ignore_index=True).reindex(columns=cols)
+    return _coerce_int_cols(out, int_cols)
+
+
+def sync_tw_option():
+    """Fetch each TW option product (superset-with-IV), align, write one batch."""
+    out = _sync_option_products(
+        tw_option_codes(),
+        lambda code: options_logic.scrape_tw_option(
+            [code], "All", min_days=0, max_days=365,
+            compute_iv=True, keep_noniv=True,
+        ),
+        TW_OPTION_COLS, TW_OPTION_INT_COLS,
+        label="tw_option", set_source=True,
+    )
+    if out is None:
         return
-    out = pd.concat(frames, ignore_index=True).reindex(columns=TW_OPTION_COLS)
-    out = _coerce_int_cols(out, TW_OPTION_INT_COLS)
     db_market.write_snapshot("tw_options", out)
 
 
 def sync_us_option():
     """Fetch each US ADR option chain (superset-with-IV), align, write one batch."""
-    frames = []
-    for code in us_option_codes():
-        try:
-            df, err, _meta = us_options_logic.scrape_yfinance_us_option(
-                code, "All", min_days=1, max_days=730,
-                compute_iv=True, keep_noniv=True,
-            )
-        except Exception as e:
-            print(f"SCHED: us_option {code} failed: {e}", flush=True)
-            continue
-        if df is None or df.empty:
-            if err:
-                print(f"SCHED: us_option {code} empty ({err})", flush=True)
-            continue
-        df = df.copy()
-        df["stock_code"] = code
-        frames.append(df)
-    if not frames:
-        print("SCHED: us_options empty, skipping write", flush=True)
+    out = _sync_option_products(
+        us_option_codes(),
+        lambda code: us_options_logic.scrape_yfinance_us_option(
+            code, "All", min_days=1, max_days=730,
+            compute_iv=True, keep_noniv=True,
+        ),
+        US_OPTION_COLS, US_OPTION_INT_COLS,
+        label="us_option",
+    )
+    if out is None:
         return
-    out = pd.concat(frames, ignore_index=True).reindex(columns=US_OPTION_COLS)
-    out = _coerce_int_cols(out, US_OPTION_INT_COLS)
     db_market.write_snapshot("us_options", out)
 
 
