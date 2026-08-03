@@ -21,11 +21,13 @@ create table if not exists broker_credentials (
   user_id uuid not null references auth.users(id) on delete cascade,
   broker text not null check (broker in ('kgi', 'fubon')),
   encrypted_fields text not null,
-  -- KGI's market-data tier is entered by hand (the API exposes it nowhere);
-  -- base tier is 30 symbols/connection over 2 connections. Null for fubon,
-  -- whose 200/5 limits are fixed constants in code, not per-account.
-  kgi_symbols_per_connection int,
-  kgi_connections int,
+  -- Capacity tier, populated for every row whatever the broker, defaulted
+  -- per-broker on write (kgi 30/2, fubon 200/5). KGI's tier varies by account
+  -- and is entered by hand (the API exposes it nowhere), so its default is only
+  -- a starting point a caller can override; Fubon's is fixed for every account
+  -- and is mirrored here purely so readers get one uniform shape.
+  symbols_per_connection int,
+  connections int,
   cert_path text,
   created_at timestamptz default now(),
   updated_at timestamptz not null default now(),

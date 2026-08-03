@@ -153,34 +153,41 @@ def test_get_credential_round_trips(store):
     got = credentials.get_credential(USER, "kgi")
     assert got["account"] == KGI_FIELDS["account"]
     assert got["password"] == KGI_FIELDS["password"]
-    assert got["kgi_symbols_per_connection"] == 30
-    assert got["kgi_connections"] == 2
+    assert got["symbols_per_connection"] == 30
+    assert got["connections"] == 2
 
 
 def test_get_credential_missing_returns_none(store):
     assert credentials.get_credential(USER, "fubon") is None
 
 
-def test_kgi_defaults_to_base_tier_and_is_overridable(store):
+def test_kgi_defaults_to_its_base_tier(store):
     credentials.upsert_credential(USER, "kgi", KGI_FIELDS)
-    assert store.rows[0]["kgi_symbols_per_connection"] == 30
-    assert store.rows[0]["kgi_connections"] == 2
-
-    credentials.upsert_credential(
-        USER, "kgi", KGI_FIELDS,
-        kgi_symbols_per_connection=100, kgi_connections=5,
-    )
-    assert len(store.rows) == 1
-    assert store.rows[0]["kgi_symbols_per_connection"] == 100
-    assert store.rows[0]["kgi_connections"] == 5
+    assert store.rows[0]["symbols_per_connection"] == 30
+    assert store.rows[0]["connections"] == 2
 
 
-def test_fubon_row_carries_no_tier(store):
+def test_fubon_defaults_to_its_fixed_tier(store):
     credentials.upsert_credential(
         USER, "fubon", {"api_key": "k", "api_secret": "s"})
     row = store.rows[0]
-    assert row["kgi_symbols_per_connection"] is None
-    assert row["kgi_connections"] is None
+    assert row["symbols_per_connection"] == 200
+    assert row["connections"] == 5
+
+
+@pytest.mark.parametrize("broker, fields", [
+    ("kgi", KGI_FIELDS),
+    ("fubon", {"api_key": "k", "api_secret": "s"}),
+])
+def test_tier_is_overridable_for_either_broker(store, broker, fields):
+    credentials.upsert_credential(USER, broker, fields)
+
+    credentials.upsert_credential(
+        USER, broker, fields, symbols_per_connection=100, connections=7)
+
+    assert len(store.rows) == 1
+    assert store.rows[0]["symbols_per_connection"] == 100
+    assert store.rows[0]["connections"] == 7
 
 
 def test_list_credentials_never_exposes_secrets(store, capsys):
@@ -194,7 +201,7 @@ def test_list_credentials_never_exposes_secrets(store, capsys):
     for r in listed:
         assert "encrypted_fields" not in r
         assert set(r) == {
-            "broker", "kgi_symbols_per_connection", "kgi_connections",
+            "broker", "symbols_per_connection", "connections",
             "has_cert", "created_at", "updated_at",
         }
         assert r["has_cert"] is False

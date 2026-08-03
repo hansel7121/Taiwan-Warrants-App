@@ -16,40 +16,46 @@ from services.broker import crypto
 TABLE = "broker_credentials"
 CERT_BUCKET = "broker-certs"
 
-# KGI's base market-data tier, entered manually because the broker exposes it
-# nowhere in the API. Fubon's limits are fixed constants elsewhere, not stored.
-KGI_BASE_SYMBOLS_PER_CONNECTION = 30
-KGI_BASE_CONNECTIONS = 2
+# Default capacity tier (symbols_per_connection, connections) per broker.
+# KGI's numbers come from manual entry — the broker exposes the account's tier
+# nowhere in its API, so 30/2 is only the common base and a caller may override
+# it. Fubon's 200/5 are fixed for every account; they are mirrored into the row
+# anyway so readers get one uniform shape instead of broker-specific lookups.
+# Keep this a table, not an if/elif chain: adding a broker should be one line.
+_DEFAULT_TIER = {
+    "kgi": (30, 2),
+    "fubon": (200, 5),
+}
 
-_META_COLS = "broker, kgi_symbols_per_connection, kgi_connections, cert_path, created_at, updated_at"
+_META_COLS = "broker, symbols_per_connection, connections, cert_path, created_at, updated_at"
 
 
-def upsert_credential(user_id, broker, fields, kgi_symbols_per_connection=None,
-                      kgi_connections=None):
+def upsert_credential(user_id, broker, fields, symbols_per_connection=None,
+                      connections=None):
     """Encrypt `fields` and write the user's row for `broker`.
 
-    KGI's tier args default to the base tier; they stay null for fubon, where
-    the columns are meaningless.
+    Tier args fall back to the broker's default tier, so every row carries a
+    capacity tier regardless of broker.
     """
-    if broker == "kgi":
-        if kgi_symbols_per_connection is None:
-            kgi_symbols_per_connection = KGI_BASE_SYMBOLS_PER_CONNECTION
-        if kgi_connections is None:
-            kgi_connections = KGI_BASE_CONNECTIONS
+    default_symbols, default_connections = _DEFAULT_TIER.get(broker, (None, None))
+    if symbols_per_connection is None:
+        symbols_per_connection = default_symbols
+    if connections is None:
+        connections = default_connections
 
     row = {
         "user_id": user_id,
         "broker": broker,
         "encrypted_fields": crypto.encrypt(fields),
-        "kgi_symbols_per_connection": kgi_symbols_per_connection,
-        "kgi_connections": kgi_connections,
+        "symbols_per_connection": symbols_per_connection,
+        "connections": connections,
         "updated_at": db._now(),
     }
     db._run(lambda c: c.table(TABLE).upsert(row, on_conflict="user_id,broker").execute())
 
 
 def get_credential(user_id, broker):
-    """Decrypted credential fields plus the KGI tier columns, or None.
+    """Decrypted credential fields plus the capacity tier columns, or None.
 
     The return value is plaintext: hand it straight to the broker login call and
     never log, print, or persist it.
@@ -59,8 +65,8 @@ def get_credential(user_id, broker):
         return None
     return {
         **crypto.decrypt(row["encrypted_fields"]),
-        "kgi_symbols_per_connection": row.get("kgi_symbols_per_connection"),
-        "kgi_connections": row.get("kgi_connections"),
+        "symbols_per_connection": row.get("symbols_per_connection"),
+        "connections": row.get("connections"),
     }
 
 
@@ -77,8 +83,8 @@ def list_credentials(user_id):
     return [
         {
             "broker": row.get("broker"),
-            "kgi_symbols_per_connection": row.get("kgi_symbols_per_connection"),
-            "kgi_connections": row.get("kgi_connections"),
+            "symbols_per_connection": row.get("symbols_per_connection"),
+            "connections": row.get("connections"),
             "has_cert": bool(row.get("cert_path")),
             "created_at": row.get("created_at"),
             "updated_at": row.get("updated_at"),
