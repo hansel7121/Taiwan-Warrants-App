@@ -16,6 +16,10 @@ _Avoid_: Broker credentials (that's the encrypted data itself; a Broker Account 
 A single live price update for one warrant code, pushed by the broker over its market-data connection. Exists only in worker process memory — never persisted or exposed outside the worker.
 _Avoid_: Quote, price update
 
+**Option Mirror**:
+The worker's own in-memory copy of option-side data, built by polling the `md_*` batch-pointer tables in Supabase on an interval matching that data's real refresh cadence, and compared against incoming Ticks to produce Arb Signals. The worker keeps its own (one worker serves both brokers, so there is one shared Mirror, not one per broker connection); it is a read of what the web app already writes, never a separate fetch from TAIFEX/yfinance.
+_Avoid_: Cache, snapshot — "snapshot"/"batch" already mean the `md_*` rows themselves; the Mirror is the worker's local view of them.
+
 **Arb Signal**:
 A detected arbitrage opportunity produced by comparing a live Tick against a cached mirror of option-side data, via one of the registered strategy checks. The only broker-tick-derived data written to the database.
 _Avoid_: Result, opportunity — reserve "opportunity" language for the existing periodic `arb_suggestions`; this is the live-detected counterpart.
