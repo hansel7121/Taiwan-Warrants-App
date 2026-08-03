@@ -32,5 +32,5 @@ _Avoid_: Plan, limit
 Worker-side logic that spreads the shared Watchlist's codes across every connected Broker Account's connections, combining their Capacity Tiers into one pool, opening new connections (or overflowing to the other broker) as each fills.
 
 **Worker Status**:
-Persisted connection/health state per Broker Account (connected / disconnected / reconnecting, last-tick timestamp) that the web UI reads for a live status indicator (both a combined summary and a per-account breakdown), and that other consumers (a notification channel, future monitoring) can read independently.
+Persisted connection/health state per Broker Account — one of `connected`, `stopped` (expected: scheduled end-of-day close or a user's own manual disconnect, never alerts), `reconnecting` (retrying within the backoff window after an unexpected drop), or `disconnected` (terminal: backoff exhausted, alerts) — plus a last-tick timestamp, that the web UI reads for a live status indicator (both a combined summary and a per-account breakdown), and that other consumers (a notification channel, future monitoring) can read independently.
 _Avoid_: Health check, heartbeat
