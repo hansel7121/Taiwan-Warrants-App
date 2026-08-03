@@ -14,5 +14,6 @@ statsmodels==0.14.6
 gunicorn==26.0.0
 apscheduler==3.11.3
 supabase==2.31.0
+cryptography==49.0.0
 PyJWT[crypto]==2.13.0
 pytest==8.4.2
