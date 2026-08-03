@@ -1,0 +1,71 @@
+# Broker worker image (Render Background Worker, Singapore region).
+#
+# Only the WORKER is containerised. The web service stays on Render's native
+# Python runtime (see render.yaml) — nothing here affects it.
+#
+# Why Docker at all: KGI's SuperPy SDK needs its `libCGCrypt.so` signing
+# library installed at the SYSTEM level (chmod 755 + copied into
+# /lib/x86_64-linux-gnu/ on Ubuntu, /lib64/ on CentOS/RedHat) and KGI's own
+# cert-generation program run against it. That level of filesystem control
+# needs explicit RUN steps in an image; it is not reliable in a buildpack
+# runtime's build/run split. See docs/adr/0010-worker-hosting-and-command-channel.md.
+#
+# Phase 0 (issue #20) is the hosting skeleton only: this image builds and runs
+# broker_worker.py, and nothing else. Broker SDKs and credentials land later.
+
+FROM python:3.11-slim-bookworm
+
+# Faster, quieter, no .pyc clutter; unbuffered so Render's log stream is live.
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    # Days-to-expiry and every market-hours decision are computed against local
+    # "today"; west of Taiwan the local date lags and expired batches leak in.
+    TZ=Asia/Taipei \
+    # glibc per-thread malloc arenas balloon RSS under threaded workloads.
+    MALLOC_ARENA_MAX=2
+
+WORKDIR /app
+
+# Build toolchain for any wheels without a manylinux build, plus tzdata so the
+# TZ above actually resolves in a slim image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+# Same requirements.txt as the web service — the worker has no divergent deps
+# yet. When the broker SDKs (fubon_neo, kgisuperpy) arrive in #22, split this
+# into a worker-specific requirements file at that point, not before.
+COPY requirements.txt ./
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+# ---------------------------------------------------------------------------
+# TODO(#22): KGI SuperPy native dependency.
+#
+# KGI ships `libCGCrypt.so` with its SDK. Per KGI's SuperPy docs the install is:
+#
+#   COPY vendor/kgi/libCGCrypt.so /tmp/libCGCrypt.so
+#   RUN chmod 755 /tmp/libCGCrypt.so \
+#       && cp /tmp/libCGCrypt.so /lib/x86_64-linux-gnu/   # /lib64/ on CentOS/RedHat
+#
+# followed by KGI's cert-generation program (`KGI_CGCrypt genDat`) run against
+# the installed library to produce the per-account cert data.
+#
+# Deliberately left commented out: the .so is not vendored in this repo yet and
+# the cert step needs credentials that Phase 0 does not handle. Issue #22
+# (broker client integration) owns adding the real file, the real paths, and
+# the cert-generation invocation. Do not invent paths here before then.
+# ---------------------------------------------------------------------------
+
+COPY . .
+
+# Run as a non-root user; the KGI library install above is the only step that
+# needs root and it happens at build time.
+RUN useradd --create-home --uid 10001 worker \
+    && chown -R worker:worker /app
+USER worker
+
+CMD ["python", "-u", "broker_worker.py"]
