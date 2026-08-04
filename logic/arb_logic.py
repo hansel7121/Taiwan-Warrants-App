@@ -9,8 +9,6 @@ Market data comes only through the logic modules' fetchers (warrant_logic,
 options_logic, us_options_logic), which own their own in-process caches; this
 module keeps no cache of its own.
 """
-from dataclasses import dataclass
-
 from services import applog
 import numpy as np
 import pandas as pd
@@ -969,182 +967,14 @@ def _match_butterflies(warrant_df, opt_df, opt_contract_size, positive_loose=Fal
     return rows
 
 
-# ── strategy registry ────────────────────────────────────────────────────────
-# The warrant-leg matchers above are reached through one registered list rather
-# than an if/elif chain, so the same set of checks can be driven by two callers
-# with very different cadences (ADR 0003):
-#   - the periodic full scan (match_warrant_tw_option), which matches a whole
-#     warrant frame per underlying against the freshly fetched option chain, and
-#   - a live per-Tick worker, which matches ONE warrant quote against a
-#     periodically refreshed option-side mirror (check_tick below).
-# Adding a strategy (e.g. Warrant-vs-US-Option) is then a new entry, not a new
-# branch in every caller.
-
-@dataclass(frozen=True)
-class ScanParams:
-    """The knobs every warrant-leg matcher is parameterised by.
-
-    Bundled so the registry can expose ONE call shape even though the
-    underlying matchers take different kwargs (butterfly ignores the strike/DTE
-    proximity caps — it is anchored by the wings, not by a target strike).
-    """
-    max_strike_diff_pct: float = 3.0
-    max_dte_diff: int = 5
-    positive_loose: bool = False
-
-
-@dataclass(frozen=True)
-class ArbStrategy:
-    """One registered warrant-leg arb check.
-
-    ``match`` is the uniform adapter over the matcher: it takes
-    ``(warrant_df, opt_df, opt_contract_size, params)`` and returns a list of
-    row dicts. ``needs_full_chain`` says the strategy pairs across option types
-    (PCP uses the opposite type, butterfly needs the whole ladder), so the
-    fetcher must pull every type regardless of the warrant-side type filter.
-    """
-    name: str
-    match: object          # (warrant_df, opt_df, opt_contract_size, ScanParams) -> [row]
-    needs_full_chain: bool = False
-
-    def check(self, warrant_df, opt_df, opt_contract_size, params=None):
-        """Run this strategy over a warrant frame and an option chain."""
-        return self.match(warrant_df, opt_df, opt_contract_size, params or ScanParams())
-
-
-def _same_type_check(warrant_df, opt_df, opt_contract_size, params):
-    return _match_warrants_to_options(
-        warrant_df, opt_df, opt_contract_size,
-        params.max_strike_diff_pct, params.max_dte_diff,
-        positive_loose=params.positive_loose,
-    )
-
-
-def _pcp_check(warrant_df, opt_df, opt_contract_size, params):
-    return _match_warrants_pcp(
-        warrant_df, opt_df, opt_contract_size,
-        params.max_strike_diff_pct, params.max_dte_diff,
-        positive_loose=params.positive_loose,
-    )
-
-
-def _butterfly_check(warrant_df, opt_df, opt_contract_size, params):
-    return _match_butterflies(
-        warrant_df, opt_df, opt_contract_size,
-        positive_loose=params.positive_loose,
-    )
-
-
-DEFAULT_STRATEGY = "same_type"
-
-ARB_STRATEGIES = (
-    ArbStrategy("same_type", _same_type_check),
-    ArbStrategy("pcp", _pcp_check, needs_full_chain=True),
-    ArbStrategy("butterfly", _butterfly_check, needs_full_chain=True),
-)
-
-_STRATEGY_BY_NAME = {s.name: s for s in ARB_STRATEGIES}
-
-
-def strategy_names():
-    """Registered strategy names, in registration order."""
-    return [s.name for s in ARB_STRATEGIES]
-
-
-def resolve_strategy(name):
-    """Look up a registered strategy, falling back to the default.
-
-    Unknown names fall back rather than raising, matching the old if/elif's
-    ``else`` branch — the request layer passes a client-supplied string.
-    """
-    return _STRATEGY_BY_NAME.get(name, _STRATEGY_BY_NAME[DEFAULT_STRATEGY])
-
-
-class OptionMirror:
-    """The option-side snapshot a live per-Tick caller checks warrant Ticks against.
-
-    Per ADR 0003 the worker never re-fetches TAIFEX itself: it keeps a local
-    mirror of the option data the periodic scanner already wrote, refreshed on
-    its own (not sub-minute) poll interval, and compares each incoming warrant
-    Tick against that. This is the read side of that mirror — a thin view over
-    one option DataFrame in the same shape ``options_logic.read_tw_option``
-    returns, so the registered matchers see exactly what the full scan feeds
-    them.
-    """
-
-    def __init__(self, opt_df=None, contract_sizes=None):
-        self._opt_df = pd.DataFrame() if opt_df is None else opt_df
-        self._contract_sizes = dict(contract_sizes or {})
-
-    def options_for(self, underlying_code):
-        """Option chain rows for one underlying (empty frame when unknown)."""
-        df = self._opt_df
-        if df is None or df.empty or "stock_code" not in df.columns:
-            return pd.DataFrame()
-        return df[df["stock_code"].astype(str) == str(underlying_code)]
-
-    def contract_size(self, underlying_code):
-        """Shares per option contract, or None when the code has no options."""
-        code = str(underlying_code)
-        if code in self._contract_sizes:
-            return self._contract_sizes[code]
-        cfg = options_logic._commodity_map().get(code)
-        return cfg["exercise_ratio"] if cfg else None
-
-
-def check_tick(tick, option_mirror, params=None, strategies=None):
-    """Run the registered strategies over a SINGLE live warrant quote.
-
-    ``tick`` is one warrant row as a mapping — the same fields
-    ``warrant_logic.read_warrant`` produces (``underlying_code``, ``type``,
-    ``strike``, ``days_to_expiry``, ``bid``/``ask``, ``exercise_ratio``, ...) —
-    with the live price fields overwritten by the broker feed. ``option_mirror``
-    supplies the option side (see :class:`OptionMirror`).
-
-    Returns the matched rows as a flat list, each tagged with the ``strategy``
-    that produced it. Strategies needing more than one warrant leg (butterfly
-    wants two wings) simply return nothing for a lone tick.
-
-    ``strategies`` optionally narrows the run to a subset (names or
-    :class:`ArbStrategy` entries); the default is every registered strategy.
-    """
-    params = params or ScanParams()
-    row_in = dict(tick)
-    code = row_in.get("underlying_code")
-
-    opt_df = option_mirror.options_for(code)
-    if opt_df is None or opt_df.empty:
-        return []
-    opt_contract_size = option_mirror.contract_size(code)
-    if not opt_contract_size:
-        return []
-
-    warrant_df = pd.DataFrame([row_in])
-    entries = (
-        list(ARB_STRATEGIES) if strategies is None
-        else [resolve_strategy(s) if isinstance(s, str) else s for s in strategies]
-    )
-
-    signals = []
-    for entry in entries:
-        for row in entry.check(warrant_df, opt_df, opt_contract_size, params):
-            row["strategy"] = entry.name
-            if row.get("underlying_code") is None:
-                row["underlying_code"] = code
-            signals.append(row)
-    return signals
-
-
 def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_dte_diff,
                   positive_loose=False, min_volume=0, strategy="same_type"):
     stock_codes = list(stock_codes)
-    entry = resolve_strategy(strategy)
-    params = ScanParams(max_strike_diff_pct, max_dte_diff, positive_loose)
 
     # PCP pairs a warrant with the OPPOSITE-type option; butterfly pairs each
     # type against its own body option. Both want the full chain regardless of
     # the warrant filter, so fetch every type and filter downstream.
-    opt_type_fetch = "All" if entry.needs_full_chain else option_type
+    opt_type_fetch = "All" if strategy in ("pcp", "butterfly") else option_type
 
     # Fetch ONCE for every selected code, not per-code: read_warrant/read_tw_option
     # already accept a list and the underlying Supabase snapshot read
@@ -1205,7 +1035,20 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
                        level="ERROR" if opt_hard else "INFO")
             return ([], None, msg) if opt_hard else ([], msg, None)
 
-        rows = entry.check(warrant_df, opt_df, opt_contract_size, params)
+        if strategy == "pcp":
+            rows = _match_warrants_pcp(
+                warrant_df, opt_df, opt_contract_size, max_strike_diff_pct, max_dte_diff,
+                positive_loose=positive_loose,
+            )
+        elif strategy == "butterfly":
+            rows = _match_butterflies(
+                warrant_df, opt_df, opt_contract_size, positive_loose=positive_loose,
+            )
+        else:
+            rows = _match_warrants_to_options(
+                warrant_df, opt_df, opt_contract_size, max_strike_diff_pct, max_dte_diff,
+                positive_loose=positive_loose,
+            )
         for r in rows:
             if r.get("underlying_code") is None:
                 r["underlying_code"] = code
@@ -1235,7 +1078,7 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
         _finish_empty_scan(hard_errors, skip_reasons)
 
     result = pd.DataFrame(all_rows)
-    if entry.name == "pcp" and "executable" in result.columns:
+    if strategy == "pcp" and "executable" in result.columns:
         # Executable arbs first, then by richest mispricing.
         result = result.sort_values(
             ["executable", "price_diff_pct"], ascending=[False, False]
