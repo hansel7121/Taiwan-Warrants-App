@@ -363,6 +363,13 @@ tbody tr:last-child td { border-bottom: none; }
 .mc-open{color:var(--put);background:rgba(74,222,128,.15)}
 .mc-after{color:#fbbf24;background:rgba(251,191,36,.15)}
 .mc-closed{color:var(--muted);background:rgba(139,144,160,.13)}
+.mc-bad{color:var(--call);background:rgba(248,113,113,.15)}
+/* Broker worker status shares the market-clock panel: it answers the same
+   "is the thing I depend on alive right now?" glance, so it reuses
+   .mc-row / .mc-badge rather than introducing a second floating box. */
+#market-clock .mc-sec{margin-top:7px;padding-top:6px;border-top:1px solid var(--border)}
+#market-clock .mc-sec-h{color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;margin-bottom:3px}
+#market-clock .mc-want{color:var(--muted);font-size:10px;margin-left:5px;font-weight:400;text-transform:none;letter-spacing:0}
 
 /* ── Home dashboard (landing tab) ───────────────────────────────────── */
 #tab-home { --warn: #f5a524; }
