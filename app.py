@@ -8,7 +8,6 @@ from services import auth
 from services import db
 from services import db_products
 from services import db_suggestions
-from services.broker import desired_state
 from services import store
 from logic import arb_logic
 # Aliased: the route functions below are named iv_surface / close_quote.
@@ -211,77 +210,6 @@ def close_quote():
         opt_expiry_iso=d.get("opt_expiry_iso"),
     )
     return jsonify({"ok": True, "survivor": survivor, **quote})
-
-
-@app.route("/broker/connect", methods=["POST"])
-@require_auth
-def broker_connect():
-    return _set_broker_desired_state("connect")
-
-
-@app.route("/broker/disconnect", methods=["POST"])
-@require_auth
-def broker_disconnect():
-    return _set_broker_desired_state("disconnect")
-
-
-def _set_broker_desired_state(state):
-    """Record the caller's connect/disconnect intent and return immediately.
-
-    Deliberately does not wait for, or touch, worker_status: the worker may be
-    asleep, mid-reconnect, or in another market's hours, so the click can only
-    ever record intent. The UI learns what actually happened by polling
-    /broker/status.
-    """
-    data = request.json or {}
-    broker = (data.get("broker") or "").strip().lower()
-    if broker not in desired_state.BROKERS:
-        return jsonify({"error": "broker must be one of "
-                        + ", ".join(desired_state.BROKERS)}), 400
-    desired_state.set_desired_state(g.user["id"], broker, state)
-    return jsonify({"ok": True, "broker": broker, "desired_state": state})
-
-
-@app.route("/broker/status")
-@require_auth
-def broker_status():
-    """What the worker reports, alongside what the user asked for.
-
-    Both halves in one payload so the UI can show the gap between them — an
-    intent with no matching status row is the normal state until a worker
-    exists to pick it up.
-    """
-    user_id = g.user["id"]
-    return jsonify({
-        "status": desired_state.list_worker_status(user_id),
-        "desired": desired_state.list_desired_states(user_id),
-    })
-
-
-@app.route("/market_hours")
-def market_hours():
-    """Whether a market is currently in a trading window.
-
-    The single source of truth for the Singapore worker's start/stop gating
-    (docs/adr/0009). The worker is a separate service with no shared runtime, so
-    it cannot import scheduler.is_market_open — it polls this instead, rather
-    than carrying its own copy of Taiwan's hours and holiday calendar, which is
-    the kind of duplicate that drifts and then has the worker awake on a holiday.
-
-    Unauthenticated on purpose, like /healthz: the answer is a property of the
-    exchange, not of any user, it exposes no data a public trading calendar
-    doesn't, and the worker holds no user JWT to present.
-    """
-    market = request.args.get("market", "tw_equity")
-    try:
-        is_open = scheduler.is_market_open(market)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    return jsonify({
-        "market": market,
-        "open": is_open,
-        "as_of": datetime.now(timezone.utc).isoformat(),
-    })
 
 
 @app.route("/list_warrant_stocks")

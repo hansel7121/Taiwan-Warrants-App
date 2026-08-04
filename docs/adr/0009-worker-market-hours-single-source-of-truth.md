@@ -1,5 +1,0 @@
-# Worker start/stop follows the app's existing market-hours gate, consulted remotely rather than reimplemented
-
-The worker logs in, subscribes, and shuts down on the same trading-day boundaries the scheduler already enforces — the `_gated` / `tw_equity` market-hours concept in `services/scheduler.py` — rather than running always-on or carrying its own cron schedule. Always-on burns broker sessions and alerting attention outside hours; a separate schedule is a second thing to remember to update.
-
-Because the worker is a separate deployed service (its own process, no shared runtime with the web app), it can't import that function directly. It must instead consult the same source of truth over the wire — a lightweight hours endpoint on the web app, or a shared holiday/hours config both sides read — rather than keeping a private copy of Taiwan market hours and the holiday calendar, which is exactly the kind of duplicate that silently drifts and then has the worker awake on a holiday or asleep on a make-up trading day.
