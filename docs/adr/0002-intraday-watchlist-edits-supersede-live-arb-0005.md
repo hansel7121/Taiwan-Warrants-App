@@ -1,0 +1,11 @@
+# Watchlist edits take effect intraday for Live warrant, superseding live-arb's next-trading-day rule
+
+`live-arb`'s ADR-0005 decided Watchlist edits apply only at the next trading day's login, because rebuilding the Connection Pool's assignment while ticks are flowing seemed to require tearing down and reopening connections. Investigating the actual broker clients (`services/broker/kgi_client.py`, `fubon_client.py`) shows this isn't true at the SDK level: both clients expose `subscribe()`/`unsubscribe()` on an already-open, already-logged-in connection — no relogin required to add or drop a symbol.
+
+For Live warrant, next-day-only editing defeats the feature's purpose: a user typing in a warrant code expects to see its price immediately, not tomorrow. This ADR supersedes 0005's cadence rule for the shared Watchlist going forward (0005's reasoning about *why* next-day was chosen is still worth reading for context, but the rule itself no longer holds).
+
+Building this requires three pieces beyond what `live-arb` shipped:
+
+1. **Incremental assignment.** `pool.py`'s `assign()` is a pure from-scratch bin-packer — rerunning it on every edit can reshuffle codes across connections that didn't change. A new incremental function computes the minimal diff (added/removed codes only) against the current assignment, so unrelated live subscriptions aren't disturbed.
+2. **Overflow policy for mid-session adds: reject.** `assign()` today just reports codes that don't fit as `unassigned`; there was no need for an eviction rule when packing only happened once, at login. Adding a code intraday when every connection is full fails outright — the UI surfaces "capacity full, remove a code first" — rather than silently evicting another user's already-watched code. Considered auto-evicting the least-recently-watched code instead, but rejected it: this is a small shared tool, capacity exhaustion should be rare, and silently dropping someone else's watch is more surprising than an explicit rejection.
+3. **Faster worker poll cadence during market hours.** The worker previously only read the Watchlist at daily login. It now needs to poll it on a tight interval while the market is open, reusing the existing market-hours-gated polling pattern used elsewhere in the app (e.g. the 15-minute data-sync grid), just at a faster cadence.

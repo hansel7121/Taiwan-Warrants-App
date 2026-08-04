@@ -1,0 +1,7 @@
+# Live warrant sub-tab reuses #19's shared Watchlist and Connection Pool, not a separate on-demand mechanism
+
+The "Live warrant" sub-tab (issue #39) is not a narrower, separate on-demand-per-code feature — it's the same structure as the deferred #19 epic (shared Watchlist UI, Connection Pool spreading subscriptions across every user's Broker Account, Capacity Tiers), just with a different tick consumer. Where #19's worker feeds ticks into `arb_logic.check_tick()`, this feature feeds the same ticks into a live-price cache the frontend reads — no separate `arb_signals` dispatch yet, since there's no live option-side feed.
+
+Concretely: users edit the shared Watchlist through UI (same table/edit surface #19/#36 already designed), the worker's Connection Pool (`services/broker/pool.py`, ported from `live-arb`) assigns codes to connections exactly as before, and `on_tick` — the pool's existing callback parameter — is swapped to update the live-price cache instead of running arb checks. When the arb epic resumes later, arb-signal dispatch is added as a second consumer of the same tick stream, not a second pool.
+
+This corrects an earlier framing in this same design session that treated Live-warrant as needing its own on-demand watch-request table with TTL/heartbeat expiry, distinct from the Watchlist. That framing solved a problem that doesn't exist here: there's only one Watchlist, one Connection Pool, and one set of Capacity Tiers, shared across whatever features consume ticks from it.
