@@ -17,3 +17,11 @@ supabase==2.31.0
 cryptography==49.0.0
 PyJWT[crypto]==2.13.0
 pytest==8.4.2
+# Broker SDKs — worker-only (services/broker/*_client.py); the web app never
+# imports them. kgisuperpy is a pure-Python wheel but also needs KGI's native
+# libCGCrypt.so installed at the system level (see Dockerfile.worker).
+kgisuperpy==2.1.0
+# fubon_neo is deliberately NOT listed: it is not on PyPI (manual .whl download
+# from Fubon's TradeAPI site), so pinning it here would break
+# `pip install -r requirements.txt` for anyone without the file. It is installed
+# from a vendored wheel in Dockerfile.worker.

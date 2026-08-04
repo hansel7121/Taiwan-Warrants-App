@@ -36,11 +36,22 @@ RUN apt-get update \
         tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-# Same requirements.txt as the web service — the worker has no divergent deps
-# yet. When the broker SDKs (fubon_neo, kgisuperpy) arrive in #22, split this
-# into a worker-specific requirements file at that point, not before.
+# Same requirements.txt as the web service. kgisuperpy lives there (it is
+# harmless to install anywhere); fubon_neo cannot, because it is not on PyPI —
+# it is a manylinux abi3 wheel downloaded by hand from Fubon's TradeAPI site and
+# vendored under vendor/fubon/. Both are imported only by the worker.
 COPY requirements.txt ./
 RUN pip install --upgrade pip && pip install -r requirements.txt
+
+# TODO(#22 validation): vendor the Fubon wheel and install it here, once the
+# file is committed (or fetched at build time from a private source):
+#
+#   COPY vendor/fubon/fubon_neo-2.2.8-*.whl /tmp/
+#   RUN pip install /tmp/fubon_neo-*.whl
+#
+# Left commented out for the same reason as libCGCrypt.so below: the binary is
+# not in the repo yet, and an install step pointing at a missing file fails the
+# build for everyone.
 
 # ---------------------------------------------------------------------------
 # TODO(#22): KGI SuperPy native dependency.
