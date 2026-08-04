@@ -304,3 +304,47 @@ create table if not exists worker_status (
 create index if not exists worker_status_user_idx on worker_status (user_id);
 alter table worker_status enable row level security;
 grant all on worker_status to service_role;
+
+-- The service role bypasses RLS but still needs table-level privileges, and a
+-- table created through the SQL editor does not always inherit the default
+-- grants. broker_credentials and broker_desired_state both shipped without an
+-- explicit grant and came out unreadable with the service-role key, which is
+-- the only key the worker has.
+grant all on broker_credentials, broker_desired_state to service_role;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Live arb signals — the Singapore worker's output.
+--
+-- One row per arb found while checking a single broker Tick against the
+-- worker's option-side mirror. Deliberately separate from arb_suggestions, with
+-- no merge or dedup between them (docs/adr/0007), because the lifecycles
+-- differ: a suggestion is scan-to-scan state that can go stale, so it carries
+-- status/first_seen_at/last_seen_at; a signal is an event whose meaning is tied
+-- to the instant of the Tick that produced it. Hence no status column and
+-- nothing to flip — rows are appended, read newest-first, and aged out by time.
+-- Identity is a surrogate uuid rather than arb_suggestions' deterministic
+-- composite id: the same warrant/option pair on the next Tick is a new
+-- observation, not the same row seen again.
+--
+-- Raw Ticks are still never persisted (docs/adr/0003): tick_ts/tick_broker say
+-- which print a signal was derived from, not the print itself.
+create table if not exists arb_signals (
+  id uuid primary key default gen_random_uuid(),
+  strategy text not null,
+  underlying_code text,
+  warrant_code text,
+  option_contract text,
+  legs jsonb not null,
+  price_diff numeric,
+  price_diff_pct numeric,
+  tick_ts timestamptz,
+  tick_broker text,
+  detected_at timestamptz not null default now()
+);
+create index if not exists arb_signals_detected_idx on arb_signals (detected_at desc);
+create index if not exists arb_signals_underlying_idx on arb_signals (underlying_code, detected_at desc);
+-- Server-only like md_* and worker_status: RLS on with NO policy, so only the
+-- service-role key reaches it. A signal is the worker's assertion; a browser
+-- must not be able to write one.
+alter table arb_signals enable row level security;
+grant all on arb_signals to service_role;

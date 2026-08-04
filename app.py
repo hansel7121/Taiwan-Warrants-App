@@ -258,6 +258,32 @@ def broker_status():
     })
 
 
+@app.route("/market_hours")
+def market_hours():
+    """Whether a market is currently in a trading window.
+
+    The single source of truth for the Singapore worker's start/stop gating
+    (docs/adr/0009). The worker is a separate service with no shared runtime, so
+    it cannot import scheduler.is_market_open — it polls this instead, rather
+    than carrying its own copy of Taiwan's hours and holiday calendar, which is
+    the kind of duplicate that drifts and then has the worker awake on a holiday.
+
+    Unauthenticated on purpose, like /healthz: the answer is a property of the
+    exchange, not of any user, it exposes no data a public trading calendar
+    doesn't, and the worker holds no user JWT to present.
+    """
+    market = request.args.get("market", "tw_equity")
+    try:
+        is_open = scheduler.is_market_open(market)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({
+        "market": market,
+        "open": is_open,
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    })
+
+
 @app.route("/list_warrant_stocks")
 @require_auth
 def list_warrant_stocks():
