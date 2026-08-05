@@ -12,6 +12,7 @@ from services import store
 # Aliased: `credentials` alone reads as any credential in this module.
 from services.broker import credentials as broker_credentials
 from services.broker import desired_state
+from services.broker import watchlist
 from logic import arb_logic
 # Aliased: the route functions below are named iv_surface / close_quote.
 from logic import iv_surface as iv_surface_logic
@@ -490,6 +491,58 @@ def _set_broker_desired_state(state):
         return err
     desired_state.set_desired_state(g.user["id"], broker, state)
     return jsonify({"ok": True, "broker": broker, "desired_state": state})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared Watchlist — the codes the broker worker subscribes to live (issue #44).
+#
+# Unlike every other route in this file, these are NOT scoped by g.user["id"]:
+# there is one Watchlist, shared by all users and consumed by one Connection
+# Pool (docs/adr/0001). The caller's id is recorded on an add only as
+# provenance. Auth still gates the routes — a signed-in user may edit the shared
+# list, an anonymous one may not.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.route("/watchlist/list")
+@require_auth
+def watchlist_list():
+    return jsonify({"ok": True, "codes": watchlist.list_codes()})
+
+
+@app.route("/watchlist/add", methods=["POST"])
+@require_auth
+def watchlist_add():
+    codes, err = _watchlist_codes()
+    if err:
+        return err
+    result = watchlist.add_codes(g.user["id"], codes)
+    if result.rejected:
+        # 400, never 500: a full pool is an ordinary answer the UI has to show,
+        # not a failure (docs/adr/0002 — reject rather than evict).
+        return jsonify({"ok": False, "error":
+                        f"Adding these codes would exceed capacity "
+                        f"({result.watching}/{result.capacity} watched). "
+                        f"Remove a code first."}), 400
+    return jsonify({"ok": True, "codes": result.added})
+
+
+@app.route("/watchlist/remove", methods=["POST"])
+@require_auth
+def watchlist_remove():
+    codes, err = _watchlist_codes()
+    if err:
+        return err
+    return jsonify({"ok": True, "codes": watchlist.remove_codes(codes)})
+
+
+def _watchlist_codes():
+    """The posted `codes` list, or a 400. The frontend splits the user's
+    comma-separated input, so the wire format is always a list."""
+    codes = (request.get_json(silent=True) or {}).get("codes")
+    if not isinstance(codes, list) or not codes:
+        return None, (jsonify({"ok": False, "error": "codes must be a non-empty list"}), 400)
+    return codes, None
 
 
 @app.route("/read_warrant", methods=["POST"])

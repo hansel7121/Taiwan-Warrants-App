@@ -255,3 +255,35 @@ alter table broker_credentials enable row level security;
 -- reaches this table with the service-role key, which bypasses RLS.
 create policy "own rows" on broker_credentials for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 grant all on broker_credentials to service_role;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Shared Watchlist (Live warrant sub-tab; migration 008).
+--
+-- One list, shared by every user, consumed by one Connection Pool
+-- (docs/adr/0001) — so this table is NOT per-user: added_by records who typed a
+-- code in, but grants no ownership and never filters a read. A code stays until
+-- someone removes it.
+--
+-- unique (code) is the whole concurrency story: two users adding the same code
+-- at once collide on it, and the service upserts on that conflict. Capacity is
+-- enforced in services/broker/watchlist.py, not here — it depends on the stored
+-- Capacity Tiers of every Broker Account, which no constraint on this table can
+-- see (docs/adr/0002).
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists watchlist (
+  id uuid primary key default gen_random_uuid(),
+  code text not null,
+  -- set null, not cascade: a departing user must not silently unwatch codes
+  -- somebody else is still relying on.
+  added_by uuid references auth.users(id) on delete set null,
+  added_at timestamptz not null default now(),
+  unique (code)
+);
+alter table watchlist enable row level security;
+-- Neither existing pattern fits: broker_credentials' "own rows" policy keys on
+-- auth.uid() = user_id, but this table is deliberately shared and has no owner
+-- column to key on; the md_* tables' service-role-only grant is for
+-- worker-written data no user edits, and users edit this one. So: any signed-in
+-- user may read and edit the shared list.
+create policy "any authenticated user" on watchlist for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+grant all on watchlist to service_role;

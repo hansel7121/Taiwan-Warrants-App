@@ -94,6 +94,19 @@ def list_credentials(user_id):
     ]
 
 
+def list_all_user_ids():
+    """Every user who has stored a Broker Account, for the pool's capacity math.
+
+    The pool is shared: total capacity is the sum over ALL users' Capacity
+    Tiers (docs/adr/0001), so `pool.accounts_for` needs the full user list and
+    has no caller to scope it to — the same reason
+    desired_state.list_all_desired_states exists. Deduped here rather than in
+    SQL because a user with both brokers has two rows.
+    """
+    r = db._run(lambda c: c.table(TABLE).select("user_id").order("user_id").execute())
+    return list(dict.fromkeys(row["user_id"] for row in (r.data or [])))
+
+
 def remove_credential(user_id, broker):
     # Any uploaded cert object is left in Storage; cleanup belongs with the
     # upload/download flow, out of scope for this phase.
