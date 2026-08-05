@@ -1,7 +1,8 @@
-// Live warrant sub-tab: broker credential entry (issue #42).
+// Live warrant sub-tab: broker credential entry (issue #42) and the shared
+// Watchlist editor (issue #44).
 //
-// Only the credential form for now — the Watchlist editor, connection-status
-// panel and the live price rows arrive with the later slices.
+// The connection-status panel and the live price rows arrive with the later
+// slices.
 //
 // Nothing here stores or echoes a secret: the password inputs are read once at
 // submit, posted straight to /save_broker_credential, and cleared. The saved
@@ -23,7 +24,7 @@ function switchScannerSub(sub, btn) {
   document.getElementById("scsub-" + sub).style.display = "block";
   if (btn) btn.classList.add("active");
   _saveView("ws_scannerSub", sub);
-  if (sub === "live") loadBrokerCredentials();
+  if (sub === "live") { loadBrokerCredentials(); loadWatchlistCodes(); }
 }
 
 // Show only the selected broker's fields.
@@ -152,6 +153,101 @@ async function removeBrokerCredential(broker) {
   } catch (e) {
     _bcStatus("Remove failed: " + (e && e.message ? e.message : e), true);
   }
+}
+
+// ── Shared Watchlist ─────────────────────────────────────────────────────────
+//
+// One list for the whole app, not per-user: every watched code occupies a slot
+// in the shared connection pool, so an add can be rejected because someone
+// else filled the pool. The backend words that rejection (it knows the live
+// N/M counts), and we surface its message verbatim.
+
+function _wlStatus(msg, isError) {
+  const el = document.getElementById("wlStatus");
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = isError ? "var(--danger)" : "var(--muted)";
+}
+
+// "031100" -> ["031100"]; "031100, 031101" -> ["031100", "031101"]. Blank
+// pieces from a trailing comma or a double comma are dropped.
+function _wlParseCodes(raw) {
+  return raw.split(",").map(c => c.trim()).filter(c => c);
+}
+
+async function addWatchlistCodes() {
+  const input = document.getElementById("wlCodes");
+  const codes = _wlParseCodes(input ? input.value : "");
+  if (!codes.length) { _wlStatus("Enter a warrant code first.", true); return; }
+
+  const btn = document.getElementById("wlAddBtn");
+  btn.disabled = true;
+  _wlStatus("Adding…");
+  try {
+    const res = await api("/watchlist/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ codes }),
+    });
+    const data = await res.json();
+    // A full pool comes back as a 400 whose message already names the exact
+    // N/M counts — show it as-is rather than paraphrasing.
+    if (!res.ok || !data.ok) { _wlStatus(data.error || "Add failed", true); return; }
+    input.value = "";
+    const added = data.codes || [];
+    _wlStatus(added.length
+      ? `Added ${added.join(", ")}.`
+      : "Already on the watchlist.");
+    await loadWatchlistCodes();
+  } catch (e) {
+    _wlStatus("Add failed: " + (e && e.message ? e.message : e), true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function removeWatchlistCode(code) {
+  try {
+    const res = await api("/watchlist/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ codes: [code] }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) { _wlStatus(data.error || "Remove failed", true); return; }
+    // Refetch rather than just dropping the row: the freed capacity has to be
+    // real before the next add, and the list is shared so it may have moved.
+    _wlStatus(`Removed ${code}.`);
+    await loadWatchlistCodes();
+  } catch (e) {
+    _wlStatus("Remove failed: " + (e && e.message ? e.message : e), true);
+  }
+}
+
+async function loadWatchlistCodes() {
+  const container = document.getElementById("wlCodesContainer");
+  if (!container) return;
+  let codes = [];
+  try {
+    const res = await api("/watchlist/list");
+    const data = await res.json();
+    codes = (data && data.codes) || [];
+  } catch (e) {
+    container.innerHTML = '<div style="font-size:12px;color:var(--muted)">Could not load the watchlist.</div>';
+    return;
+  }
+  if (!codes.length) {
+    container.innerHTML = '<div style="font-size:12px;color:var(--muted)">No code watched yet.</div>';
+    return;
+  }
+  let html = '<table style="border-collapse:collapse;font-size:13px">'
+    + '<tr><th style="text-align:left;padding:4px 12px 4px 0">Code</th><th></th></tr>';
+  codes.forEach(code => {
+    const safe = String(code).replace(/[^0-9A-Za-z]/g, "");
+    html += `<tr><td style="padding:4px 12px 4px 0">${safe}</td>`
+      + `<td><button class="sm" onclick="removeWatchlistCode('${safe}')">Remove</button></td></tr>`;
+  });
+  container.innerHTML = html + "</table>";
 }
 
 // Re-apply the Screener/Live warrant choice saved before the last reload, the

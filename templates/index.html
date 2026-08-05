@@ -273,7 +273,7 @@
         </div>
 
         <!-- ── Live warrant sub-tab ── -->
-        <!-- Credential entry only for now. The Watchlist editor, connection-
+        <!-- Credential entry and the shared Watchlist editor. The connection-
              status panel and the live price rows land with the later slices. -->
         <div id="scsub-live" class="scsub-content" style="display:none">
           <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
@@ -329,6 +329,32 @@
           <div style="margin-top:16px">
             <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px">Saved credentials</div>
             <div id="bcSavedContainer"></div>
+          </div>
+
+          <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start;margin-top:20px">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-size:14px;font-weight:600;color:var(--text)">Watchlist</span>
+              <span style="font-size:12px;color:var(--muted)">Shared by everyone; a code starts streaming within a few seconds.</span>
+            </div>
+
+            <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
+              <label>Warrant code(s)
+                <input type="text" id="wlCodes" autocomplete="off"
+                       placeholder="031100 or 031100, 031101"
+                       onkeydown="if (event.key === 'Enter') { event.preventDefault(); addWatchlistCodes(); }" />
+              </label>
+
+              <div class="action-group compact">
+                <button class="primary" id="wlAddBtn" onclick="addWatchlistCodes()">Add</button>
+              </div>
+            </div>
+
+            <div id="wlStatus" style="font-size:12px;color:var(--muted)"></div>
+          </div>
+
+          <div style="margin-top:16px">
+            <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px">Watched codes</div>
+            <div id="wlCodesContainer"></div>
           </div>
         </div>
       </main>
