@@ -1,9 +1,14 @@
-"""Worker reconciliation: desired state in, broker logins and status rows out.
+"""Worker reconciliation: desired state in, broker logins, subscriptions out.
 
 Nothing real is touched — no broker, no network, no Supabase. The faked
 boundaries are the broker client classes (stand-ins that record login/logout)
 and the two desired_state calls the worker makes, which is the whole surface the
 worker has in this ticket: it logs in, it logs out, it reports what happened.
+
+The Watchlist half (#44) fakes the same boundaries one level up: the fake
+clients below record subscribe/unsubscribe, `pool.accounts_for` stands in for
+the stored Capacity Tiers, and the market-hours gate is forced, so the tests
+say what the worker CALLS on which connection rather than what a broker does.
 
 The real SDKs are deliberately not importable here (kgisuperpy / fubon_neo ship
 only in the worker image), which is exactly why broker_worker imports the client
@@ -17,6 +22,7 @@ from unittest.mock import patch
 import pytest
 
 import broker_worker
+from services.broker import pool
 from services.broker.base import BrokerConnectionError
 
 
@@ -34,6 +40,22 @@ class _FakeBrokerClient:
         self.logout_error = logout_error
         self.logged_in = False
         self.logged_out = False
+        self.subscribe_error = None
+        self.unsubscribe_error = None
+        self.subscribes = []      # each subscribe() call's codes, in order
+        self.unsubscribes = []    # each unsubscribe() call's codes, in order
+        self.on_tick = None
+
+    def subscribe(self, codes, on_tick):
+        self.subscribes.append(list(codes))
+        self.on_tick = on_tick
+        if self.subscribe_error:
+            raise self.subscribe_error
+
+    def unsubscribe(self, codes):
+        self.unsubscribes.append(list(codes))
+        if self.unsubscribe_error:
+            raise self.unsubscribe_error
 
     def login(self):
         if self.login_error:
@@ -80,6 +102,29 @@ def _brokers(worker, monkeypatch, **classes):
 
 def _row(user_id, broker, state):
     return {"user_id": user_id, "broker": broker, "desired_state": state}
+
+
+def _account(user_id, broker, symbols_per_connection=3, connections=1):
+    return pool.BrokerAccount(user_id=user_id, broker=broker,
+                              symbols_per_connection=symbols_per_connection,
+                              connections=connections)
+
+
+def _live(worker, monkeypatch, accounts, open_accounts=None):
+    """Open a fake session per account, and let the pool see the same accounts.
+
+    `open_accounts` defaults to all of them; pass a subset to model an account
+    whose credential is stored but whose session is not up.
+    """
+    monkeypatch.setattr(broker_worker, "is_market_open", lambda market: True)
+    monkeypatch.setattr(
+        broker_worker.pool, "accounts_for",
+        lambda user_ids: [a for a in accounts if a.user_id in set(user_ids)])
+    opened = accounts if open_accounts is None else open_accounts
+    clients = {(a.user_id, a.broker): _FakeBrokerClient(a.user_id, a.broker)
+               for a in opened}
+    worker._clients.update(clients)
+    return clients
 
 
 # ── connecting ───────────────────────────────────────────────────────────
@@ -313,7 +358,9 @@ def test_the_scheduler_runs_the_poll_and_the_heartbeat(worker):
     sched = broker_worker.build_scheduler(worker)
 
     intervals = sorted(j.trigger.interval.total_seconds() for j in sched.get_jobs())
-    assert intervals == [broker_worker.DESIRED_POLL_SEC, broker_worker.HEARTBEAT_SEC]
+    assert intervals == sorted([broker_worker.DESIRED_POLL_SEC,
+                                broker_worker.WATCHLIST_POLL_SEC,
+                                broker_worker.HEARTBEAT_SEC])
 
 
 def test_client_class_dispatches_to_the_real_clients_lazily():
@@ -336,3 +383,253 @@ def test_client_class_dispatches_to_the_real_clients_lazily():
 
     with pytest.raises(ValueError):
         broker_worker.client_class("etrade")
+
+
+# ── the watchlist poll (#44) ─────────────────────────────────────────────
+
+def test_a_new_code_is_subscribed_on_the_open_connection(worker, monkeypatch):
+    kgi = _live(worker, monkeypatch, [_account(USER, "kgi")])[(USER, "kgi")]
+
+    worker.apply_watchlist(["031234"])
+
+    assert kgi.subscribes == [["031234"]]
+    assert kgi.unsubscribes == []
+
+
+def test_ticks_have_somewhere_to_go(worker, monkeypatch):
+    """Placeholder consumer, but a real one: subscribe needs a callable."""
+    kgi = _live(worker, monkeypatch, [_account(USER, "kgi")])[(USER, "kgi")]
+
+    worker.apply_watchlist(["031234"])
+
+    assert kgi.on_tick is broker_worker._log_tick
+
+
+def test_an_edit_leaves_the_codes_that_did_not_change_alone(worker, monkeypatch):
+    """The whole point of diffing: a live subscription nobody touched is not
+    dropped and re-taken just because the list around it moved."""
+    kgi = _live(worker, monkeypatch, [_account(USER, "kgi")])[(USER, "kgi")]
+
+    worker.apply_watchlist(["031234"])
+    worker.apply_watchlist(["031234", "035678"])
+
+    assert kgi.subscribes == [["031234"], ["035678"]]
+    assert kgi.unsubscribes == []
+
+
+def test_a_removed_code_is_unsubscribed(worker, monkeypatch):
+    kgi = _live(worker, monkeypatch, [_account(USER, "kgi")])[(USER, "kgi")]
+
+    worker.apply_watchlist(["031234", "035678"])
+    worker.apply_watchlist(["031234"])
+
+    assert kgi.unsubscribes == [["035678"]]
+
+
+def test_an_unchanged_watchlist_costs_nothing(worker, monkeypatch):
+    """This runs every few seconds; a steady list must be a no-op."""
+    kgi = _live(worker, monkeypatch, [_account(USER, "kgi")])[(USER, "kgi")]
+
+    worker.apply_watchlist(["031234"])
+    worker.apply_watchlist(["031234"])
+    worker.apply_watchlist(["031234"])
+
+    assert kgi.subscribes == [["031234"]]
+    assert kgi.unsubscribes == []
+
+
+def test_a_second_connection_is_only_touched_once_the_first_is_full(worker, monkeypatch):
+    clients = _live(worker, monkeypatch,
+                    [_account(USER, "kgi", symbols_per_connection=2),
+                     _account(OTHER, "fubon", symbols_per_connection=2)])
+
+    worker.apply_watchlist(["031111", "032222"])
+
+    assert clients[(USER, "kgi")].subscribes == [["031111", "032222"]]
+    assert clients[(OTHER, "fubon")].subscribes == []
+
+
+def test_a_code_that_overflows_the_first_connection_lands_on_the_next(worker, monkeypatch):
+    clients = _live(worker, monkeypatch,
+                    [_account(USER, "kgi", symbols_per_connection=2),
+                     _account(OTHER, "fubon", symbols_per_connection=2)])
+
+    worker.apply_watchlist(["031111", "032222", "033333"])
+
+    assert clients[(USER, "kgi")].subscribes == [["031111", "032222"]]
+    assert clients[(OTHER, "fubon")].subscribes == [["033333"]]
+
+
+# ── which accounts the poll may plan against ─────────────────────────────
+
+def test_an_account_without_an_open_session_is_never_given_codes(worker, monkeypatch):
+    """Its Capacity Tier is real but unreachable: nothing here can subscribe on
+    a connection the worker is not holding a client for."""
+    accounts = [_account(USER, "kgi", symbols_per_connection=1),
+                _account(OTHER, "fubon", symbols_per_connection=5)]
+    clients = _live(worker, monkeypatch, accounts, open_accounts=accounts[:1])
+
+    worker.apply_watchlist(["031111", "032222"])
+
+    assert clients[(USER, "kgi")].subscribes == [["031111"]]
+    assert (OTHER, "fubon") not in clients
+    # 032222 did not fit the one reachable connection, and says so.
+    assert worker._rejected == {"032222"}
+
+
+def test_a_reconnected_account_picks_its_codes_up_on_the_next_poll(worker, monkeypatch):
+    accounts = [_account(USER, "kgi", symbols_per_connection=1),
+                _account(OTHER, "fubon", symbols_per_connection=5)]
+    _live(worker, monkeypatch, accounts, open_accounts=accounts[:1])
+    worker.apply_watchlist(["031111", "032222"])
+
+    fubon = _FakeBrokerClient(OTHER, "fubon")
+    worker._clients[(OTHER, "fubon")] = fubon
+    worker.apply_watchlist(["031111", "032222"])
+
+    assert fubon.subscribes == [["032222"]]
+    assert worker._rejected == set()
+
+
+def test_only_the_connections_the_worker_holds_count_as_capacity(worker, monkeypatch):
+    """A tier of 4 connections is 4 only if 4 are open; the worker opens one."""
+    clients = _live(worker, monkeypatch,
+                    [_account(USER, "kgi", symbols_per_connection=1, connections=4)])
+
+    worker.apply_watchlist(["031111", "032222"])
+
+    assert clients[(USER, "kgi")].subscribes == [["031111"]]
+    assert worker._rejected == {"032222"}
+
+
+def test_overflow_is_warned_about_rather_than_raised(worker, monkeypatch, caplog):
+    _live(worker, monkeypatch, [_account(USER, "kgi", symbols_per_connection=1)])
+
+    with caplog.at_level("WARNING", logger="broker_worker"):
+        worker.apply_watchlist(["031111", "032222"])
+
+    assert "032222" in caplog.text
+
+
+def test_an_unchanged_overflow_is_not_re_logged(worker, monkeypatch, caplog):
+    _live(worker, monkeypatch, [_account(USER, "kgi", symbols_per_connection=1)])
+    worker.apply_watchlist(["031111", "032222"])
+    caplog.clear()
+
+    with caplog.at_level("WARNING", logger="broker_worker"):
+        worker.apply_watchlist(["031111", "032222"])
+
+    assert "032222" not in caplog.text
+
+
+def test_losing_every_session_forgets_what_was_subscribed(worker, monkeypatch):
+    """The subscriptions died with the sessions, so the next poll must re-take
+    them rather than try to unsubscribe connections that are gone."""
+    _live(worker, monkeypatch, [_account(USER, "kgi")])
+    worker.apply_watchlist(["031234"])
+
+    worker._clients.clear()
+    worker.apply_watchlist(["031234"])
+    assert worker._current.slots == []
+
+    kgi = _FakeBrokerClient(USER, "kgi")
+    worker._clients[(USER, "kgi")] = kgi
+    worker.apply_watchlist(["031234"])
+
+    assert kgi.subscribes == [["031234"]]
+
+
+# ── market hours ─────────────────────────────────────────────────────────
+
+def test_the_poll_does_nothing_while_the_market_is_shut(worker, monkeypatch):
+    kgi = _live(worker, monkeypatch, [_account(USER, "kgi")])[(USER, "kgi")]
+    monkeypatch.setattr(broker_worker, "is_market_open", lambda market: False)
+    monkeypatch.setattr(broker_worker.watchlist, "list_codes",
+                        lambda: pytest.fail("read the watchlist out of hours"))
+
+    worker.poll_watchlist()
+
+    assert kgi.subscribes == []
+
+
+def test_the_poll_reads_the_shared_watchlist_during_market_hours(worker, monkeypatch):
+    kgi = _live(worker, monkeypatch, [_account(USER, "kgi")])[(USER, "kgi")]
+    monkeypatch.setattr(broker_worker.watchlist, "list_codes", lambda: ["031234"])
+
+    worker.poll_watchlist()
+
+    assert kgi.subscribes == [["031234"]]
+
+
+def test_the_poll_is_gated_on_the_warrant_market(worker, monkeypatch):
+    """tw_equity, like the warrant sync grid: a warrant trades on TWSE hours."""
+    asked = []
+    monkeypatch.setattr(broker_worker, "is_market_open",
+                        lambda market: asked.append(market) or False)
+
+    worker.poll_watchlist()
+
+    assert asked == ["tw_equity"]
+
+
+# ── failure isolation ────────────────────────────────────────────────────
+
+def test_one_connections_failed_subscribe_does_not_block_another(worker, monkeypatch):
+    clients = _live(worker, monkeypatch,
+                    [_account(USER, "kgi", symbols_per_connection=1),
+                     _account(OTHER, "fubon", symbols_per_connection=1)])
+    clients[(USER, "kgi")].subscribe_error = RuntimeError("websocket closed")
+
+    worker.apply_watchlist(["031111", "032222"])   # must not raise
+
+    assert clients[(OTHER, "fubon")].subscribes == [["032222"]]
+
+
+def test_a_refused_subscribe_is_retried_on_the_next_poll(worker, monkeypatch):
+    """Same contract as a failed login: the code comes back round again."""
+    kgi = _live(worker, monkeypatch, [_account(USER, "kgi")])[(USER, "kgi")]
+    kgi.subscribe_error = RuntimeError("websocket closed")
+    worker.apply_watchlist(["031234"])
+
+    kgi.subscribe_error = None
+    worker.apply_watchlist(["031234"])
+
+    assert kgi.subscribes == [["031234"], ["031234"]]
+
+
+def test_a_code_that_did_subscribe_is_not_retried_alongside_one_that_failed(worker, monkeypatch):
+    clients = _live(worker, monkeypatch,
+                    [_account(USER, "kgi", symbols_per_connection=1),
+                     _account(OTHER, "fubon", symbols_per_connection=1)])
+    clients[(USER, "kgi")].subscribe_error = RuntimeError("websocket closed")
+    worker.apply_watchlist(["031111", "032222"])
+
+    worker.apply_watchlist(["031111", "032222"])
+
+    assert clients[(OTHER, "fubon")].subscribes == [["032222"]]
+
+
+def test_one_connections_failed_unsubscribe_does_not_block_another(worker, monkeypatch):
+    clients = _live(worker, monkeypatch,
+                    [_account(USER, "kgi", symbols_per_connection=1),
+                     _account(OTHER, "fubon", symbols_per_connection=1)])
+    worker.apply_watchlist(["031111", "032222"])
+    clients[(USER, "kgi")].unsubscribe_error = RuntimeError("already gone")
+
+    worker.apply_watchlist([])   # must not raise
+
+    assert clients[(OTHER, "fubon")].unsubscribes == [["032222"]]
+
+
+def test_a_session_closed_mid_diff_is_skipped_not_crashed_on(worker, monkeypatch):
+    clients = _live(worker, monkeypatch,
+                    [_account(USER, "kgi", symbols_per_connection=1),
+                     _account(OTHER, "fubon", symbols_per_connection=1)])
+    worker.apply_watchlist(["031111", "032222"])
+
+    # The desired-state loop drops one session; the pool still plans for it
+    # because accounts_for is faked, which is the race this guards.
+    worker._clients.pop((USER, "kgi"))
+    worker.apply_watchlist([])
+
+    assert clients[(OTHER, "fubon")].unsubscribes == [["032222"]]

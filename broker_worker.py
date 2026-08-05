@@ -8,17 +8,22 @@ data, and it is not this one.
 
 Scope (issue #43): prove the credential path end to end — a credential typed
 into the Live warrant form (#42), Fernet-encrypted into Supabase, is read back
-here and actually logs in at the broker. That is the entire job. There is no
-watchlist, no tick subscription and no arb pipeline yet (#44/#45/#47 own those,
-per docs/adr/0001-live-warrant-reuses-shared-watchlist-and-pool.md), so this
-worker deliberately never calls `subscribe` — a successful `login()` is the
-whole proof surface, and plumbing ticks nothing reads would be scaffolding to
-delete.
+here and actually logs in at the broker.
+
+Scope (issue #44): keep those already-open sessions subscribed to the shared
+Watchlist. Edits take effect intraday, on connections that are already up, with
+no relogin (docs/adr/0002), so the worker reads the Watchlist on a tight
+interval while TWSE is open and applies the minimal diff `pool.reassign`
+computes. What a Tick then feeds is still nobody's job: the live-price cache and
+the SSE push that reads it are docs/adr/0003's, so ticks land in a debug log
+line for now (see `_log_tick`) rather than in a cache with no reader.
 
 What runs here, on its own BackgroundScheduler:
 
   desired_state    poll broker_desired_state and make the set of open broker
                    sessions match what users asked for (#43)
+  watchlist        poll the shared Watchlist and subscribe/unsubscribe the open
+                   sessions into agreement with it, market-hours only (#44)
   heartbeat        log that the process is alive and how many sessions it holds
 
 Reconciliation is per Broker Account and failure-isolated: one account's login
@@ -30,6 +35,7 @@ import os
 import signal
 import sys
 import threading
+from dataclasses import replace
 
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -38,10 +44,24 @@ from apscheduler.schedulers.background import BackgroundScheduler
 # Supabase service-role key, and db.py loads the repo-root .env at import.
 from services import db  # noqa: F401
 from services.broker import desired_state
+from services.broker import pool
+from services.broker import watchlist
 from services.broker.base import BrokerConnectionError
+# One pure weekday/time-of-day predicate, and the only thing this worker takes
+# from services/scheduler.py. The rule this module opens with is about that
+# scheduler's OBJECT and the fetchers it drives — none of which are touched by
+# reading a function that decides whether TWSE is open. Copying the trading
+# window here instead would give the repo two definitions of market hours, free
+# to drift; docs/adr/0002 asks for the existing gate reused, not reimplemented.
+from services.scheduler import is_market_open
 
 
 DESIRED_POLL_SEC = int(os.environ.get("WORKER_DESIRED_POLL_SEC", "20"))
+# Tight enough that a code typed into the Live warrant form starts ticking
+# before the user wonders whether it worked (docs/adr/0002), slow enough that
+# the poll is a few hundred cheap selects per session rather than a hammering:
+# the query is one indexed read of a table that holds tens of rows.
+WATCHLIST_POLL_SEC = int(os.environ.get("WORKER_WATCHLIST_POLL_SEC", "5"))
 HEARTBEAT_SEC = int(os.environ.get("WORKER_HEARTBEAT_SEC", "60"))
 
 logging.basicConfig(
@@ -81,6 +101,19 @@ class Worker:
         # worker's own view of what is connected; worker_status is the copy the
         # UI reads, written on every transition.
         self._clients = {}
+        # What is actually subscribed on which connection — the baseline every
+        # Watchlist diff is computed against. Empty at startup because a fresh
+        # process holds no sessions and therefore no subscriptions; from then on
+        # it only ever moves when this worker's own subscribe/unsubscribe calls
+        # move it. Note it is NOT a mirror of `_clients`: which connections
+        # exist is the desired-state loop's business, and reaches the Watchlist
+        # loop through `accounts` instead.
+        self._current = pool.Assignment()
+        # Codes the open pool has no room for, remembered so an unchanged
+        # overflow is not re-logged every few seconds. Unlike the two above it
+        # needs no lock: it is read and written by the Watchlist job alone,
+        # which runs on its own single-worker executor.
+        self._rejected = set()
 
     def poll_desired_state(self):
         self.reconcile(desired_state.list_all_desired_states())
@@ -166,6 +199,135 @@ class Worker:
             log.error("worker_status write failed for %s (%s) -> %s: %s: %s",
                       broker, _short(user_id), status, type(e).__name__, e)
 
+    def poll_watchlist(self):
+        """Fold the shared Watchlist into the open pool, while TWSE is open.
+
+        Gated on tw_equity, the same market the warrant sync grid runs under in
+        services/scheduler.py: a warrant is a TWSE-listed instrument and there
+        are no ticks to chase outside 09:00-13:30 TPE. The gate is checked here
+        rather than expressed in the trigger because a market-hours-aware
+        trigger is a lot of machinery to say `return`.
+        """
+        if not is_market_open("tw_equity"):
+            return
+        self.apply_watchlist(watchlist.list_codes())
+
+    def apply_watchlist(self, codes):
+        """Subscribe and unsubscribe the open connections into agreement with `codes`.
+
+        The pool planned against is exactly the Broker Accounts with an open
+        session right now, not every credentialed account. `reassign` places
+        codes on connections and this loop can only act on a connection it is
+        holding a client for, so handing it an account with spare Capacity Tier
+        and no live session would place codes on a connection nobody opened —
+        the "sits in the list looking watched and never ticks" state that
+        docs/adr/0002 exists to prevent. An account whose session is down is
+        therefore absent from the plan entirely, and comes back into it by
+        itself on the poll after the desired-state loop reconnects it.
+        """
+        with self._lock:
+            held = set(self._clients)
+            current = self._current
+
+        if not held:
+            # Nothing is connected, so nothing is subscribed anywhere: the
+            # sessions took their subscriptions down with them. Recording that
+            # is what stops the next poll from trying to unsubscribe slots on
+            # connections that no longer exist.
+            self._note_rejected([])
+            with self._lock:
+                self._current = pool.Assignment()
+            return
+
+        diff = pool.reassign(self._open_accounts(held), current, codes)
+
+        # Unsubscribes before subscribes, mirroring reconcile()'s
+        # closes-before-opens: a symbol freed on a full connection is what makes
+        # room for an add landing on that same connection in this same diff.
+        for op in diff.unsubscribes:
+            self._run_op("unsubscribe", op,
+                         lambda client, op=op: client.unsubscribe(list(op.codes)))
+
+        missed = set()
+        for op in diff.subscribes:
+            ok = self._run_op(
+                "subscribe", op,
+                lambda client, op=op: client.subscribe(list(op.codes), _log_tick))
+            if not ok:
+                missed.update(op.codes)
+
+        self._note_rejected(diff.rejected)
+        with self._lock:
+            self._current = _without(diff.assignment, missed)
+
+    def _open_accounts(self, held):
+        """The Broker Accounts this loop can actually place codes on.
+
+        `pool.accounts_for` answers with every stored account of the given
+        users, so it is filtered back down to the (user_id, broker) pairs that
+        are open — see apply_watchlist for why.
+
+        `connections` is capped at 1 for the same reason one step lower down:
+        the worker opens exactly one client per Broker Account (`_clients` is
+        keyed by the pair), so connections 2..n of a Capacity Tier are not open
+        and cannot carry a subscribe either. KNOWN GAP: that makes the capacity
+        this loop can fill narrower than the add-time check in
+        services/broker/watchlist.py, which counts the whole tier. The overflow
+        that creates surfaces in `rejected` and gets logged — never silently
+        dropped — and closes for good when the worker learns to open a client
+        per connection.
+        """
+        user_ids = sorted({user_id for user_id, _ in held})
+        return [
+            replace(account, connections=1)
+            for account in pool.accounts_for(user_ids)
+            if (account.user_id, account.broker) in held
+        ]
+
+    def _run_op(self, kind, op, action):
+        """Apply one SlotOp to its open client, reporting whether it took.
+
+        Never raises, per open()/close(): one broker refusing one subscribe must
+        not cost every op queued behind it, because both users' codes ride this
+        one loop and neither should be able to blank the other's prices.
+        """
+        with self._lock:
+            client = self._clients.get((op.user_id, op.broker))
+        codes = ", ".join(op.codes)
+        if client is None:
+            # The desired-state loop closed this session between the plan and
+            # now; its subscriptions went with it and there is nothing to call.
+            log.debug("%s skipped for %s (%s): no open session", kind, op.broker,
+                      _short(op.user_id))
+            return False
+        try:
+            action(client)
+        except Exception as e:
+            log.error("%s failed for %s (%s) on %s: %s: %s", kind, op.broker,
+                      _short(op.user_id), codes, type(e).__name__, e)
+            return False
+        log.info("%s %s on %s (%s)", kind, codes, op.broker, _short(op.user_id))
+        return True
+
+    def _note_rejected(self, rejected):
+        """Report codes the open pool has no room for, once per change.
+
+        Normally empty: the add route capacity-checks before a code ever reaches
+        the Watchlist table (services/broker/watchlist.py). It fills when
+        capacity shrinks under a list that already fitted — a session dropping,
+        a Capacity Tier edited down — which is a thing to say out loud, not to
+        raise on, and certainly not to repeat every few seconds.
+        """
+        current = set(rejected)
+        if current == self._rejected:
+            return
+        self._rejected = current
+        if current:
+            log.warning("watchlist over the open pool's capacity, not subscribed: %s",
+                        ", ".join(sorted(current)))
+        else:
+            log.info("watchlist fits the open pool again")
+
     def heartbeat(self):
         """Proof of life in Render's log stream, and what the process holds."""
         with self._lock:
@@ -181,6 +343,36 @@ class Worker:
             accounts = sorted(self._clients)
         for account in accounts:
             self.close(account)
+
+
+def _log_tick(tick):
+    """Where a Tick goes today: one debug line, and nowhere else.
+
+    KNOWN GAP, deliberately left open. Issue #44 asks that the open connections
+    track the Watchlist; it does not ask for a tick consumer, and the live-price
+    cache plus the SSE push that would read it are
+    docs/adr/0003-live-price-pushed-to-browser-via-sse.md's own ticket. Writing
+    a cache here that nothing reads would be scaffolding to delete. Subscriptions
+    are real from this ticket on, so that consumer drops straight in here.
+    """
+    log.debug("tick: %s", tick)
+
+
+def _without(assignment, codes):
+    """`assignment` minus `codes` — the ones whose subscribe did not take.
+
+    Leaving a refused code in the recorded state would have the next diff treat
+    it as already streaming and never try again. Dropping it makes that poll see
+    it as an add, which is how a failed login gets retried too. Unsubscribes get
+    no such treatment: like close()'s logout, a connection that errors on the
+    way out is still treated as let go.
+    """
+    if not codes:
+        return assignment
+    slots = [replace(slot, codes=tuple(c for c in slot.codes if c not in codes))
+             for slot in assignment.slots]
+    return pool.Assignment(slots=[slot for slot in slots if slot.codes],
+                           unassigned=assignment.unassigned)
 
 
 def _short(user_id):
@@ -204,18 +396,24 @@ def build_scheduler(worker):
 
     The desired-state poll gets its own single-worker executor because a login
     can block for seconds against a slow broker; sharing the default executor
-    would stall the heartbeat and make a busy worker look dead.
+    would stall the heartbeat and make a busy worker look dead. The Watchlist
+    poll gets a third for the same reason and its own: subscribe/unsubscribe are
+    SDK websocket calls that can block, and behind a login on the session
+    executor a 5-second poll would queue up behind a 20-second one.
     """
     sched = BackgroundScheduler(
         daemon=True,
         executors={
             "default": ThreadPoolExecutor(max_workers=1),
             "session": ThreadPoolExecutor(max_workers=1),
+            "watchlist": ThreadPoolExecutor(max_workers=1),
         },
         job_defaults={"max_instances": 1, "coalesce": True, "misfire_grace_time": 600},
     )
     sched.add_job(_job("desired_state", worker.poll_desired_state),
                   "interval", seconds=DESIRED_POLL_SEC, executor="session")
+    sched.add_job(_job("watchlist", worker.poll_watchlist),
+                  "interval", seconds=WATCHLIST_POLL_SEC, executor="watchlist")
     sched.add_job(_job("heartbeat", worker.heartbeat),
                   "interval", seconds=HEARTBEAT_SEC)
     return sched
@@ -230,7 +428,8 @@ def main():
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    log.info("broker worker starting pid=%s poll=%ss", os.getpid(), DESIRED_POLL_SEC)
+    log.info("broker worker starting pid=%s poll=%ss watchlist=%ss", os.getpid(),
+             DESIRED_POLL_SEC, WATCHLIST_POLL_SEC)
     worker = Worker()
 
     sched = build_scheduler(worker)
