@@ -227,6 +227,24 @@ def test_list_worker_status_is_scoped_to_the_user(store):
     assert [(r["broker"], r["status"]) for r in rows] == [("kgi", "connected")]
 
 
+def test_list_all_worker_status_spans_every_user(store):
+    """The status panel's read: one row per Broker Account, whoever owns it."""
+    desired_state.set_worker_status(USER, "kgi", "connected")
+    desired_state.set_worker_status(USER, "fubon", "reconnecting")
+    desired_state.set_worker_status(OTHER, "kgi", "stopped")
+
+    rows = desired_state.list_all_worker_status()
+    assert sorted((r["user_id"], r["broker"], r["status"]) for r in rows) == sorted(
+        [(USER, "kgi", "connected"), (USER, "fubon", "reconnecting"),
+         (OTHER, "kgi", "stopped")])
+    assert all(r["changed_at"] for r in rows)
+
+
+def test_list_all_worker_status_is_empty_until_a_worker_writes(store):
+    """Absence is the answer: an unreported account gets no invented row."""
+    assert desired_state.list_all_worker_status() == []
+
+
 def test_setting_desired_state_never_touches_worker_status(store):
     desired_state.set_desired_state(USER, "kgi", "connect")
     desired_state.set_desired_state(USER, "kgi", "disconnect")

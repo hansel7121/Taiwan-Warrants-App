@@ -136,3 +136,22 @@ def list_worker_status(user_id):
         .execute()
     )
     return r.data or []
+
+
+def list_all_worker_status():
+    """Every Broker Account's status, for the connection-status panel (issue #45).
+
+    The panel shows one row per account across all users — the pool is shared
+    (docs/adr/0001), so a user watching a code needs to see the account actually
+    carrying it even when it is somebody else's. Like list_all_desired_states
+    there is no caller to scope to; unlike it, this is read by the web app
+    rather than the worker. Accounts the worker has never reported on are simply
+    absent, per list_worker_status above.
+    """
+    r = db._run(
+        lambda c: c.table(STATUS_TABLE)
+        .select("user_id, broker, status, changed_at")
+        .order("user_id")
+        .execute()
+    )
+    return r.data or []

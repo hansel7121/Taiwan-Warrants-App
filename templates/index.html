@@ -273,8 +273,8 @@
         </div>
 
         <!-- ── Live warrant sub-tab ── -->
-        <!-- Credential entry and the shared Watchlist editor. The connection-
-             status panel and the live price rows land with the later slices. -->
+        <!-- Credential entry, the shared Watchlist editor, and the connection-
+             status panel. The live price rows land with a later slice. -->
         <div id="scsub-live" class="scsub-content" style="display:none">
           <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
             <div style="display:flex;align-items:center;gap:10px">
@@ -355,6 +355,16 @@
           <div style="margin-top:16px">
             <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px">Watched codes</div>
             <div id="wlCodesContainer"></div>
+          </div>
+
+          <!-- One row per Broker Account in the shared pool — everyone's, not
+               just yours, since any account may be carrying a watched code. -->
+          <div style="margin-top:20px">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+              <span style="font-size:14px;font-weight:600;color:var(--text)">Connections</span>
+              <span style="font-size:12px;color:var(--muted)">Refreshes when you open this tab.</span>
+            </div>
+            <div id="csContainer"></div>
           </div>
         </div>
       </main>

@@ -1,8 +1,7 @@
-// Live warrant sub-tab: broker credential entry (issue #42) and the shared
-// Watchlist editor (issue #44).
+// Live warrant sub-tab: broker credential entry (issue #42), the shared
+// Watchlist editor (issue #44), and the connection-status panel (issue #45).
 //
-// The connection-status panel and the live price rows arrive with the later
-// slices.
+// The live price rows arrive with a later slice.
 //
 // Nothing here stores or echoes a secret: the password inputs are read once at
 // submit, posted straight to /save_broker_credential, and cleared. The saved
@@ -24,7 +23,11 @@ function switchScannerSub(sub, btn) {
   document.getElementById("scsub-" + sub).style.display = "block";
   if (btn) btn.classList.add("active");
   _saveView("ws_scannerSub", sub);
-  if (sub === "live") { loadBrokerCredentials(); loadWatchlistCodes(); }
+  if (sub === "live") {
+    loadBrokerCredentials();
+    loadWatchlistCodes();
+    loadConnectionStatus();
+  }
 }
 
 // Show only the selected broker's fields.
@@ -246,6 +249,57 @@ async function loadWatchlistCodes() {
     const safe = String(code).replace(/[^0-9A-Za-z]/g, "");
     html += `<tr><td style="padding:4px 12px 4px 0">${safe}</td>`
       + `<td><button class="sm" onclick="removeWatchlistCode('${safe}')">Remove</button></td></tr>`;
+  });
+  container.innerHTML = html + "</table>";
+}
+
+// ── Connection status ────────────────────────────────────────────────────────
+//
+// One row per Broker Account in the shared pool — every user's, not just the
+// caller's, because any account may be carrying a code you watch. Rows are
+// labelled "(you)" rather than by owner: the backend has no user_id -> email
+// mapping to name anyone with.
+//
+// Fetched on tab activation like everything else here; the worker writes its
+// status on every transition, so reopening the tab is the refresh.
+
+const CS_COLOURS = {
+  connected:    "var(--success)",
+  reconnecting: "var(--accent)",
+  disconnected: "var(--danger)",
+  stopped:      "var(--muted)",
+};
+
+async function loadConnectionStatus() {
+  const container = document.getElementById("csContainer");
+  if (!container) return;
+  let rows = [];
+  try {
+    const res = await api("/broker/status");
+    rows = await res.json();
+  } catch (e) {
+    container.innerHTML = '<div style="font-size:12px;color:var(--muted)">Could not load connection status.</div>';
+    return;
+  }
+  if (!rows || !rows.length) {
+    container.innerHTML = '<div style="font-size:12px;color:var(--muted)">No broker account to connect yet.</div>';
+    return;
+  }
+  let html = '<table style="border-collapse:collapse;font-size:13px">'
+    + '<tr><th style="text-align:left;padding:4px 12px 4px 0">Account</th>'
+    + '<th style="text-align:left;padding:4px 12px 4px 0">Status</th>'
+    + '<th style="text-align:left;padding:4px 12px 4px 0">Subscribed</th></tr>';
+  rows.forEach(r => {
+    const account = r.broker.toUpperCase() + (r.is_you ? " (you)" : "");
+    const status = r.status || "not yet reported";
+    const colour = CS_COLOURS[r.status] || "var(--muted)";
+    // No status row at all means no worker has ever acted on this account, so
+    // printing its share of the watchlist would claim a subscription that has
+    // never existed.
+    const subscribed = r.status ? `${r.subscribed}/${r.capacity}` : `—/${r.capacity}`;
+    html += `<tr><td style="padding:4px 12px 4px 0">${account}</td>`
+      + `<td style="padding:4px 12px 4px 0;color:${colour}">${status}</td>`
+      + `<td style="padding:4px 12px 4px 0">${subscribed}</td></tr>`;
   });
   container.innerHTML = html + "</table>";
 }

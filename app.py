@@ -12,6 +12,7 @@ from services import store
 # Aliased: `credentials` alone reads as any credential in this module.
 from services.broker import credentials as broker_credentials
 from services.broker import desired_state
+from services.broker import pool as broker_pool
 from services.broker import watchlist
 from logic import arb_logic
 # Aliased: the route functions below are named iv_surface / close_quote.
@@ -491,6 +492,49 @@ def _set_broker_desired_state(state):
         return err
     desired_state.set_desired_state(g.user["id"], broker, state)
     return jsonify({"ok": True, "broker": broker, "desired_state": state})
+
+
+@app.route("/broker/status")
+@require_auth
+def broker_status():
+    """One row per Broker Account in the shared pool (issue #45).
+
+    Deliberately NOT scoped to g.user["id"], unlike the routes above: the pool
+    is shared (docs/adr/0001), so a code the caller watches may be streaming on
+    somebody else's account and a caller-only panel would show it as unwatched.
+    Rows carry `is_you` rather than an owner name because the app has no
+    user_id -> email mapping to render one.
+
+    `subscribed` is a single count per account, not a per-connection breakdown:
+    which of an account's connections carries a code is the pool's business, and
+    what the user needs is how full the account is. It is recomputed with the
+    same pool.assign the worker packs with rather than tracked separately, so
+    the panel cannot drift from how the pool is actually filled.
+
+    A missing worker_status row becomes a null status, not "disconnected": an
+    account no worker has ever reported on has not been observed to be down.
+    """
+    accounts = broker_pool.accounts_for(broker_credentials.list_all_user_ids())
+    assignment = broker_pool.assign(accounts, watchlist.list_codes())
+
+    subscribed = {}
+    for slot in assignment.slots:
+        key = (slot.user_id, slot.broker)
+        subscribed[key] = subscribed.get(key, 0) + len(slot.codes)
+
+    reported = {(row["user_id"], row["broker"]): row["status"]
+                for row in desired_state.list_all_worker_status()}
+
+    return jsonify([
+        {
+            "broker": account.broker,
+            "is_you": account.user_id == g.user["id"],
+            "status": reported.get((account.user_id, account.broker)),
+            "subscribed": subscribed.get((account.user_id, account.broker), 0),
+            "capacity": account.capacity,
+        }
+        for account in accounts
+    ])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
