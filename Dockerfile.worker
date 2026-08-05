@@ -1,0 +1,85 @@
+# Broker worker image (Render Background Worker, Singapore region).
+#
+# Only the WORKER is containerised. The web service stays on Render's native
+# Python runtime (see render.yaml) — nothing here affects it.
+#
+# Why Docker at all: KGI's SuperPy SDK needs its `libCGCrypt.so` signing
+# library installed at the SYSTEM level (chmod 755 + copied into
+# /lib/x86_64-linux-gnu/ on Ubuntu, /lib64/ on CentOS/RedHat) and KGI's own
+# cert-generation program run against it. That level of filesystem control
+# needs explicit RUN steps in an image; it is not reliable in a buildpack
+# runtime's build/run split.
+#
+# Issue #43: this image runs the real broker client code — broker_worker.py
+# polls broker_desired_state and actually logs in to KGI/Fubon with the
+# credential the user entered in the Live warrant form (#42). It is no longer
+# the Phase-0 heartbeat stub. Live ticks are still out of scope (#44/#45).
+
+FROM python:3.11-slim-bookworm
+
+# Faster, quieter, no .pyc clutter; unbuffered so Render's log stream is live.
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    # Days-to-expiry and every market-hours decision are computed against local
+    # "today"; west of Taiwan the local date lags and expired batches leak in.
+    TZ=Asia/Taipei \
+    # glibc per-thread malloc arenas balloon RSS under threaded workloads.
+    MALLOC_ARENA_MAX=2
+
+WORKDIR /app
+
+# Build toolchain for any wheels without a manylinux build, plus tzdata so the
+# TZ above actually resolves in a slim image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+# Same requirements.txt as the web service. kgisuperpy lives there (it is
+# harmless to install anywhere); fubon_neo cannot, because it is not on PyPI —
+# it is a manylinux abi3 wheel downloaded by hand from Fubon's TradeAPI site and
+# vendored under vendor/fubon/. Both are imported only by the worker.
+COPY requirements.txt ./
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+# TODO(vendoring): vendor the Fubon wheel and install it here, once the
+# file is committed (or fetched at build time from a private source):
+#
+#   COPY vendor/fubon/fubon_neo-2.2.8-*.whl /tmp/
+#   RUN pip install /tmp/fubon_neo-*.whl
+#
+# Left commented out for the same reason as libCGCrypt.so below: the binary is
+# not in the repo yet, and an install step pointing at a missing file fails the
+# build for everyone.
+
+# ---------------------------------------------------------------------------
+# TODO(vendoring): KGI SuperPy native dependency.
+#
+# KGI ships `libCGCrypt.so` with its SDK. Per KGI's SuperPy docs the install is:
+#
+#   COPY vendor/kgi/libCGCrypt.so /tmp/libCGCrypt.so
+#   RUN chmod 755 /tmp/libCGCrypt.so \
+#       && cp /tmp/libCGCrypt.so /lib/x86_64-linux-gnu/   # /lib64/ on CentOS/RedHat
+#
+# followed by KGI's cert-generation program (`KGI_CGCrypt genDat`) run against
+# the installed library to produce the per-account cert data.
+#
+# Deliberately left commented out: the .so is not vendored in this repo and the
+# cert step is run by hand against a real account. Adding the binary, the real
+# paths, and the cert-generation invocation is a manual step for the repo owner
+# — until it happens, KGI logins from this image will fail at the native layer
+# and land as 'disconnected'. Do not invent paths here before then.
+# ---------------------------------------------------------------------------
+
+COPY . .
+
+# Run as a non-root user; the KGI library install above is the only step that
+# needs root and it happens at build time.
+RUN useradd --create-home --uid 10001 worker \
+    && chown -R worker:worker /app
+USER worker
+
+CMD ["python", "-u", "broker_worker.py"]

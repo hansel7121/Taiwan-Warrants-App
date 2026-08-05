@@ -11,6 +11,7 @@ from services import db_suggestions
 from services import store
 # Aliased: `credentials` alone reads as any credential in this module.
 from services.broker import credentials as broker_credentials
+from services.broker import desired_state
 from logic import arb_logic
 # Aliased: the route functions below are named iv_surface / close_quote.
 from logic import iv_surface as iv_surface_logic
@@ -450,6 +451,45 @@ def remove_broker_credential():
         return err
     broker_credentials.remove_credential(g.user["id"], broker)
     return jsonify({"ok": True, "broker": broker})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Broker connect/disconnect — the control plane between this app and the broker
+# worker (issue #43).
+#
+# These routes only ever WRITE broker_desired_state, the user -> worker
+# direction. They never write worker_status: that table is the worker's own
+# report of what it achieved, and a status row is only trustworthy if the worker
+# is its sole author. Like the credential routes above, everything is scoped by
+# g.user["id"], so one user's click can never move another user's session.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.route("/broker/connect", methods=["POST"])
+@require_auth
+def broker_connect():
+    return _set_broker_desired_state("connect")
+
+
+@app.route("/broker/disconnect", methods=["POST"])
+@require_auth
+def broker_disconnect():
+    return _set_broker_desired_state("disconnect")
+
+
+def _set_broker_desired_state(state):
+    """Record the caller's connect/disconnect intent and return immediately.
+
+    Deliberately does not wait for, or touch, worker_status: the worker polls on
+    its own interval and may be asleep, mid-login, or out of market hours, so the
+    click can only ever record intent. What actually happened shows up in
+    worker_status once the worker has acted on it.
+    """
+    broker, err = _valid_broker(request.get_json(silent=True) or {})
+    if err:
+        return err
+    desired_state.set_desired_state(g.user["id"], broker, state)
+    return jsonify({"ok": True, "broker": broker, "desired_state": state})
 
 
 @app.route("/read_warrant", methods=["POST"])

@@ -42,3 +42,57 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+
+  # Broker worker (issue #43, part of the Live warrant epic #39).
+  #
+  # ADDITIVE ONLY: the web service above and the Supabase project are untouched
+  # — no migration, no cutover. This is a separate service that reads/writes the
+  # SAME Supabase project from a different region.
+  #
+  # WHY SINGAPORE: the live broker feed is the only latency-sensitive hop in the
+  # system. Everything else (page loads, the 15-min refresh grid) is not, so only
+  # the worker moves closer to the Taiwan brokers. It stays in Singapore from the
+  # start rather than being moved later, because relocating a service that holds
+  # live broker sessions means dropping them.
+  # NOTE: verify `singapore` is still Render's current region slug when the
+  # service is first created — slugs occasionally change and this file cannot
+  # be validated against Render's API offline.
+  #
+  # WHY DOCKER (the web service stays on the native Python runtime): KGI's
+  # SuperPy SDK needs libCGCrypt.so installed at the system level (chmod 755 +
+  # copy into /lib/x86_64-linux-gnu/) plus KGI's cert-generation program run
+  # against it. That needs explicit Dockerfile RUN steps, which a buildpack
+  # runtime's build/run split can't do reliably. See Dockerfile.worker.
+  #
+  # WHY autoDeploy: false: a worker restart drops EVERY live broker connection
+  # and forces a full relogin across every Broker Account. Deploys are triggered
+  # by hand from the Render dashboard, timed for a window when no session is
+  # live.
+  #
+  # WHY standard, not starter: sized up front rather than discovered
+  # empirically the way the web service's starter tightness was. Holding several
+  # live broker sessions has a far worse failure mode under memory pressure — a
+  # crashed session drops real trading coverage, not just one slow page.
+  # Right-size later against measured usage.
+  - type: worker
+    name: broker-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile.worker
+    dockerContext: .
+    region: singapore
+    plan: standard
+    autoDeploy: false
+    envVars:
+      # Market hours and days-to-expiry are computed against local "today".
+      - key: TZ
+        value: Asia/Taipei
+      - key: MALLOC_ARENA_MAX
+        value: "2"
+      # Same Supabase project as the web service, read from a new region.
+      # Paste these in the Render dashboard — never commit real values.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
