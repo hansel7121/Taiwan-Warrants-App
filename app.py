@@ -545,6 +545,8 @@ def broker_status():
 
 
 LIVE_PRICES_SSE_SEC = 1
+_SSE_MAX_STREAMS = int(os.environ.get("LIVE_PRICES_SSE_MAX_STREAMS", "4"))
+_sse_slots = threading.BoundedSemaphore(_SSE_MAX_STREAMS)
 
 
 @app.route("/live_prices/stream")
@@ -553,16 +555,27 @@ def live_prices_stream():
 
     Not @require_auth: EventSource cannot send an Authorization header, so the
     token arrives as ?token= and is checked by hand here.
+
+    Capped at `_SSE_MAX_STREAMS` concurrent streams (env
+    `LIVE_PRICES_SSE_MAX_STREAMS`, default 4) so a burst of open tabs cannot
+    exhaust every gunicorn thread and starve the rest of the app (single
+    worker, 8 threads — CLAUDE.md).
     """
     _user, err = auth.authenticate_for_stream()
     if err:
         body, status = err
         return jsonify(body), status
 
+    if not _sse_slots.acquire(blocking=False):
+        return jsonify({"error": "stream_capacity"}), 503
+
     def gen():
-        while True:
-            yield _live_prices_event()
-            time.sleep(LIVE_PRICES_SSE_SEC)
+        try:
+            while True:
+                yield _live_prices_event()
+                time.sleep(LIVE_PRICES_SSE_SEC)
+        finally:
+            _sse_slots.release()
 
     return Response(stream_with_context(gen()), mimetype="text/event-stream")
 

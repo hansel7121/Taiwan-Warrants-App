@@ -296,3 +296,54 @@ def test_an_allowlisted_token_streams(client, store, monkeypatch):
     assert r.status_code == 200
     assert r.mimetype == "text/event-stream"
     r.close()
+
+
+# -- stream capacity --------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def slots(monkeypatch):
+    """A fresh semaphore per test — `_sse_slots` is module-level global state,
+    and the route's generator is never driven here to release it."""
+    import threading
+
+    monkeypatch.setattr(
+        app_module, "_sse_slots",
+        threading.BoundedSemaphore(app_module._SSE_MAX_STREAMS))
+    yield app_module._sse_slots
+
+
+def test_a_stream_over_capacity_is_rejected(client, store, slots):
+    """Every open tab pins a gunicorn thread for its whole session, so the
+    (8-thread, single-worker) app has to refuse rather than starve."""
+    for _ in range(app_module._SSE_MAX_STREAMS):
+        assert slots.acquire(blocking=False)
+
+    r = client.get("/live_prices/stream")
+
+    assert r.status_code == 503
+    assert r.get_json() == {"error": "stream_capacity"}
+
+
+def test_a_freed_slot_lets_the_next_stream_in(client, store, slots):
+    for _ in range(app_module._SSE_MAX_STREAMS):
+        assert slots.acquire(blocking=False)
+    slots.release()
+
+    r = client.get("/live_prices/stream")
+
+    assert r.status_code == 200
+    assert r.mimetype == "text/event-stream"
+    r.close()
+
+
+def test_capacity_is_checked_after_auth(client, store, monkeypatch, slots):
+    """A full pool must not turn an unauthenticated request into a 503 — the
+    401 is the more useful answer, and a rejected caller takes no slot."""
+    monkeypatch.delenv("LOCAL_USER_ID", raising=False)
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    for _ in range(app_module._SSE_MAX_STREAMS):
+        assert slots.acquire(blocking=False)
+
+    r = client.get("/live_prices/stream")
+
+    assert r.status_code == 401
