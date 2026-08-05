@@ -1,0 +1,298 @@
+"""GET /live_prices/stream — the Live sub-tab's SSE price feed (issue #46).
+
+Same shape as test_broker_status_route.py: the real watchlist, pool,
+credentials and live_price modules run, and the only faked boundary is
+db._run / the supabase client (fakes borrowed from test_watchlist.py).
+
+The route's generator is an infinite loop, so it is never driven here — the
+tests call the single-frame builder `app._live_prices_event()` directly, the
+way test_live_price.py pins `_poll_once` instead of the poll thread. The
+route function itself is only exercised for its auth/response envelope.
+"""
+import json
+
+import pytest
+
+import app as app_module
+from services import auth, db
+from services.broker import desired_state, live_price
+
+from tests.services.test_watchlist import _FakeClient, _Store
+
+
+USER = "11111111-2222-3333-4444-555555555555"
+OTHER = "99999999-8888-7777-6666-555555555555"
+
+TS = "2026-08-04T13:29:59+08:00"
+
+
+@pytest.fixture
+def store(monkeypatch):
+    live_price._cache.invalidate()
+    s = _Store()
+    monkeypatch.setattr(db, "_run", lambda build: build(_FakeClient(s)))
+    yield s
+    live_price._cache.invalidate()
+
+
+@pytest.fixture
+def client(monkeypatch):
+    app_module.app.config["TESTING"] = True
+    monkeypatch.delenv("RENDER", raising=False)
+    monkeypatch.setenv("LOCAL_USER_ID", USER)
+    with app_module.app.test_client() as c:
+        yield c
+
+
+def _watch(store, *codes):
+    for code in codes:
+        store.table("watchlist").append({"code": code, "added_by": USER})
+
+
+def _tick(store, code, price=1.23, ts=TS, broker="kgi"):
+    """Put a tick in the web process's cache the way the poller would."""
+    store.table("live_prices").append(
+        {"code": code, "price": price, "ts": ts, "broker": broker})
+    live_price._poll_once()
+
+
+def _event():
+    """The decoded payload of one SSE frame."""
+    raw = app_module._live_prices_event()
+    assert raw.startswith("data: ") and raw.endswith("\n\n")
+    return json.loads(raw[len("data: "):])
+
+
+# -- which codes appear -----------------------------------------------------
+
+def test_a_watched_code_that_has_never_ticked_is_absent(store):
+    """"No tick yet" shows nothing (ADR-0005), so it must not arrive as a null
+    row the client would draw as a blank price."""
+    store.credit(USER, "kgi")
+    _watch(store, "030001")
+
+    assert _event() == {}
+
+
+def test_a_ticked_code_carries_price_ts_and_broker(store):
+    store.credit(USER, "kgi")
+    _watch(store, "030001")
+    _tick(store, "030001", price=2.5, broker="fubon")
+
+    row = _event()["030001"]
+    assert row["price"] == 2.5
+    assert row["broker"] == "fubon"
+
+
+def test_an_empty_watchlist_emits_an_empty_frame(store):
+    """Still a frame, not a skipped yield — the stream stays chatty enough for
+    the browser to notice it is alive."""
+    assert _event() == {}
+
+
+def test_every_ticked_code_is_in_one_frame(store):
+    store.credit(USER, "kgi", symbols_per_connection=4, connections=1)
+    _watch(store, "030001", "030002", "030003")
+    _tick(store, "030001")
+    _tick(store, "030002", price=4.5)
+
+    assert set(_event()) == {"030001", "030002"}
+
+
+# -- is_live comes from Worker Status ---------------------------------------
+
+def test_a_code_on_a_connected_account_is_live(store):
+    store.credit(USER, "kgi")
+    _watch(store, "030001")
+    _tick(store, "030001")
+    desired_state.set_worker_status(USER, "kgi", "connected")
+
+    assert _event()["030001"]["is_live"] is True
+
+
+def test_a_code_on_an_account_that_is_not_connected_is_not_live(store):
+    store.credit(USER, "kgi")
+    _watch(store, "030001")
+    _tick(store, "030001")
+    desired_state.set_worker_status(USER, "kgi", "reconnecting")
+
+    assert _event()["030001"]["is_live"] is False
+
+
+def test_a_never_reported_account_is_not_live(store):
+    store.credit(USER, "kgi")
+    _watch(store, "030001")
+    _tick(store, "030001")
+
+    assert _event()["030001"]["is_live"] is False
+
+
+def test_a_stale_price_is_still_sent_when_not_live(store):
+    """ADR-0005: a dropped connection marks the row stale, it does not clear
+    it — so the last tick has to survive is_live going false."""
+    store.credit(USER, "kgi")
+    _watch(store, "030001")
+    _tick(store, "030001", price=7.5)
+    desired_state.set_worker_status(USER, "kgi", "disconnected")
+
+    row = _event()["030001"]
+    assert row["price"] == 7.5 and row["is_live"] is False
+
+
+def test_liveness_is_per_connection_not_global(store):
+    """Two accounts, one healthy and one not, and one code on each."""
+    store.credit(USER, "kgi", symbols_per_connection=1, connections=1)
+    store.credit(OTHER, "fubon", symbols_per_connection=1, connections=1)
+    _watch(store, "030001", "030002")
+    _tick(store, "030001")
+    _tick(store, "030002")
+    desired_state.set_worker_status(USER, "kgi", "connected")
+    desired_state.set_worker_status(OTHER, "fubon", "reconnecting")
+
+    got = _event()
+    live = {code: row["is_live"] for code, row in got.items()}
+    assert sorted(live.values()) == [False, True]
+
+
+def test_a_cached_code_with_no_assigned_slot_is_not_live(store):
+    """Dropped from the Watchlist mid-stream, or past the pool's capacity: the
+    price is still cached but nothing is carrying it."""
+    store.credit(USER, "kgi", symbols_per_connection=1, connections=1)
+    _watch(store, "030001", "030002")
+    _tick(store, "030001")
+    _tick(store, "030002")
+    desired_state.set_worker_status(USER, "kgi", "connected")
+
+    assert _event()["030002"]["is_live"] is False
+
+
+def test_liveness_is_not_tick_recency(store):
+    """A code far past the cache TTL is live while its connection is up."""
+    store.credit(USER, "kgi")
+    _watch(store, "030001")
+    _tick(store, "030001", ts="2020-01-01T09:00:00+08:00")
+    desired_state.set_worker_status(USER, "kgi", "connected")
+
+    assert _event()["030001"]["is_live"] is True
+
+
+# -- serialization ----------------------------------------------------------
+
+def test_the_timestamp_is_sent_as_a_parseable_string(store):
+    """JSON has no datetime; the client needs the offset kept to show a Taipei
+    trade time rather than reading it as UTC."""
+    from datetime import datetime
+
+    store.credit(USER, "kgi")
+    _watch(store, "030001")
+    _tick(store, "030001", ts=TS)
+
+    sent = _event()["030001"]["ts"]
+    assert isinstance(sent, str)
+    assert datetime.fromisoformat(sent) == datetime.fromisoformat(TS)
+
+
+def test_a_frame_is_one_sse_data_event(store):
+    store.credit(USER, "kgi")
+    _watch(store, "030001")
+    _tick(store, "030001")
+
+    raw = app_module._live_prices_event()
+
+    assert raw.startswith("data: ")
+    assert raw.endswith("\n\n")
+    assert raw.count("\n\n") == 1
+
+
+# -- the route never writes -------------------------------------------------
+
+def test_building_a_frame_writes_nothing(store):
+    store.credit(USER, "kgi")
+    _watch(store, "030001")
+    _tick(store, "030001")
+    store.ops.clear()
+
+    _event()
+
+    assert [op for op in store.ops if op[1] != "select"] == []
+
+
+# -- auth -------------------------------------------------------------------
+
+def test_local_mode_streams_without_a_token(client, store):
+    r = client.get("/live_prices/stream")
+
+    assert r.status_code == 200
+    assert r.mimetype == "text/event-stream"
+    r.close()   # the generator never ends on its own
+
+
+def test_no_token_is_rejected_when_auth_is_on(client, store, monkeypatch):
+    """EventSource cannot send an Authorization header, so an absent ?token= is
+    the missing-credential case here — not an absent Bearer header."""
+    monkeypatch.delenv("LOCAL_USER_ID", raising=False)
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+
+    r = client.get("/live_prices/stream")
+
+    assert r.status_code == 401
+    assert r.get_json() == {"error": "missing_token"}
+
+
+def test_a_bearer_header_is_not_accepted_in_place_of_the_query_param(client, store,
+                                                                    monkeypatch):
+    monkeypatch.delenv("LOCAL_USER_ID", raising=False)
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+
+    r = client.get("/live_prices/stream", headers={"Authorization": "Bearer abc"})
+
+    assert r.status_code == 401
+    assert r.get_json() == {"error": "missing_token"}
+
+
+def test_unconfigured_auth_is_a_503(client, store, monkeypatch):
+    monkeypatch.delenv("LOCAL_USER_ID", raising=False)
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+
+    r = client.get("/live_prices/stream")
+
+    assert r.status_code == 503
+
+
+def test_a_bad_token_is_rejected(client, store, monkeypatch):
+    """No Supabase project to verify against, so the verify step is faked at
+    services.auth._verify — the mapping of failure to 401 is what matters."""
+    monkeypatch.delenv("LOCAL_USER_ID", raising=False)
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setattr(auth, "_verify",
+                        lambda t: (_ for _ in ()).throw(ValueError("bad sig")))
+
+    r = client.get("/live_prices/stream?token=nonsense")
+
+    assert r.status_code == 401
+    assert r.get_json() == {"error": "invalid_token"}
+
+
+def test_a_valid_token_off_the_allowlist_is_forbidden(client, store, monkeypatch):
+    monkeypatch.delenv("LOCAL_USER_ID", raising=False)
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setattr(auth, "_verify", lambda t: {"sub": OTHER, "email": "x@y.z"})
+    monkeypatch.setattr(auth, "_is_allowed", lambda email: False)
+
+    r = client.get("/live_prices/stream?token=good")
+
+    assert r.status_code == 403
+    assert r.get_json() == {"error": "not_allowed"}
+
+
+def test_an_allowlisted_token_streams(client, store, monkeypatch):
+    monkeypatch.delenv("LOCAL_USER_ID", raising=False)
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setattr(auth, "_verify", lambda t: {"sub": OTHER, "email": "x@y.z"})
+    monkeypatch.setattr(auth, "_is_allowed", lambda email: True)
+
+    r = client.get("/live_prices/stream?token=good")
+
+    assert r.status_code == 200
+    assert r.mimetype == "text/event-stream"
+    r.close()

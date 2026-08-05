@@ -14,9 +14,14 @@ Scope (issue #44): keep those already-open sessions subscribed to the shared
 Watchlist. Edits take effect intraday, on connections that are already up, with
 no relogin (docs/adr/0002), so the worker reads the Watchlist on a tight
 interval while TWSE is open and applies the minimal diff `pool.reassign`
-computes. What a Tick then feeds is still nobody's job: the live-price cache and
-the SSE push that reads it are docs/adr/0003's, so ticks land in a debug log
-line for now (see `_log_tick`) rather than in a cache with no reader.
+computes.
+
+Scope (issue #46): give the Ticks those subscriptions produce somewhere to go.
+This process and the Flask app are separate Render services sharing no memory,
+so every tick is upserted into `live_prices` (supabase/migrations/009) — one row
+per code, latest price wins. The web process follows that table over Supabase
+Realtime and pushes it to browsers as SSE (docs/adr/0003); writing the relay is
+where this worker's part ends. See `_relay_tick`.
 
 What runs here, on its own BackgroundScheduler:
 
@@ -63,6 +68,9 @@ DESIRED_POLL_SEC = int(os.environ.get("WORKER_DESIRED_POLL_SEC", "20"))
 # the query is one indexed read of a table that holds tens of rows.
 WATCHLIST_POLL_SEC = int(os.environ.get("WORKER_WATCHLIST_POLL_SEC", "5"))
 HEARTBEAT_SEC = int(os.environ.get("WORKER_HEARTBEAT_SEC", "60"))
+# The worker->web relay for live prices (supabase/migrations/009). Named here
+# rather than in a services/ module because this file is its only writer.
+LIVE_PRICES_TABLE = "live_prices"
 
 logging.basicConfig(
     level=os.environ.get("WORKER_LOG_LEVEL", "INFO"),
@@ -252,7 +260,7 @@ class Worker:
         for op in diff.subscribes:
             ok = self._run_op(
                 "subscribe", op,
-                lambda client, op=op: client.subscribe(list(op.codes), _log_tick))
+                lambda client, op=op: client.subscribe(list(op.codes), _relay_tick))
             if not ok:
                 missed.update(op.codes)
 
@@ -345,17 +353,40 @@ class Worker:
             self.close(account)
 
 
-def _log_tick(tick):
-    """Where a Tick goes today: one debug line, and nowhere else.
+def _relay_tick(tick):
+    """Publish one Tick to the live-price relay the web process reads.
 
-    KNOWN GAP, deliberately left open. Issue #44 asks that the open connections
-    track the Watchlist; it does not ask for a tick consumer, and the live-price
-    cache plus the SSE push that would read it are
-    docs/adr/0003-live-price-pushed-to-browser-via-sse.md's own ticket. Writing
-    a cache here that nothing reads would be scaffolding to delete. Subscriptions
-    are real from this ticket on, so that consumer drops straight in here.
+    Called on the SDK's own callback thread, once per print, for every code in
+    the shared Watchlist — so it stays one upsert and nothing else.
+
+    Keyed on `code`, so the row for a code is overwritten rather than appended
+    to: `live_prices` is a cache of the latest price per watched code, not a
+    tick history (supabase/migrations/009_live_prices.sql). `ts` is the tick's
+    own exchange timestamp rather than db._now(), because a consumer judging
+    whether a price is stale must measure against when the trade printed, not
+    against when this write happened.
+
+    No try/except, per the thin-wrapper convention services/broker/desired_state
+    documents: a raise lands in the SDK's callback thread rather than in the
+    poll loop, and swallowing it here would silently freeze prices at their last
+    good value with nothing in the log to say so.
     """
-    log.debug("tick: %s", tick)
+    log.debug("tick -> %s: %s", LIVE_PRICES_TABLE, tick)
+    row = {
+        "code": tick.code,
+        "price": tick.price,
+        # Both clients build this datetime tz-aware (kgi_client and
+        # fubon_client's _tick_time), so the string carries an explicit offset
+        # and Postgres stores the instant the trade actually printed, whatever
+        # timezone the worker container happens to run on.
+        "ts": tick.ts.isoformat(),
+        "broker": tick.broker,
+    }
+    db._run(
+        lambda c: c.table(LIVE_PRICES_TABLE)
+        .upsert(row, on_conflict="code")
+        .execute()
+    )
 
 
 def _without(assignment, codes):

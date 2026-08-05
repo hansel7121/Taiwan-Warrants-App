@@ -18,10 +18,16 @@ Credential dict keys: `person_id`, `person_pwd` (the SDK's own names), plus the
 Capacity Tier columns every stored credential carries.
 """
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import kgisuperpy
 
 from services.broker.base import BrokerClient, BrokerConnectionError, Tick
+
+
+# TWSE trades in exactly one timezone, so every KGI timestamp is Taipei
+# wall-clock time — see _tick_time.
+_TPE = ZoneInfo("Asia/Taipei")
 
 
 class KGIClient(BrokerClient):
@@ -101,8 +107,16 @@ def _tick_time(raw):
     a compiled extension, so it has not been seen against a live account. A
     parse failure must not kill the tick — a slightly late timestamp is a far
     better outcome than a dropped price — hence the one fallback here.
+
+    The result is always tz-aware. A parsed string carries no offset (TWSE has
+    only one timezone, so KGI has no reason to print one), and `.replace` labels
+    that wall-clock value as Taipei without shifting it — `.astimezone` would be
+    wrong here, since it would first read the naive value as *container* local
+    time. Storing the timestamp (broker_worker._relay_tick calls .isoformat())
+    is only correct if the offset is explicit rather than ambient.
     """
     try:
-        return datetime.fromisoformat(str(raw))
+        parsed = datetime.fromisoformat(str(raw))
     except (TypeError, ValueError):
-        return datetime.now()
+        return datetime.now(_TPE)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=_TPE)

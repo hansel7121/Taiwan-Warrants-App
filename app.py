@@ -1,4 +1,5 @@
-from flask import Flask, render_template, request, jsonify, Response, g
+from flask import (Flask, render_template, request, jsonify, Response,
+                   stream_with_context, g)
 from services import applog
 from logic import warrant_logic
 from logic import options_logic
@@ -12,6 +13,7 @@ from services import store
 # Aliased: `credentials` alone reads as any credential in this module.
 from services.broker import credentials as broker_credentials
 from services.broker import desired_state
+from services.broker import live_price
 from services.broker import pool as broker_pool
 from services.broker import watchlist
 from logic import arb_logic
@@ -535,6 +537,66 @@ def broker_status():
         }
         for account in accounts
     ])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Live prices — SSE stream of the Watchlist's latest ticks (issue #46).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+LIVE_PRICES_SSE_SEC = 1
+
+
+@app.route("/live_prices/stream")
+def live_prices_stream():
+    """Push the live-price cache to the browser once a second, forever.
+
+    Not @require_auth: EventSource cannot send an Authorization header, so the
+    token arrives as ?token= and is checked by hand here.
+    """
+    _user, err = auth.authenticate_for_stream()
+    if err:
+        body, status = err
+        return jsonify(body), status
+
+    def gen():
+        while True:
+            yield _live_prices_event()
+            time.sleep(LIVE_PRICES_SSE_SEC)
+
+    return Response(stream_with_context(gen()), mimetype="text/event-stream")
+
+
+def _live_prices_event():
+    """One SSE frame: every watched code that has ever ticked, plus is_live.
+
+    Codes never seen are omitted entirely rather than sent as null (ADR-0005 —
+    "nothing yet" is not a price), so an all-quiet Watchlist emits `data: {}`;
+    the client keeps whatever it last drew.
+
+    is_live comes from the Worker Status of the connection carrying the code
+    (pool.live_status), not from tick age. A cached code with no assigned slot
+    — dropped from the Watchlist mid-stream — is simply not live.
+    """
+    codes = watchlist.list_codes()
+    prices = live_price.snapshot(codes)
+    live = {}
+    if prices:
+        accounts = broker_pool.accounts_for(broker_credentials.list_all_user_ids())
+        assignment = broker_pool.assign(accounts, codes)
+        live = broker_pool.live_status(assignment,
+                                       desired_state.list_all_worker_status())
+
+    payload = {
+        code: {
+            "price": value["price"],
+            "ts": value["ts"].isoformat(),
+            "broker": value["broker"],
+            "is_live": bool(live.get(code)),
+        }
+        for code, value in prices.items()
+    }
+    return f"data: {json.dumps(payload)}\n\n"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1263,6 +1325,10 @@ if __name__ == "__main__":
         scheduler.start()
     else:
         print("SCHED: disabled (set ENABLE_SCHEDULER=1 to enable)", flush=True)
+    # Ungated, unlike the scheduler — see wsgi.py for why. Started here (and
+    # only here) rather than at import so `import app` in the test suite never
+    # spawns a thread that talks to Supabase.
+    live_price.start()
     print("Step 1: resolving port", flush=True)
     port = _resolve_port(int(os.environ.get("PORT", 5001)))
     print(f"Step 2: starting browser timer (port {port})", flush=True)

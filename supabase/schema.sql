@@ -287,3 +287,25 @@ alter table watchlist enable row level security;
 -- user may read and edit the shared list.
 create policy "any authenticated user" on watchlist for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 grant all on watchlist to service_role;
+
+-- Live-price relay (Live warrant sub-tab; migration 009).
+--
+-- broker_worker.py and app.py are separate Render services with no shared
+-- memory, so a Tick (services/broker/base.py) can't reach the web process
+-- directly. The worker upserts each tick here; the web process polls this
+-- table (services/broker/live_price.py) into an in-process cache that the
+-- SSE endpoint streams to browsers.
+--
+-- code is the primary key, not a surrogate id: this is a live CACHE, not a
+-- tick history. One row per watched code, so the table stays the size of the
+-- Watchlist no matter how many ticks pass through it.
+create table if not exists live_prices (
+  code text primary key,
+  price double precision not null,
+  -- The tick's own exchange timestamp, not the row's write time — no default now().
+  ts timestamptz not null,
+  broker text not null
+);
+alter table live_prices enable row level security;
+-- md_* pattern: service-role only, no policy. Never add one.
+grant all on live_prices to service_role;

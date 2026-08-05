@@ -84,6 +84,48 @@ def _is_allowed(email):
     return ok
 
 
+def _authenticate_token(token):
+    """(user, None) if `token` verifies and is allowlisted, else (None, error)."""
+    try:
+        claims = _verify(token)
+    except Exception:
+        return None, "invalid_token"
+    email = claims.get("email")
+    if not _is_allowed(email):
+        return None, "not_allowed"
+    return {"id": claims.get("sub"), "email": email}, None
+
+
+def _local_user():
+    """The fixed user a local no-login instance acts as."""
+    return {
+        "id": os.environ["LOCAL_USER_ID"],
+        "email": os.environ.get("LOCAL_USER_EMAIL", "local@localhost"),
+    }
+
+
+_ERROR_STATUS = {"invalid_token": 401, "not_allowed": 403}
+
+
+def authenticate_for_stream():
+    """(user, None) or (None, (body, status)) for a JWT passed as ?token=.
+
+    EventSource cannot set an Authorization header, so the SSE route reads the
+    token from the query string instead of going through require_auth.
+    """
+    if local_mode():
+        return _local_user(), None
+    if not os.environ.get("SUPABASE_URL"):
+        return None, ({"error": "auth not configured"}, 503)
+    token = request.args.get("token", "").strip()
+    if not token:
+        return None, ({"error": "missing_token"}, 401)
+    user, err = _authenticate_token(token)
+    if err:
+        return None, ({"error": err}, _ERROR_STATUS[err])
+    return user, None
+
+
 def require_auth(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -91,24 +133,16 @@ def require_auth(fn):
             # Local redundancy instance: act as the fixed LOCAL_USER_ID, skipping
             # token verification and the allowlist entirely. Guarded by RENDER so
             # this branch is dead on production.
-            g.user = {
-                "id": os.environ["LOCAL_USER_ID"],
-                "email": os.environ.get("LOCAL_USER_EMAIL", "local@localhost"),
-            }
+            g.user = _local_user()
             return fn(*args, **kwargs)
         if not os.environ.get("SUPABASE_URL"):
             return jsonify({"error": "auth not configured"}), 503
         header = request.headers.get("Authorization", "")
         if not header.startswith("Bearer "):
             return jsonify({"error": "missing_token"}), 401
-        token = header[7:].strip()
-        try:
-            claims = _verify(token)
-        except Exception:
-            return jsonify({"error": "invalid_token"}), 401
-        email = claims.get("email")
-        if not _is_allowed(email):
-            return jsonify({"error": "not_allowed"}), 403
-        g.user = {"id": claims.get("sub"), "email": email}
+        user, err = _authenticate_token(header[7:].strip())
+        if err:
+            return jsonify({"error": err}), _ERROR_STATUS[err]
+        g.user = user
         return fn(*args, **kwargs)
     return wrapper

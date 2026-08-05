@@ -7,6 +7,7 @@ import os
 
 from services import memlog
 from services import scheduler
+from services.broker import live_price
 from app import app
 
 memlog.log_baseline("boot")
@@ -21,3 +22,12 @@ if os.environ.get("ENABLE_SCHEDULER") == "1":
     scheduler.start()
 else:
     print("SCHED: disabled (set ENABLE_SCHEDULER=1 to enable)", flush=True)
+
+# The Live-warrant price poller is NOT gated the way the scheduler is.
+# ENABLE_SCHEDULER exists to keep the memory-hungry pandas refresh jobs off a
+# 512 MB host; this thread does one `select *` on live_prices — a handful of
+# rows, bounded by Watchlist capacity — and holds only the latest tick per code.
+# The Live-warrant tab shows nothing at all without it, so it has to be up
+# whenever the web process is rather than opt-in. Daemon thread; the port is
+# bound as usual. See services/broker/live_price.py.
+live_price.start()

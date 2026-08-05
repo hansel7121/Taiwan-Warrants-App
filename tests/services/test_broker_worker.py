@@ -10,6 +10,11 @@ clients below record subscribe/unsubscribe, `pool.accounts_for` stands in for
 the stored Capacity Tiers, and the market-hours gate is forced, so the tests
 say what the worker CALLS on which connection rather than what a broker does.
 
+The tick half (#46) fakes one boundary lower still: db._run, borrowed from
+test_watchlist.py so there is one fake Supabase client in the suite rather than
+two. A tick handed to the callback the worker actually registers must come out
+as a live_prices row.
+
 The real SDKs are deliberately not importable here (kgisuperpy / fubon_neo ship
 only in the worker image), which is exactly why broker_worker imports the client
 modules inside client_class() rather than at module scope. One test below pins
@@ -17,13 +22,16 @@ that down by injecting stub SDK modules and checking the dispatch resolves.
 """
 import sys
 import types
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
 
 import broker_worker
+from services import db
 from services.broker import pool
-from services.broker.base import BrokerConnectionError
+from services.broker.base import BrokerConnectionError, Tick
+from tests.services.test_watchlist import _FakeClient, _Store
 
 
 USER = "11111111-2222-3333-4444-555555555555"
@@ -396,13 +404,13 @@ def test_a_new_code_is_subscribed_on_the_open_connection(worker, monkeypatch):
     assert kgi.unsubscribes == []
 
 
-def test_ticks_have_somewhere_to_go(worker, monkeypatch):
-    """Placeholder consumer, but a real one: subscribe needs a callable."""
+def test_ticks_are_pointed_at_the_relay(worker, monkeypatch):
+    """What a subscribe hands the broker is the thing that writes live_prices."""
     kgi = _live(worker, monkeypatch, [_account(USER, "kgi")])[(USER, "kgi")]
 
     worker.apply_watchlist(["031234"])
 
-    assert kgi.on_tick is broker_worker._log_tick
+    assert kgi.on_tick is broker_worker._relay_tick
 
 
 def test_an_edit_leaves_the_codes_that_did_not_change_alone(worker, monkeypatch):
@@ -633,3 +641,71 @@ def test_a_session_closed_mid_diff_is_skipped_not_crashed_on(worker, monkeypatch
     worker.apply_watchlist([])
 
     assert clients[(OTHER, "fubon")].unsubscribes == [["032222"]]
+
+
+# ── the live-price relay (#46) ───────────────────────────────────────────
+
+@pytest.fixture
+def store(monkeypatch):
+    """A fake Supabase, so a tick's write lands somewhere a test can read."""
+    s = _Store()
+    monkeypatch.setattr(db, "_run", lambda build: build(_FakeClient(s)))
+    return s
+
+
+def _tick(code="031234", price=1.23, broker="kgi"):
+    return Tick(code=code, price=price, broker=broker,
+                ts=datetime(2026, 8, 4, 5, 30, 0, tzinfo=timezone.utc))
+
+
+def test_a_tick_is_written_to_the_live_price_relay(worker, monkeypatch, store):
+    """The whole point: a print in the worker becomes a row the web app can read."""
+    kgi = _live(worker, monkeypatch, [_account(USER, "kgi")])[(USER, "kgi")]
+    worker.apply_watchlist(["031234"])
+
+    kgi.on_tick(_tick())
+
+    assert store.table("live_prices") == [{
+        "code": "031234",
+        "price": 1.23,
+        "ts": "2026-08-04T05:30:00+00:00",
+        "broker": "kgi",
+    }]
+
+
+def test_the_relay_keeps_one_row_per_code(store):
+    """It is a cache, not a tick history: the next print overwrites the last.
+
+    Also pins the conflict key: the fake falls back to (user_id, broker) when a
+    caller passes no on_conflict, and live_prices has neither column.
+    """
+    broker_worker._relay_tick(_tick(price=1.23))
+    broker_worker._relay_tick(_tick(price=1.45))
+
+    rows = store.table("live_prices")
+    assert len(rows) == 1
+    assert rows[0]["price"] == 1.45
+
+
+def test_two_codes_get_two_rows(store):
+    broker_worker._relay_tick(_tick(code="031111"))
+    broker_worker._relay_tick(_tick(code="032222"))
+
+    assert sorted(r["code"] for r in store.table("live_prices")) == ["031111", "032222"]
+
+
+def test_the_writing_broker_is_recorded(store):
+    """Which connection produced the print, straight off the Tick."""
+    broker_worker._relay_tick(_tick(broker="fubon"))
+
+    assert store.table("live_prices")[0]["broker"] == "fubon"
+
+
+def test_a_failed_write_is_not_swallowed_here(store, monkeypatch):
+    """Thin wrapper, per desired_state: the caller decides, and the SDK callback
+    thread logging a traceback beats prices silently freezing."""
+    monkeypatch.setattr(db, "_run", lambda build: (_ for _ in ()).throw(
+        ConnectionError("supabase unreachable")))
+
+    with pytest.raises(ConnectionError):
+        broker_worker._relay_tick(_tick())

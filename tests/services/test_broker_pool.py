@@ -388,3 +388,97 @@ def test_empty_watchlist_unsubscribes_everything():
     assert [op.codes for op in diff.unsubscribes] == [("031100", "031101"), ("031102",)]
     assert diff.subscribes == []
     assert diff.assignment.slots == []
+
+
+# ── live status ──────────────────────────────────────────────────────────────
+
+
+def _status(user_id, broker, status):
+    return {
+        "user_id": user_id,
+        "broker": broker,
+        "status": status,
+        "changed_at": "2026-08-04T01:00:00+00:00",
+    }
+
+
+def test_code_on_a_connected_account_is_live():
+    accounts = [_account(IAN, "kgi", symbols=2, connections=1)]
+    assignment = pool.assign(accounts, _codes(2))
+
+    live = pool.live_status(assignment, [_status(IAN, "kgi", "connected")])
+
+    assert live == {"031100": True, "031101": True}
+
+
+@pytest.mark.parametrize("status", ["stopped", "reconnecting", "disconnected"])
+def test_code_on_an_account_that_is_not_connected_is_not_live(status):
+    accounts = [_account(IAN, "kgi", symbols=2, connections=1)]
+    assignment = pool.assign(accounts, _codes(2))
+
+    live = pool.live_status(assignment, [_status(IAN, "kgi", status)])
+
+    assert live == {"031100": False, "031101": False}
+
+
+def test_account_the_worker_never_reported_on_is_not_live():
+    accounts = [_account(IAN, "kgi", symbols=2, connections=1)]
+    assignment = pool.assign(accounts, _codes(2))
+
+    live = pool.live_status(assignment, [])
+
+    assert live == {"031100": False, "031101": False}
+
+
+def test_unassigned_code_is_absent_rather_than_false():
+    accounts = [_account(IAN, "kgi", symbols=1, connections=1)]
+    assignment = pool.assign(accounts, _codes(2))
+
+    assert assignment.unassigned == ["031101"]
+
+    live = pool.live_status(assignment, [_status(IAN, "kgi", "connected")])
+
+    assert live == {"031100": True}
+    assert "031101" not in live
+
+
+def test_every_code_on_one_connected_account_is_live_across_its_connections():
+    accounts = [_account(IAN, "kgi", symbols=2, connections=3)]
+    assignment = pool.assign(accounts, _codes(5))
+
+    live = pool.live_status(assignment, [_status(IAN, "kgi", "connected")])
+
+    assert live == {code: True for code in _codes(5)}
+
+
+def test_mixed_accounts_map_each_code_to_its_own_carrier():
+    accounts = [
+        _account(IAN, "kgi", symbols=2, connections=1),
+        _account(HANSEL, "fubon", symbols=2, connections=1),
+    ]
+    assignment = pool.assign(accounts, _codes(4))
+
+    live = pool.live_status(
+        assignment,
+        [_status(IAN, "kgi", "connected"), _status(HANSEL, "fubon", "reconnecting")],
+    )
+
+    assert live == {
+        "031100": True,
+        "031101": True,
+        "031102": False,
+        "031103": False,
+    }
+
+
+def test_status_of_the_same_user_on_another_broker_does_not_leak():
+    accounts = [_account(IAN, "kgi", symbols=2, connections=1)]
+    assignment = pool.assign(accounts, _codes(2))
+
+    live = pool.live_status(assignment, [_status(IAN, "fubon", "connected")])
+
+    assert live == {"031100": False, "031101": False}
+
+
+def test_empty_assignment_maps_nothing():
+    assert pool.live_status(pool.Assignment(), [_status(IAN, "kgi", "connected")]) == {}

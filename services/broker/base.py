@@ -28,10 +28,13 @@ class BrokerConnectionError(Exception):
 class Tick:
     """One live trade print for one code.
 
-    Deliberately a plain dataclass with no serialization: Ticks live only in
-    worker memory and are never persisted, so they need no schema, no id, and no
-    round-trip format. Nothing subscribes yet — issue #43 only logs in — so this
-    type exists here for the clients that already speak it.
+    Still a plain dataclass with no serialization of its own, though a Tick is
+    now persisted: broker_worker.py upserts each one into `live_prices` as the
+    worker->web relay (issue #46). That row is four scalars the caller spells
+    out itself, and it is a cache keyed on code rather than a record of this
+    object, so there is no id to carry and no round-trip format to agree on —
+    giving the dataclass a to_dict() would only move that one dict away from the
+    single place that builds it.
     """
 
     code: str

@@ -26,7 +26,7 @@ in Supabase Storage, since the SDK's login takes a path rather than bytes).
 import json
 import os
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fubon_neo.sdk import FubonSDK
 
@@ -137,5 +137,11 @@ class FubonClient(BrokerClient):
 
 
 def _tick_time(raw):
-    """Fugle timestamps trades in microseconds since the epoch."""
-    return datetime.fromtimestamp(raw / 1_000_000)
+    """Fugle timestamps trades in microseconds since the epoch; result is UTC.
+
+    The epoch value is a point in absolute time, so the only choice here is what
+    the returned datetime is labelled with: `tz=timezone.utc` makes it explicit
+    and container-TZ-independent, where a bare fromtimestamp() would read it as
+    system local time and then drop that fact by returning a naive datetime.
+    """
+    return datetime.fromtimestamp(raw / 1_000_000, tz=timezone.utc)

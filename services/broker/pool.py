@@ -93,6 +93,26 @@ def assign(accounts, watchlist):
     return Assignment(slots=slots, unassigned=remaining)
 
 
+def live_status(assignment, worker_status_rows):
+    """Map each assigned code to whether its connection reports 'connected'.
+
+    Liveness is a property of the connection carrying a code, not of the
+    code's own tick recency (issue #46) -- a quiet warrant on a healthy
+    connection is live, a reconnecting one isn't. `worker_status_rows` is
+    whatever `desired_state.list_all_worker_status()` returned; no status row
+    means not live. Codes with no assigned slot are absent from the result
+    (not False).
+    """
+    reported = {
+        (row["user_id"], row["broker"]): row["status"] for row in worker_status_rows
+    }
+    return {
+        code: reported.get((slot.user_id, slot.broker)) == "connected"
+        for slot in assignment.slots
+        for code in slot.codes
+    }
+
+
 @dataclass(frozen=True)
 class SlotOp:
     """Codes to subscribe or unsubscribe on one already-open connection."""
