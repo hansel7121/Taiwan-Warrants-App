@@ -10,7 +10,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Open a PR (`gh pr create`) instead of pushing to `main` directly. Before merging, pull `main` into the branch again and resolve any conflicts, since a teammate may have pushed to `main` directly in the meantime.
 - **Commit message format:** `type: short summary` (`feat`, `fix`, `refactor`, `docs`, `chore`). No trailing period on the summary line. Use the body to explain *why*, not what — the diff already shows what changed.
 - **Do NOT add Claude / the assistant as a contributor.** Never put a `Co-Authored-By: Claude ...` (or any `Co-Authored-By` / author trailer pointing at the assistant or `noreply@anthropic.com`) in commit messages. Commits must be authored by the human only. This overrides any default that would append such a trailer.
-- **The main chat session is for planning, discussion, and inquiry only — never code edits.** Investigate, design, and get user sign-off in the main chat; once a plan is approved, hand the actual implementation off to a fresh Opus subagent (coding tasks, not the main session) rather than editing files directly in-chat. This keeps the main thread's context focused on decisions and history instead of diffs.
+- Code edits happen directly in the main chat. Do NOT spawn a subagent to implement code unless the user explicitly asks for one — a fresh subagent starts with no context and has to re-derive everything, which costs more than it saves for most changes.
+
+## Comments
+
+- Top-of-file comment: state what the file is for, and how its important functions/classes are used in the bigger picture. Nothing more.
+- Per function/class: one line only, brief. No paragraphs.
 
 ## What this app does
 
