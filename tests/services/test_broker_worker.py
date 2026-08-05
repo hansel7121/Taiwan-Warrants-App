@@ -29,7 +29,7 @@ import pytest
 
 import broker_worker
 from services import db
-from services.broker import pool
+from services.broker import live_assignment, pool
 from services.broker.base import BrokerConnectionError, Tick
 from tests.services.test_watchlist import _FakeClient, _Store
 
@@ -643,11 +643,64 @@ def test_a_session_closed_mid_diff_is_skipped_not_crashed_on(worker, monkeypatch
     assert clients[(OTHER, "fubon")].unsubscribes == [["032222"]]
 
 
+def test_the_published_placement_mirrors_what_the_worker_holds(worker, monkeypatch):
+    """app.py reads this table instead of recomputing a placement (docs/adr/0006),
+    so it has to say exactly what self._current says."""
+    _live(worker, monkeypatch,
+          [_account(USER, "kgi", symbols_per_connection=1),
+           _account(OTHER, "fubon", symbols_per_connection=1)])
+
+    worker.apply_watchlist(["031111", "032222"])
+
+    assert live_assignment.read_all() == {
+        "031111": ("kgi", USER),
+        "032222": ("fubon", OTHER),
+    }
+
+
+def test_a_sticky_code_is_published_on_the_connection_it_stayed_on(worker, monkeypatch):
+    """reassign keeps 032222 on fubon; a fresh assign would move it to kgi."""
+    _live(worker, monkeypatch,
+          [_account(USER, "kgi", symbols_per_connection=1),
+           _account(OTHER, "fubon", symbols_per_connection=1)])
+
+    worker.apply_watchlist(["031111", "032222"])
+    worker.apply_watchlist(["032222"])
+
+    assert live_assignment.read_all() == {"032222": ("fubon", OTHER)}
+
+
+def test_nothing_connected_publishes_an_empty_placement(worker, monkeypatch):
+    """The reset path: no session means no connection carries anything."""
+    _live(worker, monkeypatch, [_account(USER, "kgi")])
+    worker.apply_watchlist(["031234"])
+    worker._clients.clear()
+
+    worker.apply_watchlist(["031234"])
+
+    assert live_assignment.read_all() == {}
+
+
+def test_a_failed_publish_does_not_break_the_watchlist_loop(worker, monkeypatch):
+    """Same reasoning as set_status: Supabase being down must not drop sessions."""
+    _live(worker, monkeypatch, [_account(USER, "kgi")])
+    monkeypatch.setattr(live_assignment, "publish", lambda a: (_ for _ in ()).throw(
+        ConnectionError("supabase unreachable")))
+
+    worker.apply_watchlist(["031234"])
+
+    assert worker._current.slots
+
+
 # ── the live-price relay (#46) ───────────────────────────────────────────
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def store(monkeypatch):
-    """A fake Supabase, so a tick's write lands somewhere a test can read."""
+    """A fake Supabase, so a tick's write lands somewhere a test can read.
+
+    autouse: apply_watchlist also publishes the pool's placement, so every
+    watchlist test would otherwise reach for a real Supabase client.
+    """
     s = _Store()
     monkeypatch.setattr(db, "_run", lambda build: build(_FakeClient(s)))
     return s

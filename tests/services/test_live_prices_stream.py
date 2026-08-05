@@ -56,6 +56,13 @@ def _tick(store, code, price=1.23, ts=TS, broker="kgi"):
     live_price._poll_once()
 
 
+def _assign(store, code, broker="kgi", user_id=USER, connection_index=0):
+    """Put a code in the web process's view of the worker's live_assignment table."""
+    store.table("live_assignment").append(
+        {"code": code, "broker": broker, "user_id": user_id,
+         "connection_index": connection_index})
+
+
 def _event():
     """The decoded payload of one SSE frame."""
     raw = app_module._live_prices_event()
@@ -100,29 +107,32 @@ def test_every_ticked_code_is_in_one_frame(store):
 
 
 # -- is_live comes from Worker Status ---------------------------------------
+#
+# Placement is read from live_assignment — what the worker published — so these
+# seed that table directly rather than letting a recomputed assign() guess it.
 
 def test_a_code_on_a_connected_account_is_live(store):
-    store.credit(USER, "kgi")
     _watch(store, "030001")
     _tick(store, "030001")
+    _assign(store, "030001")
     desired_state.set_worker_status(USER, "kgi", "connected")
 
     assert _event()["030001"]["is_live"] is True
 
 
 def test_a_code_on_an_account_that_is_not_connected_is_not_live(store):
-    store.credit(USER, "kgi")
     _watch(store, "030001")
     _tick(store, "030001")
+    _assign(store, "030001")
     desired_state.set_worker_status(USER, "kgi", "reconnecting")
 
     assert _event()["030001"]["is_live"] is False
 
 
 def test_a_never_reported_account_is_not_live(store):
-    store.credit(USER, "kgi")
     _watch(store, "030001")
     _tick(store, "030001")
+    _assign(store, "030001")
 
     assert _event()["030001"]["is_live"] is False
 
@@ -130,9 +140,9 @@ def test_a_never_reported_account_is_not_live(store):
 def test_a_stale_price_is_still_sent_when_not_live(store):
     """ADR-0005: a dropped connection marks the row stale, it does not clear
     it — so the last tick has to survive is_live going false."""
-    store.credit(USER, "kgi")
     _watch(store, "030001")
     _tick(store, "030001", price=7.5)
+    _assign(store, "030001")
     desired_state.set_worker_status(USER, "kgi", "disconnected")
 
     row = _event()["030001"]
@@ -141,36 +151,48 @@ def test_a_stale_price_is_still_sent_when_not_live(store):
 
 def test_liveness_is_per_connection_not_global(store):
     """Two accounts, one healthy and one not, and one code on each."""
-    store.credit(USER, "kgi", symbols_per_connection=1, connections=1)
-    store.credit(OTHER, "fubon", symbols_per_connection=1, connections=1)
     _watch(store, "030001", "030002")
     _tick(store, "030001")
     _tick(store, "030002")
+    _assign(store, "030001")
+    _assign(store, "030002", broker="fubon", user_id=OTHER)
     desired_state.set_worker_status(USER, "kgi", "connected")
     desired_state.set_worker_status(OTHER, "fubon", "reconnecting")
 
-    got = _event()
-    live = {code: row["is_live"] for code, row in got.items()}
-    assert sorted(live.values()) == [False, True]
+    live = {code: row["is_live"] for code, row in _event().items()}
+    assert live == {"030001": True, "030002": False}
 
 
-def test_a_cached_code_with_no_assigned_slot_is_not_live(store):
+def test_a_cached_code_the_worker_is_not_carrying_is_not_live(store):
     """Dropped from the Watchlist mid-stream, or past the pool's capacity: the
-    price is still cached but nothing is carrying it."""
-    store.credit(USER, "kgi", symbols_per_connection=1, connections=1)
+    price is still cached but nothing published a connection for it."""
     _watch(store, "030001", "030002")
     _tick(store, "030001")
     _tick(store, "030002")
+    _assign(store, "030001")
     desired_state.set_worker_status(USER, "kgi", "connected")
 
     assert _event()["030002"]["is_live"] is False
 
 
+def test_a_sticky_placement_is_believed_over_a_repacked_one(store):
+    """The bug this table exists for: after an intraday edit the worker's
+    reassign() keeps a code where it is, and a fresh assign() would put it on
+    the first account instead — and read the wrong account's status."""
+    _watch(store, "030001")
+    _tick(store, "030001")
+    _assign(store, "030001", broker="fubon", user_id=OTHER)
+    desired_state.set_worker_status(USER, "kgi", "connected")
+    desired_state.set_worker_status(OTHER, "fubon", "reconnecting")
+
+    assert _event()["030001"]["is_live"] is False
+
+
 def test_liveness_is_not_tick_recency(store):
     """A code far past the cache TTL is live while its connection is up."""
-    store.credit(USER, "kgi")
     _watch(store, "030001")
     _tick(store, "030001", ts="2020-01-01T09:00:00+08:00")
+    _assign(store, "030001")
     desired_state.set_worker_status(USER, "kgi", "connected")
 
     assert _event()["030001"]["is_live"] is True

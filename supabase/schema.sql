@@ -309,3 +309,21 @@ create table if not exists live_prices (
 alter table live_prices enable row level security;
 -- md_* pattern: service-role only, no policy. Never add one.
 grant all on live_prices to service_role;
+
+-- The worker's actual code->connection placement (Live warrant sub-tab;
+-- migration 010).
+--
+-- The web process can't see the worker's in-memory assignment (docs/adr/0006),
+-- and recomputing pool.assign() there is wrong: intraday edits go through
+-- pool.reassign(), whose sticky placement diverges from a fresh assign(). The
+-- worker publishes what it actually holds here so is_live names the right
+-- connection.
+create table if not exists live_assignment (
+  code text primary key,
+  broker text not null,
+  user_id uuid not null,
+  connection_index integer not null
+);
+alter table live_assignment enable row level security;
+-- md_* pattern: service-role only, no policy. Never add one.
+grant all on live_assignment to service_role;

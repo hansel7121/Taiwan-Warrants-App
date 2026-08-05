@@ -49,6 +49,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 # Supabase service-role key, and db.py loads the repo-root .env at import.
 from services import db  # noqa: F401
 from services.broker import desired_state
+from services.broker import live_assignment
 from services.broker import pool
 from services.broker import watchlist
 from services.broker.base import BrokerConnectionError
@@ -245,6 +246,7 @@ class Worker:
             self._note_rejected([])
             with self._lock:
                 self._current = pool.Assignment()
+            self._publish_current()
             return
 
         diff = pool.reassign(self._open_accounts(held), current, codes)
@@ -267,6 +269,20 @@ class Worker:
         self._note_rejected(diff.rejected)
         with self._lock:
             self._current = _without(diff.assignment, missed)
+        self._publish_current()
+
+    def _publish_current(self):
+        """Hand the web process what this worker actually holds (docs/adr/0006).
+
+        Swallows write failures for the same reason set_status does: a briefly
+        unreachable Supabase must not take the watchlist loop down with it.
+        """
+        with self._lock:
+            current = self._current
+        try:
+            live_assignment.publish(current)
+        except Exception as e:
+            log.error("live_assignment write failed: %s: %s", type(e).__name__, e)
 
     def _open_accounts(self, held):
         """The Broker Accounts this loop can actually place codes on.

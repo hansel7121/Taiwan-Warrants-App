@@ -35,9 +35,14 @@ class _FakeQuery:
         self.on_conflict = on_conflict
         self.filters = {}
         self.in_filters = {}
+        self.not_filters = {}
 
     def eq(self, col, val):
         self.filters[col] = val
+        return self
+
+    def neq(self, col, val):
+        self.not_filters[col] = val
         return self
 
     def in_(self, col, vals):
@@ -63,6 +68,9 @@ class _FakeTable:
     def upsert(self, row, on_conflict=None, **kw):
         return _FakeQuery(self, "upsert", row, on_conflict)
 
+    def insert(self, rows, **kw):
+        return _FakeQuery(self, "insert", rows)
+
     def select(self, cols="*", **kw):
         return _FakeQuery(self, "select", cols)
 
@@ -74,6 +82,7 @@ class _FakeTable:
 
     def _match(self, row, q):
         return (all(row.get(k) == v for k, v in q.filters.items())
+                and all(row.get(k) != v for k, v in q.not_filters.items())
                 and all(row.get(k) in v for k, v in q.in_filters.items()))
 
     def _execute(self, q):
@@ -94,6 +103,10 @@ class _FakeTable:
                     rows.append(dict(row))
                     written.append(rows[-1])
             return _Result(written)
+        if q.op == "insert":
+            payload = q.payload if isinstance(q.payload, list) else [q.payload]
+            rows.extend(dict(row) for row in payload)
+            return _Result(payload)
         if q.op == "delete":
             gone = [r for r in rows if self._match(r, q)]
             rows[:] = [r for r in rows if not self._match(r, q)]

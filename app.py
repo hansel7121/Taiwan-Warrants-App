@@ -13,6 +13,7 @@ from services import store
 # Aliased: `credentials` alone reads as any credential in this module.
 from services.broker import credentials as broker_credentials
 from services.broker import desired_state
+from services.broker import live_assignment
 from services.broker import live_price
 from services.broker import pool as broker_pool
 from services.broker import watchlist
@@ -587,18 +588,20 @@ def _live_prices_event():
     "nothing yet" is not a price), so an all-quiet Watchlist emits `data: {}`;
     the client keeps whatever it last drew.
 
-    is_live comes from the Worker Status of the connection carrying the code
-    (pool.live_status), not from tick age. A cached code with no assigned slot
-    — dropped from the Watchlist mid-stream — is simply not live.
+    is_live comes from the Worker Status of the connection carrying the code,
+    not from tick age. The placement is read from `live_assignment` — what the
+    worker actually published — rather than recomputed here, because the
+    worker's intraday reassign() is sticky and a fresh assign() would name the
+    wrong connection. A cached code the worker is not carrying is not live.
     """
     codes = watchlist.list_codes()
     prices = live_price.snapshot(codes)
     live = {}
     if prices:
-        accounts = broker_pool.accounts_for(broker_credentials.list_all_user_ids())
-        assignment = broker_pool.assign(accounts, codes)
-        live = broker_pool.live_status(assignment,
-                                       desired_state.list_all_worker_status())
+        reported = {(row["user_id"], row["broker"]): row["status"]
+                    for row in desired_state.list_all_worker_status()}
+        live = {code: reported.get((user_id, broker)) == "connected"
+                for code, (broker, user_id) in live_assignment.read_all().items()}
 
     payload = {
         code: {
