@@ -204,64 +204,133 @@
     <!-- SCANNER TAB -->
     <div id="tab-scanner" class="tab-content">
       <main>
-        <div class="filters">
-          <div class="stock-select">
-            <span>Stock (multi-select)</span>
-            <select id="stockSelect" multiple size="6">
-            </select>
-            <div class="btn-row">
-              <button class="sm" onclick="toggleSelectAll()">Select All</button>
-              <button class="sm" onclick="toggleAddProduct('warrant')">+ Add Stock</button>
-              <button class="sm" onclick="removeSelectedProduct('warrant')">Remove Selected</button>
+        <!-- Sub-tab toggle: Screener | Live warrant -->
+        <div style="display:flex;gap:6px;border-bottom:1px solid var(--border);margin-bottom:16px">
+          <button id="scsub-btn-screener" class="pfsub-btn active" onclick="switchScannerSub('screener', this)">Screener</button>
+          <button id="scsub-btn-live" class="pfsub-btn" onclick="switchScannerSub('live', this)">Live warrant</button>
+        </div>
+
+        <!-- ── Screener sub-tab (the original filter/table view) ── -->
+        <div id="scsub-screener" class="scsub-content" style="display:block">
+          <div class="filters">
+            <div class="stock-select">
+              <span>Stock (multi-select)</span>
+              <select id="stockSelect" multiple size="6">
+              </select>
+              <div class="btn-row">
+                <button class="sm" onclick="toggleSelectAll()">Select All</button>
+                <button class="sm" onclick="toggleAddProduct('warrant')">+ Add Stock</button>
+                <button class="sm" onclick="removeSelectedProduct('warrant')">Remove Selected</button>
+              </div>
+              <div id="addForm_warrant" class="add-product-form" style="display:none">
+                <input type="text" id="newWarrantCode" placeholder="Code e.g. 2412" oninput="lookupWarrantName()" />
+                <span id="warrantLookupResult" style="font-size:12px;color:var(--muted)"></span>
+                <button class="sm" onclick="addWarrantStock()">Confirm</button>
+              </div>
             </div>
-            <div id="addForm_warrant" class="add-product-form" style="display:none">
-              <input type="text" id="newWarrantCode" placeholder="Code e.g. 2412" oninput="lookupWarrantName()" />
-              <span id="warrantLookupResult" style="font-size:12px;color:var(--muted)"></span>
-              <button class="sm" onclick="addWarrantStock()">Confirm</button>
+
+            <label>Option Type
+              <select id="optionType">
+                <option value="All">All</option>
+                <option value="Call">Call</option>
+                <option value="Put">Put</option>
+              </select>
+            </label>
+            <label>Min Days to Expiry
+              <input type="number" id="minDays" value="0" min="0" max="365" />
+            </label>
+            <label>Max Days to Expiry
+              <input type="number" id="maxDays" value="365" min="0" max="365" />
+            </label>
+            <label>Min Leverage
+              <input type="number" id="minLeverage" value="0" step="0.1" min="0" />
+            </label>
+            <label>Max Time Value %
+              <input type="number" id="maxTvPct" value="100" step="0.1" min="0" />
+            </label>
+            <label>Min Volume
+              <input type="number" id="minVolume" value="0" min="0" />
+            </label>
+
+            <div class="action-group compact">
+              <button class="primary" id="readWarrantBtn" onclick="readWarrant()">Read Warrants</button>
+              <button class="sm" id="refreshWarrantsBtn" onclick="syncWarrant()">Sync now</button>
+              <button class="sm" id="syncUniverseBtn" onclick="syncUniverse()" title="Re-scrape all TWSE/TPEx listed securities (~3-5 min) — updates which warrants exist and their listing dates. Separate from the price sync above.">Sync Universe</button>
+              <button class="success" id="downloadBtn" onclick="downloadCSV()" style="display:none">
+                Download CSV
+              </button>
             </div>
           </div>
 
-          <label>Option Type
-            <select id="optionType">
-              <option value="All">All</option>
-              <option value="Call">Call</option>
-              <option value="Put">Put</option>
-            </select>
-          </label>
-          <label>Min Days to Expiry
-            <input type="number" id="minDays" value="0" min="0" max="365" />
-          </label>
-          <label>Max Days to Expiry
-            <input type="number" id="maxDays" value="365" min="0" max="365" />
-          </label>
-          <label>Min Leverage
-            <input type="number" id="minLeverage" value="0" step="0.1" min="0" />
-          </label>
-          <label>Max Time Value %
-            <input type="number" id="maxTvPct" value="100" step="0.1" min="0" />
-          </label>
-          <label>Min Volume
-            <input type="number" id="minVolume" value="0" min="0" />
-          </label>
+          <div class="sort-btns">
+            <button onclick="sortByColumn('leverage_calc', false)">Leverage ↓</button>
+            <button onclick="sortByColumn('time_value_pct', true)">Time Value % ↑</button>
+            <button onclick="sortByColumn('volume', false)">Volume ↓</button>
+          </div>
 
-          <div class="action-group compact">
-            <button class="primary" id="readWarrantBtn" onclick="readWarrant()">Read Warrants</button>
-            <button class="sm" id="refreshWarrantsBtn" onclick="syncWarrant()">Sync now</button>
-            <button class="sm" id="syncUniverseBtn" onclick="syncUniverse()" title="Re-scrape all TWSE/TPEx listed securities (~3-5 min) — updates which warrants exist and their listing dates. Separate from the price sync above.">Sync Universe</button>
-            <button class="success" id="downloadBtn" onclick="downloadCSV()" style="display:none">
-              Download CSV
-            </button>
+          <div id="status"></div>
+          <div id="tableContainer"></div>
+        </div>
+
+        <!-- ── Live warrant sub-tab ── -->
+        <!-- Credential entry only for now. The Watchlist editor, connection-
+             status panel and the live price rows land with the later slices. -->
+        <div id="scsub-live" class="scsub-content" style="display:none">
+          <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-size:14px;font-weight:600;color:var(--text)">Broker credentials</span>
+              <span style="font-size:12px;color:var(--muted)">Stored encrypted; only you can see or use yours.</span>
+            </div>
+
+            <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
+              <label>Broker
+                <select id="bcBroker" onchange="onBrokerChange()">
+                  <option value="kgi">KGI 凱基</option>
+                  <option value="fubon">Fubon 富邦</option>
+                </select>
+              </label>
+
+              <label>Person ID
+                <input type="text" id="bcPersonId" autocomplete="off" placeholder="A123456789" />
+              </label>
+
+              <!-- KGI-only field -->
+              <label class="bc-kgi">Password
+                <input type="password" id="bcPersonPwd" autocomplete="new-password" />
+              </label>
+
+              <!-- Fubon-only fields -->
+              <label class="bc-fubon">Password
+                <input type="password" id="bcPassword" autocomplete="new-password" />
+              </label>
+              <label class="bc-fubon">Cert password
+                <input type="password" id="bcCertPass" autocomplete="new-password" />
+              </label>
+              <label class="bc-fubon">Certificate (.pfx)
+                <input type="file" id="bcCert" accept=".pfx" />
+              </label>
+
+              <!-- KGI-only: Fubon's tier is fixed at 200/5 for every account. -->
+              <label class="bc-kgi" title="Optional. Your KGI account's tier — leave blank for the 30/2 default.">Symbols per connection
+                <input type="number" id="bcSymbols" min="1" placeholder="30" />
+              </label>
+              <label class="bc-kgi" title="Optional. Your KGI account's tier — leave blank for the 30/2 default.">Connections
+                <input type="number" id="bcConnections" min="1" placeholder="2" />
+              </label>
+
+              <div class="action-group compact">
+                <button class="primary" id="bcSaveBtn" onclick="saveBrokerCredential()">Save credential</button>
+              </div>
+            </div>
+
+            <div id="bcStatus" style="font-size:12px;color:var(--muted)"></div>
+          </div>
+
+          <div style="margin-top:16px">
+            <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px">Saved credentials</div>
+            <div id="bcSavedContainer"></div>
           </div>
         </div>
-
-        <div class="sort-btns">
-          <button onclick="sortByColumn('leverage_calc', false)">Leverage ↓</button>
-          <button onclick="sortByColumn('time_value_pct', true)">Time Value % ↑</button>
-          <button onclick="sortByColumn('volume', false)">Volume ↓</button>
-        </div>
-
-        <div id="status"></div>
-        <div id="tableContainer"></div>
       </main>
     </div>
 
@@ -853,5 +922,6 @@
     <script src="{{ url_for('static', filename='js/arb.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/portfolio.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/home.js', v=ASSET_VERSION) }}"></script>
+    <script src="{{ url_for('static', filename='js/live_warrant.js', v=ASSET_VERSION) }}"></script>
   </body>
 </html>

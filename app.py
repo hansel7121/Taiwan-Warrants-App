@@ -9,6 +9,8 @@ from services import db
 from services import db_products
 from services import db_suggestions
 from services import store
+# Aliased: `credentials` alone reads as any credential in this module.
+from services.broker import credentials as broker_credentials
 from logic import arb_logic
 # Aliased: the route functions below are named iv_surface / close_quote.
 from logic import iv_surface as iv_surface_logic
@@ -338,6 +340,116 @@ def remove_us_option_product():
     db_products.remove_us_option_product(code)
     us_options_logic.invalidate_adr_map_cache()
     return jsonify({"ok": True})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Broker credentials — the Live warrant sub-tab's entry form (issue #42).
+#
+# Everything a user types here is a secret. It goes straight into
+# broker_credentials.upsert_credential, which Fernet-encrypts before the row
+# ever reaches Supabase; no route below returns, logs, or echoes a plaintext
+# field, and the list route reads a metadata-only projection that cannot carry
+# one. Credentials are scoped by g.user["id"] — the same per-user identity the
+# portfolio routes use — so one user can never read or delete another's.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Which fields each broker's login actually needs. Both are required in full:
+# a half-entered credential just fails at connect time, far from the form.
+_BROKER_FIELDS = {
+    "kgi": ("person_id", "person_pwd"),
+    "fubon": ("person_id", "password", "cert_pass"),
+}
+# Only Fubon has a cert the app handles (its .pfx, stored in Supabase Storage).
+# KGI's cert is a manual one-time CLI step the user runs outside the app, so an
+# upload for KGI is rejected rather than silently dropped — accepting it would
+# imply the app did something with it.
+_CERT_BROKERS = {"fubon"}
+# Only KGI's Capacity Tier is user-settable: it varies by account and the broker
+# exposes it nowhere in its API. Fubon's is fixed at 200/5 for every account, so
+# its form shows no tier fields and a hand-crafted override is ignored here.
+_TIER_EDITABLE = {"kgi"}
+
+
+def _broker_form():
+    """The submitted values, whether posted as multipart (with a cert) or JSON."""
+    if request.form:
+        return request.form
+    return request.get_json(silent=True) or {}
+
+
+def _valid_broker(data):
+    broker = (data.get("broker") or "").strip().lower()
+    if broker not in _BROKER_FIELDS:
+        return None, (jsonify({"error": "broker must be one of "
+                               + ", ".join(sorted(_BROKER_FIELDS))}), 400)
+    return broker, None
+
+
+@app.route("/save_broker_credential", methods=["POST"])
+@require_auth
+def save_broker_credential():
+    data = _broker_form()
+    broker, err = _valid_broker(data)
+    if err:
+        return err
+
+    fields = {}
+    for name in _BROKER_FIELDS[broker]:
+        val = (data.get(name) or "").strip()
+        if not val:
+            return jsonify({"error": f"{name} is required for {broker}"}), 400
+        fields[name] = val
+
+    cert = request.files.get("cert")
+    if cert is not None and not (cert.filename or "").strip():
+        cert = None          # an empty file input posts a blank part
+    if cert is not None:
+        if broker not in _CERT_BROKERS:
+            return jsonify({"error": f"{broker} takes no certificate upload"}), 400
+        if not cert.filename.lower().endswith(".pfx"):
+            return jsonify({"error": "certificate must be a .pfx file"}), 400
+
+    # Omitted tier fields are left out entirely so credentials.upsert_credential
+    # applies the broker's default (kgi 30/2, fubon 200/5) rather than writing
+    # a null.
+    tier = {}
+    if broker in _TIER_EDITABLE:
+        for name in ("symbols_per_connection", "connections"):
+            raw = str(data.get(name) or "").strip()
+            if not raw:
+                continue
+            try:
+                val = int(raw)
+            except (TypeError, ValueError):
+                val = 0
+            if val < 1:
+                return jsonify(
+                    {"error": f"{name} must be a positive whole number"}), 400
+            tier[name] = val
+
+    user_id = g.user["id"]
+    broker_credentials.upsert_credential(user_id, broker, fields, **tier)
+    # After the row exists: upload_cert updates it by (user_id, broker).
+    if cert is not None:
+        broker_credentials.upload_cert(user_id, broker, cert.read(), "pfx")
+    return jsonify({"ok": True, "broker": broker})
+
+
+@app.route("/list_broker_credentials")
+@require_auth
+def list_broker_credentials():
+    """Metadata only (broker, tier, has_cert, timestamps) — never a secret."""
+    return jsonify(broker_credentials.list_credentials(g.user["id"]))
+
+
+@app.route("/remove_broker_credential", methods=["POST"])
+@require_auth
+def remove_broker_credential():
+    broker, err = _valid_broker(request.get_json(silent=True) or {})
+    if err:
+        return err
+    broker_credentials.remove_credential(g.user["id"], broker)
+    return jsonify({"ok": True, "broker": broker})
 
 
 @app.route("/read_warrant", methods=["POST"])

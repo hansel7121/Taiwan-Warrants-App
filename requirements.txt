@@ -15,4 +15,7 @@ gunicorn==26.0.0
 apscheduler==3.11.3
 supabase==2.31.0
 PyJWT[crypto]==2.13.0
+# Fernet for broker credentials at rest (services/broker/crypto.py). PyJWT[crypto]
+# already pulls this in transitively; pinned explicitly because we import it.
+cryptography==49.0.0
 pytest==8.4.2
