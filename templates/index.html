@@ -276,85 +276,89 @@
         <!-- Credential entry, the shared Watchlist editor, and the connection-
              status panel. The live price rows land with a later slice. -->
         <div id="scsub-live" class="scsub-content" style="display:none">
-          <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
-            <div style="display:flex;align-items:center;gap:10px">
-              <span style="font-size:14px;font-weight:600;color:var(--text)">Broker credentials</span>
-              <span style="font-size:12px;color:var(--muted)">Stored encrypted; only you can see or use yours.</span>
-            </div>
-
-            <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
-              <label>Broker
-                <select id="bcBroker" onchange="onBrokerChange()">
-                  <option value="kgi">KGI 凱基</option>
-                  <option value="fubon">Fubon 富邦</option>
-                </select>
-              </label>
-
-              <label>Person ID
-                <input type="text" id="bcPersonId" autocomplete="off" placeholder="A123456789" />
-              </label>
-
-              <!-- KGI-only field -->
-              <label class="bc-kgi">Password
-                <input type="password" id="bcPersonPwd" autocomplete="new-password" />
-              </label>
-
-              <!-- Fubon-only fields -->
-              <label class="bc-fubon">Password
-                <input type="password" id="bcPassword" autocomplete="new-password" />
-              </label>
-              <label class="bc-fubon">Cert password
-                <input type="password" id="bcCertPass" autocomplete="new-password" />
-              </label>
-              <label class="bc-fubon">Certificate (.pfx)
-                <input type="file" id="bcCert" accept=".pfx" />
-              </label>
-
-              <!-- KGI-only: Fubon's tier is fixed at 200/5 for every account. -->
-              <label class="bc-kgi" title="Optional. Your KGI account's tier — leave blank for the 30/2 default.">Symbols per connection
-                <input type="number" id="bcSymbols" min="1" placeholder="30" />
-              </label>
-              <label class="bc-kgi" title="Optional. Your KGI account's tier — leave blank for the 30/2 default.">Connections
-                <input type="number" id="bcConnections" min="1" placeholder="2" />
-              </label>
-
-              <div class="action-group compact">
-                <button class="primary" id="bcSaveBtn" onclick="saveBrokerCredential()">Save credential</button>
+          <div class="lw-card">
+            <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
+              <div style="display:flex;align-items:center;gap:10px">
+                <span style="font-size:14px;font-weight:600;color:var(--text)">Broker credentials</span>
+                <span style="font-size:12px;color:var(--muted)">Stored encrypted; only you can see or use yours.</span>
               </div>
-            </div>
 
-            <div id="bcStatus" style="font-size:12px;color:var(--muted)"></div>
-          </div>
+              <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
+                <label>Broker
+                  <select id="bcBroker" onchange="onBrokerChange()">
+                    <option value="kgi">KGI 凱基</option>
+                    <option value="fubon">Fubon 富邦</option>
+                  </select>
+                </label>
 
-          <div style="margin-top:16px">
-            <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px">Saved credentials</div>
-            <div id="bcSavedContainer"></div>
-          </div>
+                <label>Person ID
+                  <input type="text" id="bcPersonId" autocomplete="off" placeholder="A123456789" />
+                </label>
 
-          <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start;margin-top:20px">
-            <div style="display:flex;align-items:center;gap:10px">
-              <span style="font-size:14px;font-weight:600;color:var(--text)">Watchlist</span>
-              <span style="font-size:12px;color:var(--muted)">Shared by everyone; a code starts streaming within a few seconds.</span>
-            </div>
+                <!-- KGI-only field -->
+                <label class="bc-kgi">Password
+                  <input type="password" id="bcPersonPwd" autocomplete="new-password" />
+                </label>
 
-            <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
-              <label>Warrant code(s)
-                <input type="text" id="wlCodes" autocomplete="off"
-                       placeholder="031100 or 031100, 031101"
-                       onkeydown="if (event.key === 'Enter') { event.preventDefault(); addWatchlistCodes(); }" />
-              </label>
+                <!-- Fubon-only fields -->
+                <label class="bc-fubon">Password
+                  <input type="password" id="bcPassword" autocomplete="new-password" />
+                </label>
+                <label class="bc-fubon">Cert password
+                  <input type="password" id="bcCertPass" autocomplete="new-password" />
+                </label>
+                <label class="bc-fubon">Certificate (.pfx)
+                  <input type="file" id="bcCert" accept=".pfx" />
+                </label>
 
-              <div class="action-group compact">
-                <button class="primary" id="wlAddBtn" onclick="addWatchlistCodes()">Add</button>
+                <!-- KGI-only: Fubon's tier is fixed at 200/5 for every account. -->
+                <label class="bc-kgi" title="Optional. Your KGI account's tier — leave blank for the 30/2 default.">Symbols per connection
+                  <input type="number" id="bcSymbols" min="1" placeholder="30" />
+                </label>
+                <label class="bc-kgi" title="Optional. Your KGI account's tier — leave blank for the 30/2 default.">Connections
+                  <input type="number" id="bcConnections" min="1" placeholder="2" />
+                </label>
+
+                <div class="action-group compact">
+                  <button class="primary" id="bcSaveBtn" onclick="saveBrokerCredential()">Save credential</button>
+                </div>
               </div>
+
+              <div id="bcStatus" style="font-size:12px;color:var(--muted)"></div>
             </div>
 
-            <div id="wlStatus" style="font-size:12px;color:var(--muted)"></div>
+            <div style="margin-top:16px">
+              <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px">Saved credentials</div>
+              <div id="bcSavedContainer"></div>
+            </div>
           </div>
 
-          <div style="margin-top:16px">
-            <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px">Watched codes</div>
-            <div id="wlCodesContainer"></div>
+          <div class="lw-card" style="margin-top:20px">
+            <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
+              <div style="display:flex;align-items:center;gap:10px">
+                <span style="font-size:14px;font-weight:600;color:var(--text)">Watchlist</span>
+                <span style="font-size:12px;color:var(--muted)">Shared by everyone; a code starts streaming within a few seconds.</span>
+              </div>
+
+              <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
+                <label>Warrant code(s)
+                  <input type="text" id="wlCodes" autocomplete="off"
+                         placeholder="031100 or 031100, 031101"
+                         onkeydown="if (event.key === 'Enter') { event.preventDefault(); addWatchlistCodes(); }" />
+                </label>
+
+                <div class="action-group compact">
+                  <button class="primary" id="wlAddBtn" onclick="addWatchlistCodes()">Add</button>
+                </div>
+              </div>
+
+              <div id="wlStatus" style="font-size:12px;color:var(--muted)"></div>
+            </div>
+
+            <div style="margin-top:16px">
+              <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px">Watched codes</div>
+              <div id="wlCodesContainer"></div>
+            </div>
           </div>
 
           <!-- One row per Broker Account in the shared pool — everyone's, not

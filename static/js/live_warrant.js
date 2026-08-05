@@ -1,7 +1,6 @@
 // Live warrant sub-tab: broker credential entry (issue #42), the shared
-// Watchlist editor (issue #44), and the connection-status panel (issue #45).
-//
-// The live price rows arrive with a later slice.
+// Watchlist editor (issue #44), the connection-status panel (issue #45) and the
+// live price stream (issue #46).
 //
 // Nothing here stores or echoes a secret: the password inputs are read once at
 // submit, posted straight to /save_broker_credential, and cleared. The saved
@@ -27,6 +26,7 @@ function switchScannerSub(sub, btn) {
     loadBrokerCredentials();
     loadWatchlistCodes();
     loadConnectionStatus();
+    startLivePriceStream();
   }
 }
 
@@ -244,13 +244,28 @@ async function loadWatchlistCodes() {
     return;
   }
   let html = '<table style="border-collapse:collapse;font-size:13px">'
-    + '<tr><th style="text-align:left;padding:4px 12px 4px 0">Code</th><th></th></tr>';
+    + '<tr><th style="text-align:left;padding:4px 12px 4px 0">Code</th>'
+    + '<th style="text-align:left;padding:4px 12px 4px 0">Price</th>'
+    + '<th style="text-align:left;padding:4px 12px 4px 0">Updated</th>'
+    + '<th style="text-align:left;padding:4px 12px 4px 0">Status</th>'
+    + '<th></th></tr>';
   codes.forEach(code => {
-    const safe = String(code).replace(/[^0-9A-Za-z]/g, "");
+    const safe = _wlSafe(code);
+    // Per-code cell ids so the stream can write one row without re-rendering
+    // the table under whatever the user is mid-click on.
     html += `<tr><td style="padding:4px 12px 4px 0">${safe}</td>`
+      + `<td id="wl-price-${safe}" style="padding:4px 12px 4px 0">—</td>`
+      + `<td id="wl-ts-${safe}" style="padding:4px 12px 4px 0">—</td>`
+      + `<td id="wl-status-${safe}" style="padding:4px 12px 4px 0;color:var(--muted)">—</td>`
       + `<td><button class="sm" onclick="removeWatchlistCode('${safe}')">Remove</button></td></tr>`;
   });
   container.innerHTML = html + "</table>";
+}
+
+// Codes are rendered into ids and an inline onclick, so strip anything that is
+// not alphanumeric before either use.
+function _wlSafe(code) {
+  return String(code).replace(/[^0-9A-Za-z]/g, "");
 }
 
 // ── Connection status ────────────────────────────────────────────────────────
@@ -302,6 +317,58 @@ async function loadConnectionStatus() {
       + `<td style="padding:4px 12px 4px 0">${subscribed}</td></tr>`;
   });
   container.innerHTML = html + "</table>";
+}
+
+// ── Live prices ─────────────────────────────────────────────────────────────
+//
+// One SSE connection for the whole session, kept open across sub-tab switches:
+// the server pushes a frame a second, so reopening the tab would otherwise pile
+// up parallel streams. A code with no tick yet is simply absent from the frame
+// (ADR-0005), and a code whose worker dropped keeps its last price marked
+// "stale" rather than being blanked.
+
+let _lpSource = null;
+
+async function startLivePriceStream() {
+  if (_lpSource && _lpSource.readyState !== EventSource.CLOSED) return;
+
+  let url = "/live_prices/stream";
+  // EventSource cannot set an Authorization header, so the bearer token rides
+  // in the query string. Local mode has no Supabase client and no auth at all.
+  if (!LOCAL_MODE && _sb) {
+    const { data } = await _sb.auth.getSession();
+    const token = data.session && data.session.access_token;
+    if (!token) return;
+    url += "?token=" + encodeURIComponent(token);
+  }
+
+  _lpSource = new EventSource(url);
+  _lpSource.onmessage = ev => {
+    let payload;
+    try { payload = JSON.parse(ev.data); } catch (e) { return; }
+    Object.keys(payload || {}).forEach(code => _lpApplyRow(code, payload[code]));
+  };
+  // EventSource reconnects by itself; nothing to retry here, and a dropped
+  // stream must not pop an alert over the rest of the tab.
+  _lpSource.onerror = () => console.warn("live price stream interrupted");
+}
+
+function _lpApplyRow(code, row) {
+  const safe = _wlSafe(code);
+  const priceEl = document.getElementById("wl-price-" + safe);
+  // Not on the currently rendered watchlist (just removed, or another tab is
+  // showing) — skip rather than treating it as an error.
+  if (!priceEl || !row) return;
+  priceEl.textContent = row.price != null ? row.price : "—";
+
+  const tsEl = document.getElementById("wl-ts-" + safe);
+  if (tsEl) tsEl.textContent = row.ts ? new Date(row.ts).toLocaleTimeString() : "—";
+
+  const statusEl = document.getElementById("wl-status-" + safe);
+  if (statusEl) {
+    statusEl.textContent = row.is_live ? "live" : "stale";
+    statusEl.style.color = row.is_live ? CS_COLOURS.connected : CS_COLOURS.stopped;
+  }
 }
 
 // Re-apply the Screener/Live warrant choice saved before the last reload, the

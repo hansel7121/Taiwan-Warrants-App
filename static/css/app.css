@@ -395,6 +395,12 @@ tbody tr:last-child td { border-bottom: none; }
 #tab-home .home-link:hover { text-decoration:underline; }
 #tab-home .home-card { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius); padding:14px 15px; }
 #tab-home .home-card-flush { padding:4px 6px; }
+
+/* Live warrant sub-tab: same card shell as the Home tab, but usable outside
+   #tab-home. Nested .filters go flush so the form reads as part of the card
+   instead of a second box drawn inside it. */
+.lw-card { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius); padding:14px 15px; }
+.lw-card > .filters { background:none; border:0; border-radius:0; padding:0; margin-bottom:0; }
 #tab-home .home-empty { padding:16px; text-align:center; color:var(--muted); font-size:11.5px; margin:0; }
 #tab-home .home-muted { color:var(--muted); }
 #tab-home .pos { color:var(--put); font-weight:600; }
