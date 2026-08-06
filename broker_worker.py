@@ -387,14 +387,15 @@ def _relay_tick(tick):
     """Publish one Tick to the live-price relay the web process reads.
 
     Called on the SDK's own callback thread, once per print, for every code in
-    the shared Watchlist — so it stays one upsert and nothing else.
+    the shared Watchlist.
 
     Keyed on `code`, so the row for a code is overwritten rather than appended
     to: `live_prices` is a cache of the latest price per watched code, not a
-    tick history (supabase/migrations/009_live_prices.sql). `ts` is the tick's
-    own exchange timestamp rather than db._now(), because a consumer judging
-    whether a price is stale must measure against when the trade printed, not
-    against when this write happened.
+    tick history. The append-only history lives in `live_price_ticks` instead
+    (supabase/migrations/013_live_price_ticks.sql, #52), written here right
+    after this upsert. `ts` is the tick's own exchange timestamp rather than
+    db._now(), because a consumer judging whether a price is stale must measure
+    against when the trade printed, not against when this write happened.
 
     No try/except, per the thin-wrapper convention services/broker/desired_state
     documents: a raise lands in the SDK's callback thread rather than in the
