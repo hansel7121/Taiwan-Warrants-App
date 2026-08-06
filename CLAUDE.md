@@ -170,3 +170,7 @@ Issues live as GitHub issues in this repo (hansel7121/Taiwan-Warrants-App), mana
 ### Domain docs
 
 Single-context layout: `CONTEXT.md` + `docs/adr/` at the repo root, created lazily as terms/decisions get resolved. See `docs/agents/domain.md`.
+
+### Broker SDK reference
+
+Before writing or modifying code against a broker SDK (kgisuperpy, KGI pythonnet, fubon_neo), check `docs/vendor/` for a source-only reference copy of the pinned version — don't rely on training-data recall for these, they're niche and easy to get wrong. See `docs/vendor/README.md`.
