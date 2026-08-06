@@ -7,6 +7,7 @@ import os
 
 from services import memlog
 from services import scheduler
+from services.broker import live_depth
 from services.broker import live_price
 from app import app
 
@@ -31,3 +32,4 @@ else:
 # whenever the web process is rather than opt-in. Daemon thread; the port is
 # bound as usual. See services/broker/live_price.py.
 live_price.start()
+live_depth.start()

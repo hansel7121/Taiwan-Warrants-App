@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 import kgisuperpy
 
-from services.broker.base import BrokerClient, BrokerConnectionError, Tick
+from services.broker.base import BrokerClient, BrokerConnectionError, Depth, Tick
 
 
 # TWSE trades in exactly one timezone, so every KGI timestamp is Taipei
@@ -62,7 +62,7 @@ class KGIClient(BrokerClient):
         self._api = None
         self._connected = False
 
-    def subscribe(self, codes, on_tick):
+    def subscribe(self, codes, on_tick, on_depth=None):
         quote = self._api.Quote
 
         # No annotations on the callback: the SDK rejects a callback whose first
@@ -83,6 +83,24 @@ class KGIClient(BrokerClient):
         quote.set_cb_tick(_handle)
         for code in codes:
             quote.subscribe_tick(code, odd_lot=False)
+
+        if on_depth is not None:
+            def _handle_bidask(msg):
+                on_depth(
+                    Depth(
+                        code=msg.symbol,
+                        bid_prices=tuple(msg.bid_prices),
+                        bid_volumes=tuple(msg.bid_volumes),
+                        ask_prices=tuple(msg.ask_prices),
+                        ask_volumes=tuple(msg.ask_volumes),
+                        ts=_tick_time(msg.datetime),
+                        broker=self.broker,
+                    )
+                )
+
+            quote.set_cb_bidask(_handle_bidask)
+            for code in codes:
+                quote.subscribe_bidask(code, odd_lot=False)
 
     def unsubscribe(self, codes):
         # Subscription ids are "{quote_type}.{symbol}.{version}" (e.g.

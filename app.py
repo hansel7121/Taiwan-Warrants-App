@@ -14,6 +14,7 @@ from services import store
 from services.broker import credentials as broker_credentials
 from services.broker import desired_state
 from services.broker import live_assignment
+from services.broker import live_depth
 from services.broker import live_price
 from services.broker import pool as broker_pool
 from services.broker import watchlist
@@ -596,6 +597,7 @@ def _live_prices_event():
     """
     codes = watchlist.list_codes()
     prices = live_price.snapshot(codes)
+    depths = live_depth.snapshot(codes)
     live = {}
     if prices:
         reported = {(row["user_id"], row["broker"]): row["status"]
@@ -610,10 +612,23 @@ def _live_prices_event():
             "broker": value["broker"],
             "qty": value.get("qty"),
             "is_live": bool(live.get(code)),
+            "depth": _depth_payload(depths.get(code)),
         }
         for code, value in prices.items()
     }
     return f"data: {json.dumps(payload)}\n\n"
+
+
+def _depth_payload(depth):
+    """A code's depth snapshot as JSON-safe fields, or None if never seen (#51)."""
+    if depth is None:
+        return None
+    return {
+        "bid_prices": depth["bid_prices"],
+        "bid_volumes": depth["bid_volumes"],
+        "ask_prices": depth["ask_prices"],
+        "ask_volumes": depth["ask_volumes"],
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1346,6 +1361,7 @@ if __name__ == "__main__":
     # only here) rather than at import so `import app` in the test suite never
     # spawns a thread that talks to Supabase.
     live_price.start()
+    live_depth.start()
     print("Step 1: resolving port", flush=True)
     port = _resolve_port(int(os.environ.get("PORT", 5001)))
     print(f"Step 2: starting browser timer (port {port})", flush=True)

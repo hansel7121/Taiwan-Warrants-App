@@ -30,7 +30,7 @@ import pytest
 import broker_worker
 from services import db
 from services.broker import live_assignment, pool
-from services.broker.base import BrokerConnectionError, Tick
+from services.broker.base import BrokerConnectionError, Depth, Tick
 from tests.services.test_watchlist import _FakeClient, _Store
 
 
@@ -53,10 +53,12 @@ class _FakeBrokerClient:
         self.subscribes = []      # each subscribe() call's codes, in order
         self.unsubscribes = []    # each unsubscribe() call's codes, in order
         self.on_tick = None
+        self.on_depth = None
 
-    def subscribe(self, codes, on_tick):
+    def subscribe(self, codes, on_tick, on_depth=None):
         self.subscribes.append(list(codes))
         self.on_tick = on_tick
+        self.on_depth = on_depth
         if self.subscribe_error:
             raise self.subscribe_error
 
@@ -411,6 +413,15 @@ def test_ticks_are_pointed_at_the_relay(worker, monkeypatch):
     worker.apply_watchlist(["031234"])
 
     assert kgi.on_tick is broker_worker._relay_tick
+
+
+def test_depth_is_also_pointed_at_the_relay(worker, monkeypatch):
+    """Issue #51: the same subscribe call wires the depth relay alongside ticks."""
+    kgi = _live(worker, monkeypatch, [_account(USER, "kgi")])[(USER, "kgi")]
+
+    worker.apply_watchlist(["031234"])
+
+    assert kgi.on_depth is broker_worker._relay_depth
 
 
 def test_an_edit_leaves_the_codes_that_did_not_change_alone(worker, monkeypatch):
@@ -771,3 +782,46 @@ def test_a_failed_write_is_not_swallowed_here(store, monkeypatch):
 
     with pytest.raises(ConnectionError):
         broker_worker._relay_tick(_tick())
+
+
+# ── the live-depth relay (#51) ───────────────────────────────────────────
+
+def _depth(code="031234", broker="kgi"):
+    return Depth(
+        code=code,
+        bid_prices=(1.20, 1.19, 1.18, 1.17, 1.16),
+        bid_volumes=(10, 20, 30, 40, 50),
+        ask_prices=(1.21, 1.22, 1.23, 1.24, 1.25),
+        ask_volumes=(5, 15, 25, 35, 45),
+        broker=broker,
+        ts=datetime(2026, 8, 4, 5, 30, 0, tzinfo=timezone.utc),
+    )
+
+
+def test_a_depth_snapshot_is_written_to_the_live_depth_relay(store):
+    broker_worker._relay_depth(_depth())
+
+    assert store.table("live_depth") == [{
+        "code": "031234",
+        "bid_prices": [1.20, 1.19, 1.18, 1.17, 1.16],
+        "bid_volumes": [10, 20, 30, 40, 50],
+        "ask_prices": [1.21, 1.22, 1.23, 1.24, 1.25],
+        "ask_volumes": [5, 15, 25, 35, 45],
+        "ts": "2026-08-04T05:30:00+00:00",
+        "broker": "kgi",
+    }]
+
+
+def test_the_depth_relay_keeps_one_row_per_code(store):
+    broker_worker._relay_depth(_depth())
+    broker_worker._relay_depth(_depth())
+
+    assert len(store.table("live_depth")) == 1
+
+
+def test_a_failed_depth_write_is_not_swallowed_here(store, monkeypatch):
+    monkeypatch.setattr(db, "_run", lambda build: (_ for _ in ()).throw(
+        ConnectionError("supabase unreachable")))
+
+    with pytest.raises(ConnectionError):
+        broker_worker._relay_depth(_depth())

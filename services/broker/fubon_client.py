@@ -92,7 +92,8 @@ class FubonClient(BrokerClient):
         self._streaming = False
         self._connected = False
 
-    def subscribe(self, codes, on_tick):
+    def subscribe(self, codes, on_tick, on_depth=None):
+        # on_depth accepted but unused: Fugle's depth channel is unconfirmed (#48), so depth stays KGI-only for now (#51).
         self._on_tick = on_tick
 
         # Handlers must be registered before connect(): the client starts

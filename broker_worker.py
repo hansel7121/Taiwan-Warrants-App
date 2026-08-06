@@ -72,6 +72,10 @@ HEARTBEAT_SEC = int(os.environ.get("WORKER_HEARTBEAT_SEC", "60"))
 # The worker->web relay for live prices (supabase/migrations/009). Named here
 # rather than in a services/ module because this file is its only writer.
 LIVE_PRICES_TABLE = "live_prices"
+# The worker->web relay for order-book depth (supabase/migrations/012, #51).
+# Separate table from live_prices: a depth snapshot is five arrays, not a
+# scalar price, and today only KGI produces one.
+LIVE_DEPTH_TABLE = "live_depth"
 
 logging.basicConfig(
     level=os.environ.get("WORKER_LOG_LEVEL", "INFO"),
@@ -262,7 +266,8 @@ class Worker:
         for op in diff.subscribes:
             ok = self._run_op(
                 "subscribe", op,
-                lambda client, op=op: client.subscribe(list(op.codes), _relay_tick))
+                lambda client, op=op: client.subscribe(
+                    list(op.codes), _relay_tick, on_depth=_relay_depth))
             if not ok:
                 missed.update(op.codes)
 
@@ -401,6 +406,25 @@ def _relay_tick(tick):
     }
     db._run(
         lambda c: c.table(LIVE_PRICES_TABLE)
+        .upsert(row, on_conflict="code")
+        .execute()
+    )
+
+
+def _relay_depth(depth):
+    """Publish one Depth to the live-depth relay, keyed on code (mirrors _relay_tick)."""
+    log.debug("depth -> %s: %s", LIVE_DEPTH_TABLE, depth)
+    row = {
+        "code": depth.code,
+        "bid_prices": list(depth.bid_prices),
+        "bid_volumes": list(depth.bid_volumes),
+        "ask_prices": list(depth.ask_prices),
+        "ask_volumes": list(depth.ask_volumes),
+        "ts": depth.ts.isoformat(),
+        "broker": depth.broker,
+    }
+    db._run(
+        lambda c: c.table(LIVE_DEPTH_TABLE)
         .upsert(row, on_conflict="code")
         .execute()
     )

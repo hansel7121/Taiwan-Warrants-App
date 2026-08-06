@@ -311,6 +311,20 @@ alter table live_prices enable row level security;
 -- md_* pattern: service-role only, no policy. Never add one.
 grant all on live_prices to service_role;
 
+-- 5-level bid/ask relay (Live warrant sub-tab; migration 012, #51). Separate
+-- from live_prices: a depth snapshot is five arrays, not a scalar price.
+create table if not exists live_depth (
+  code text primary key,
+  bid_prices double precision[] not null,
+  bid_volumes integer[] not null,
+  ask_prices double precision[] not null,
+  ask_volumes integer[] not null,
+  ts timestamptz not null,
+  broker text not null
+);
+alter table live_depth enable row level security;
+grant all on live_depth to service_role;
+
 -- The worker's actual code->connection placement (Live warrant sub-tab;
 -- migration 010).
 --

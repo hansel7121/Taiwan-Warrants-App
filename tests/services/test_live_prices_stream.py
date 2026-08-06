@@ -15,7 +15,7 @@ import pytest
 
 import app as app_module
 from services import auth, db
-from services.broker import desired_state, live_price
+from services.broker import desired_state, live_depth, live_price
 
 from tests.services.test_watchlist import _FakeClient, _Store
 
@@ -29,10 +29,12 @@ TS = "2026-08-04T13:29:59+08:00"
 @pytest.fixture
 def store(monkeypatch):
     live_price._cache.invalidate()
+    live_depth._cache.invalidate()
     s = _Store()
     monkeypatch.setattr(db, "_run", lambda build: build(_FakeClient(s)))
     yield s
     live_price._cache.invalidate()
+    live_depth._cache.invalidate()
 
 
 @pytest.fixture
@@ -54,6 +56,20 @@ def _tick(store, code, price=1.23, ts=TS, broker="kgi", qty=None):
     store.table("live_prices").append(
         {"code": code, "price": price, "ts": ts, "broker": broker, "qty": qty})
     live_price._poll_once()
+
+
+def _depth(store, code, broker="kgi"):
+    """Put a depth snapshot in the web process's cache the way the poller would."""
+    store.table("live_depth").append({
+        "code": code,
+        "bid_prices": [1.20, 1.19, 1.18, 1.17, 1.16],
+        "bid_volumes": [10, 20, 30, 40, 50],
+        "ask_prices": [1.21, 1.22, 1.23, 1.24, 1.25],
+        "ask_volumes": [5, 15, 25, 35, 45],
+        "ts": TS,
+        "broker": broker,
+    })
+    live_depth._poll_once()
 
 
 def _assign(store, code, broker="kgi", user_id=USER, connection_index=0):
@@ -99,6 +115,30 @@ def test_a_ticked_code_carries_qty(store):
     _tick(store, "030001", qty=5000)
 
     assert _event()["030001"]["qty"] == 5000
+
+
+def test_a_ticked_code_with_no_depth_yet_has_a_null_depth(store):
+    """Issue #51: Fubon-carried codes have no depth feed at all yet, and a
+    KGI code that has only ticked so far has none until its first bidask
+    message — both must render as "no depth" rather than a crash."""
+    store.credit(USER, "kgi")
+    _watch(store, "030001")
+    _tick(store, "030001")
+
+    assert _event()["030001"]["depth"] is None
+
+
+def test_a_ticked_code_with_depth_carries_all_four_arrays(store):
+    store.credit(USER, "kgi")
+    _watch(store, "030001")
+    _tick(store, "030001")
+    _depth(store, "030001")
+
+    depth = _event()["030001"]["depth"]
+    assert depth["bid_prices"] == [1.20, 1.19, 1.18, 1.17, 1.16]
+    assert depth["bid_volumes"] == [10, 20, 30, 40, 50]
+    assert depth["ask_prices"] == [1.21, 1.22, 1.23, 1.24, 1.25]
+    assert depth["ask_volumes"] == [5, 15, 25, 35, 45]
 
 
 def test_an_empty_watchlist_emits_an_empty_frame(store):

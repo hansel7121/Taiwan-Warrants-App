@@ -44,6 +44,19 @@ class Tick:
     qty: int | None = None  # traded quantity; None where the broker's payload is unconfirmed (#54)
 
 
+@dataclass(frozen=True)
+class Depth:
+    """One 5-level bid/ask snapshot for one code (issue #51); each array is always exactly 5 elements, index 0 = best."""
+
+    code: str
+    bid_prices: tuple[float, ...]
+    bid_volumes: tuple[int, ...]
+    ask_prices: tuple[float, ...]
+    ask_volumes: tuple[int, ...]
+    ts: datetime
+    broker: str
+
+
 class BrokerClient(ABC):
     """One connection to one broker, opened with one Broker Account's credential.
 
@@ -74,12 +87,8 @@ class BrokerClient(ABC):
         """Close the connection. Safe to call when never logged in."""
 
     @abstractmethod
-    def subscribe(self, codes, on_tick):
-        """Subscribe to live trade prints for `codes`, calling `on_tick(Tick)`.
-
-        `on_tick` is invoked on the SDK's own callback thread, so implementations
-        do no work beyond building the Tick.
-        """
+    def subscribe(self, codes, on_tick, on_depth=None):
+        """Subscribe to `codes`, calling `on_tick(Tick)` and, if given, `on_depth(Depth)` (#51) on the SDK's callback thread."""
 
     @abstractmethod
     def unsubscribe(self, codes):

@@ -248,6 +248,7 @@ async function loadWatchlistCodes() {
     + '<th style="text-align:left;padding:4px 12px 4px 0">Price</th>'
     + '<th style="text-align:left;padding:4px 12px 4px 0">Updated</th>'
     + '<th style="text-align:left;padding:4px 12px 4px 0">Status</th>'
+    + '<th style="text-align:left;padding:4px 12px 4px 0">Depth</th>'
     + '<th></th></tr>';
   codes.forEach(code => {
     const safe = _wlSafe(code);
@@ -257,7 +258,9 @@ async function loadWatchlistCodes() {
       + `<td id="wl-price-${safe}" style="padding:4px 12px 4px 0">—</td>`
       + `<td id="wl-ts-${safe}" style="padding:4px 12px 4px 0">—</td>`
       + `<td id="wl-status-${safe}" style="padding:4px 12px 4px 0;color:var(--muted)">—</td>`
-      + `<td><button class="sm" onclick="removeWatchlistCode('${safe}')">Remove</button></td></tr>`;
+      + `<td><button class="sm" id="wl-depth-toggle-${safe}" onclick="_wlToggleDepth('${safe}')">▸ depth</button></td>`
+      + `<td><button class="sm" onclick="removeWatchlistCode('${safe}')">Remove</button></td></tr>`
+      + `<tr id="wl-depth-row-${safe}" style="display:none"><td colspan="6" id="wl-depth-${safe}"></td></tr>`;
   });
   container.innerHTML = html + "</table>";
 }
@@ -370,7 +373,54 @@ function _lpApplyRow(code, row) {
     statusEl.style.color = row.is_live ? CS_COLOURS.connected : CS_COLOURS.stopped;
   }
 
+  _wlObserveDepth(code, row.depth);
   _tlObserve(code, row);
+}
+
+// ── Depth ladder (issue #51) ────────────────────────────────────────────────
+// A 5-level bid/ask ladder per watched code, collapsed by default (screen
+// space) and expanded on click. Kept up to date from the same SSE stream as
+// price even while collapsed, so opening it shows the current book at once
+// rather than waiting for the next frame.
+
+const _wlDepthOpen = {};
+const _wlLastDepth = {};
+
+function _wlToggleDepth(safe) {
+  _wlDepthOpen[safe] = !_wlDepthOpen[safe];
+  const row = document.getElementById("wl-depth-row-" + safe);
+  const btn = document.getElementById("wl-depth-toggle-" + safe);
+  if (row) row.style.display = _wlDepthOpen[safe] ? "" : "none";
+  if (btn) btn.textContent = (_wlDepthOpen[safe] ? "▾" : "▸") + " depth";
+  if (_wlDepthOpen[safe]) _wlRenderDepth(safe, _wlLastDepth[safe]);
+}
+
+function _wlObserveDepth(code, depth) {
+  const safe = _wlSafe(code);
+  _wlLastDepth[safe] = depth;
+  if (_wlDepthOpen[safe]) _wlRenderDepth(safe, depth);
+}
+
+function _wlRenderDepth(safe, depth) {
+  const cell = document.getElementById("wl-depth-" + safe);
+  if (!cell) return;
+  if (!depth) {
+    cell.innerHTML = '<div style="font-size:12px;color:var(--muted);padding:4px 0">No depth yet.</div>';
+    return;
+  }
+  let rows = "";
+  for (let i = 0; i < 5; i++) {
+    rows += `<tr>`
+      + `<td style="padding:2px 8px;text-align:right">${depth.bid_volumes[i]}</td>`
+      + `<td style="padding:2px 8px;text-align:right;color:var(--success)">${depth.bid_prices[i]}</td>`
+      + `<td style="padding:2px 8px;text-align:right;color:var(--danger)">${depth.ask_prices[i]}</td>`
+      + `<td style="padding:2px 8px;text-align:right">${depth.ask_volumes[i]}</td>`
+      + `</tr>`;
+  }
+  cell.innerHTML = '<table style="border-collapse:collapse;font-size:12px;margin:4px 0">'
+    + '<tr><th style="padding:2px 8px">Bid vol</th><th style="padding:2px 8px">Bid</th>'
+    + '<th style="padding:2px 8px">Ask</th><th style="padding:2px 8px">Ask vol</th></tr>'
+    + rows + '</table>';
 }
 
 // ── Trade log (issue #54) ────────────────────────────────────────────────
