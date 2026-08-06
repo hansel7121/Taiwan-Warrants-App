@@ -74,6 +74,27 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 # and land as 'disconnected'. Do not invent paths here before then.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# TODO(vendoring, issue #47): pythonnet/QuoteCom benchmark client — optional,
+# not needed for the production kgisuperpy path above.
+#
+# services/broker/kgi_pythonnet_client.py needs, on top of `pip install
+# pythonnet` (see requirements.txt):
+#
+#   RUN apt-get update && apt-get install -y --no-install-recommends mono-complete \
+#       && rm -rf /var/lib/apt/lists/*
+#   COPY vendor/kgi_quotecom/*.dll vendor/kgi_quotecom/
+#
+# (Package.dll, PushClient.dll, QuoteCom.dll, Interop.KGICGCAPIATLLib.dll,
+# ICSharpCode.SharpZipLib.dll — obtained from KGI, not on PyPI, not committed
+# per docs/vendor/README.md's compiled-binary exclusion.)
+#
+# Left commented out: none of the DLLs are vendored yet, `mono-complete` adds
+# ~250MB to every worker image build for a benchmark-only path, and nothing in
+# broker_worker.py's production flow imports kgi_pythonnet_client.py. Add this
+# block only when actually running scripts/kgi_client_benchmark.py.
+# ---------------------------------------------------------------------------
+
 COPY . .
 
 # Run as a non-root user; the KGI library install above is the only step that

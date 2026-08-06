@@ -28,3 +28,9 @@ kgisuperpy==2.1.0
 # from Fubon's TradeAPI site), so pinning it here would break
 # `pip install -r requirements.txt` for anyone without the file. It is installed
 # from a vendored wheel in Dockerfile.worker.
+# pythonnet: issue #47's benchmark-only client (services/broker/kgi_pythonnet_client.py).
+# The pip package installs fine anywhere, but its `clr` module needs a Mono
+# runtime and KGI's vendored QuoteCom DLLs to actually load (see
+# Dockerfile.worker) — neither is vendored yet, so this only unblocks the
+# import, not a real connection.
+pythonnet==3.0.5
