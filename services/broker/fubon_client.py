@@ -123,6 +123,7 @@ class FubonClient(BrokerClient):
             return
 
         data = message["data"]
+        # qty omitted: Fugle's trades-channel qty field is unconfirmed (#54).
         self._on_tick(
             Tick(
                 code=data["symbol"],

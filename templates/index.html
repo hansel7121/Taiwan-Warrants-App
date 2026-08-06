@@ -370,6 +370,15 @@
             </div>
             <div id="csContainer"></div>
           </div>
+
+          <!-- Scrolling trade tape, client-side only, fed by the price SSE stream (issue #54). -->
+          <div style="margin-top:20px">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+              <span style="font-size:14px;font-weight:600;color:var(--text)">Trade log</span>
+              <span style="font-size:12px;color:var(--muted)">Exchange prints for watched codes, most recent first.</span>
+            </div>
+            <div id="tlContainer" style="max-height:240px;overflow-y:auto;font-size:13px;font-family:var(--mono,monospace)"></div>
+          </div>
         </div>
       </main>
     </div>

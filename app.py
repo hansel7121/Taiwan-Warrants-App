@@ -608,6 +608,7 @@ def _live_prices_event():
             "price": value["price"],
             "ts": value["ts"].isoformat(),
             "broker": value["broker"],
+            "qty": value.get("qty"),
             "is_live": bool(live.get(code)),
         }
         for code, value in prices.items()

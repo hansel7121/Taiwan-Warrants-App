@@ -369,6 +369,38 @@ function _lpApplyRow(code, row) {
     statusEl.textContent = row.is_live ? "live" : "stale";
     statusEl.style.color = row.is_live ? CS_COLOURS.connected : CS_COLOURS.stopped;
   }
+
+  _tlObserve(code, row);
+}
+
+// ── Trade log (issue #54) ────────────────────────────────────────────────
+// Client-side-only scrolling trade tape, deduped by tick ts, fed by the same SSE stream as the price rows above.
+
+const TL_MAX_LINES = 50;
+let _tlLog = [];
+const _tlLastTs = {};
+
+function _tlObserve(code, row) {
+  if (!row || !row.ts || _tlLastTs[code] === row.ts) return;
+  _tlLastTs[code] = row.ts;
+
+  _tlLog.unshift({ code, price: row.price, qty: row.qty, ts: row.ts });
+  if (_tlLog.length > TL_MAX_LINES) _tlLog.length = TL_MAX_LINES;
+  _tlRender();
+}
+
+function _tlRender() {
+  const container = document.getElementById("tlContainer");
+  if (!container) return;
+  if (!_tlLog.length) {
+    container.innerHTML = '<div style="font-size:12px;color:var(--muted)">No prints yet.</div>';
+    return;
+  }
+  container.innerHTML = _tlLog.map(line => {
+    const time = new Date(line.ts).toLocaleTimeString();
+    const qty = line.qty != null ? `${line.qty} units` : "unknown qty";
+    return `<div>${time} — ${_wlSafe(line.code)} traded ${qty} at ${line.price}</div>`;
+  }).join("");
 }
 
 // Re-apply the Screener/Live warrant choice saved before the last reload, the

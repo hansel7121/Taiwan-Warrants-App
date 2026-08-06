@@ -41,6 +41,7 @@ class Tick:
     price: float
     ts: datetime
     broker: str
+    qty: int | None = None  # traded quantity; None where the broker's payload is unconfirmed (#54)
 
 
 class BrokerClient(ABC):

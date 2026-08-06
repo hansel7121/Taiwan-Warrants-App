@@ -49,10 +49,10 @@ def _watch(store, *codes):
         store.table("watchlist").append({"code": code, "added_by": USER})
 
 
-def _tick(store, code, price=1.23, ts=TS, broker="kgi"):
+def _tick(store, code, price=1.23, ts=TS, broker="kgi", qty=None):
     """Put a tick in the web process's cache the way the poller would."""
     store.table("live_prices").append(
-        {"code": code, "price": price, "ts": ts, "broker": broker})
+        {"code": code, "price": price, "ts": ts, "broker": broker, "qty": qty})
     live_price._poll_once()
 
 
@@ -89,6 +89,16 @@ def test_a_ticked_code_carries_price_ts_and_broker(store):
     row = _event()["030001"]
     assert row["price"] == 2.5
     assert row["broker"] == "fubon"
+
+
+def test_a_ticked_code_carries_qty(store):
+    """Issue #54: the SSE frame is the trade-log panel's only source, so qty
+    has to reach it the same as price does."""
+    store.credit(USER, "kgi")
+    _watch(store, "030001")
+    _tick(store, "030001", qty=5000)
+
+    assert _event()["030001"]["qty"] == 5000
 
 
 def test_an_empty_watchlist_emits_an_empty_frame(store):

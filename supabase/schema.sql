@@ -304,7 +304,8 @@ create table if not exists live_prices (
   price double precision not null,
   -- The tick's own exchange timestamp, not the row's write time — no default now().
   ts timestamptz not null,
-  broker text not null
+  broker text not null,
+  qty integer  -- traded quantity of the last print; null where unconfirmed (#54)
 );
 alter table live_prices enable row level security;
 -- md_* pattern: service-role only, no policy. Never add one.

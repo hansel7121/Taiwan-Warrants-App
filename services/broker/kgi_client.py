@@ -76,6 +76,7 @@ class KGIClient(BrokerClient):
                     price=float(tick.close),
                     ts=_tick_time(tick.datetime),
                     broker=self.broker,
+                    qty=int(tick.volume),
                 )
             )
 

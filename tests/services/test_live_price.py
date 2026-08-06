@@ -59,8 +59,9 @@ class _Store:
         self.selects = []
 
 
-def _row(code="030001", price=1.23, ts="2026-08-04T13:29:59+08:00", broker="kgi"):
-    return {"code": code, "price": price, "ts": ts, "broker": broker}
+def _row(code="030001", price=1.23, ts="2026-08-04T13:29:59+08:00", broker="kgi",
+         qty=None):
+    return {"code": code, "price": price, "ts": ts, "broker": broker, "qty": qty}
 
 
 @pytest.fixture
@@ -100,7 +101,18 @@ def test_the_cached_row_carries_price_ts_and_broker(store):
         "price": 2.5,
         "ts": datetime(2026, 8, 4, 13, 29, 59, tzinfo=TPE),
         "broker": "fubon",
+        "qty": None,
     }
+
+
+def test_the_cached_row_carries_qty_when_present(store):
+    """kgisuperpy ticks carry a traded quantity (issue #54); the poll must not
+    drop it on the way into the cache the SSE endpoint reads from."""
+    store.rows["live_prices"] = [_row(broker="kgi", qty=5000)]
+
+    live_price._poll_once()
+
+    assert live_price.entry("030001")[1]["qty"] == 5000
 
 
 def test_the_timestamp_is_parsed_to_an_aware_datetime(store):

@@ -397,6 +397,7 @@ def _relay_tick(tick):
         # timezone the worker container happens to run on.
         "ts": tick.ts.isoformat(),
         "broker": tick.broker,
+        "qty": tick.qty,  # None for Fubon today (#54); column is nullable
     }
     db._run(
         lambda c: c.table(LIVE_PRICES_TABLE)

@@ -14,7 +14,8 @@ tick stays displayed after its connection drops (marked stale, not cleared).
 Staleness for the UI comes from `pool.live_status()` (is the connection
 `connected`?), not tick age, so this cache's TTL is just bookkeeping.
 
-Cached value, keyed by warrant code: {"price": float, "ts": datetime, "broker": str}
+Cached value, keyed by warrant code:
+{"price": float, "ts": datetime, "broker": str, "qty": int | None}
 
 Importing this module starts nothing; `start()` is called explicitly from
 wsgi.py and app.py's __main__ block.
@@ -41,12 +42,13 @@ _stop_event = threading.Event()
 
 
 def entry(code):
-    """(epoch_float, {"price", "ts", "broker"}) for `code`, or None if never seen."""
+    """(epoch_float, {"price", "ts", "broker", "qty"}) for `code`, or None if
+    never seen."""
     return _cache.entry(code)
 
 
 def snapshot(codes):
-    """{code: {"price", "ts", "broker"}} for those `codes` that have a tick."""
+    """{code: {"price", "ts", "broker", "qty"}} for those `codes` that have a tick."""
     out = {}
     for code in codes:
         hit = _cache.entry(code)
@@ -65,7 +67,8 @@ def _poll_once():
         ts = _parse_ts(row["ts"])
         _cache.set(
             row["code"],
-            {"price": row["price"], "ts": ts, "broker": row["broker"]},
+            {"price": row["price"], "ts": ts, "broker": row["broker"],
+             "qty": row.get("qty")},
             ts=ts.timestamp(),
         )
     return len(rows)

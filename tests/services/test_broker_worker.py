@@ -706,8 +706,8 @@ def store(monkeypatch):
     return s
 
 
-def _tick(code="031234", price=1.23, broker="kgi"):
-    return Tick(code=code, price=price, broker=broker,
+def _tick(code="031234", price=1.23, broker="kgi", qty=None):
+    return Tick(code=code, price=price, broker=broker, qty=qty,
                 ts=datetime(2026, 8, 4, 5, 30, 0, tzinfo=timezone.utc))
 
 
@@ -723,7 +723,16 @@ def test_a_tick_is_written_to_the_live_price_relay(worker, monkeypatch, store):
         "price": 1.23,
         "ts": "2026-08-04T05:30:00+00:00",
         "broker": "kgi",
+        "qty": None,
     }]
+
+
+def test_tick_qty_is_relayed(store):
+    """kgi_client populates qty from tick.volume (issue #54); the relay must
+    not drop it on the way to the row the web app reads."""
+    broker_worker._relay_tick(_tick(qty=5000))
+
+    assert store.table("live_prices")[0]["qty"] == 5000
 
 
 def test_the_relay_keeps_one_row_per_code(store):
