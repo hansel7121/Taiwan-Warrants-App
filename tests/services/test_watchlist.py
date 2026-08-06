@@ -36,6 +36,7 @@ class _FakeQuery:
         self.filters = {}
         self.in_filters = {}
         self.not_filters = {}
+        self.lt_filters = {}
 
     def eq(self, col, val):
         self.filters[col] = val
@@ -43,6 +44,10 @@ class _FakeQuery:
 
     def neq(self, col, val):
         self.not_filters[col] = val
+        return self
+
+    def lt(self, col, val):
+        self.lt_filters[col] = val
         return self
 
     def in_(self, col, vals):
@@ -83,7 +88,8 @@ class _FakeTable:
     def _match(self, row, q):
         return (all(row.get(k) == v for k, v in q.filters.items())
                 and all(row.get(k) != v for k, v in q.not_filters.items())
-                and all(row.get(k) in v for k, v in q.in_filters.items()))
+                and all(row.get(k) in v for k, v in q.in_filters.items())
+                and all(row.get(k) < v for k, v in q.lt_filters.items()))
 
     def _execute(self, q):
         self.store.ops.append((self.name, q.op, q.payload, dict(q.filters)))

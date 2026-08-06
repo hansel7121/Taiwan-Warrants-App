@@ -325,6 +325,25 @@ create table if not exists live_depth (
 alter table live_depth enable row level security;
 grant all on live_depth to service_role;
 
+-- Append-only tick history (Live warrant sub-tab; migration 013, #52).
+-- live_prices above is a one-row-per-code cache, overwritten on every print;
+-- this table keeps every print instead, id-keyed rather than code-keyed so
+-- nothing is lost. Retention is app-side (broker_worker._cleanup_tick_history),
+-- not a Postgres policy, so it can change without another migration.
+create table if not exists live_price_ticks (
+  id bigint generated always as identity primary key,
+  code text not null,
+  broker text not null,
+  price double precision not null,
+  qty integer,
+  ts timestamptz not null,
+  inserted_at timestamptz not null default now()
+);
+create index if not exists live_price_ticks_code_ts_idx
+  on live_price_ticks (code, ts);
+alter table live_price_ticks enable row level security;
+grant all on live_price_ticks to service_role;
+
 -- The worker's actual code->connection placement (Live warrant sub-tab;
 -- migration 010).
 --

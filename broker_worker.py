@@ -41,6 +41,7 @@ import signal
 import sys
 import threading
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -76,6 +77,14 @@ LIVE_PRICES_TABLE = "live_prices"
 # Separate table from live_prices: a depth snapshot is five arrays, not a
 # scalar price, and today only KGI produces one.
 LIVE_DEPTH_TABLE = "live_depth"
+# Append-only tick history, additive to the live_prices cache above
+# (supabase/migrations/013, #52).
+LIVE_PRICE_TICKS_TABLE = "live_price_ticks"
+# How long a tick history row survives before _cleanup_tick_history drops it.
+TICK_RETENTION_DAYS = int(os.environ.get("WORKER_TICK_RETENTION_DAYS", "7"))
+# Cleanup is a background sweep, not a per-tick cost, so it runs on its own
+# slow interval rather than after every relayed tick.
+TICK_CLEANUP_SEC = int(os.environ.get("WORKER_TICK_CLEANUP_SEC", str(6 * 3600)))
 
 logging.basicConfig(
     level=os.environ.get("WORKER_LOG_LEVEL", "INFO"),
@@ -409,6 +418,25 @@ def _relay_tick(tick):
         .upsert(row, on_conflict="code")
         .execute()
     )
+    # Additive append, not a replacement (#52): live_prices stays the latest-
+    # price cache above, this is the growing history the cache can't hold.
+    db._run(
+        lambda c: c.table(LIVE_PRICE_TICKS_TABLE)
+        .insert({"code": tick.code, "broker": tick.broker, "price": tick.price,
+                 "qty": tick.qty, "ts": tick.ts.isoformat()})
+        .execute()
+    )
+
+
+def _cleanup_tick_history():
+    """Drop live_price_ticks rows past TICK_RETENTION_DAYS, so history stays bounded (#52)."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=TICK_RETENTION_DAYS)).isoformat()
+    db._run(
+        lambda c: c.table(LIVE_PRICE_TICKS_TABLE)
+        .delete()
+        .lt("ts", cutoff)
+        .execute()
+    )
 
 
 def _relay_depth(depth):
@@ -488,6 +516,8 @@ def build_scheduler(worker):
                   "interval", seconds=WATCHLIST_POLL_SEC, executor="watchlist")
     sched.add_job(_job("heartbeat", worker.heartbeat),
                   "interval", seconds=HEARTBEAT_SEC)
+    sched.add_job(_job("tick_cleanup", _cleanup_tick_history),
+                  "interval", seconds=TICK_CLEANUP_SEC)
     return sched
 
 

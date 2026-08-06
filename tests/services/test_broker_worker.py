@@ -22,7 +22,7 @@ that down by injecting stub SDK modules and checking the dispatch resolves.
 """
 import sys
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -370,7 +370,8 @@ def test_the_scheduler_runs_the_poll_and_the_heartbeat(worker):
     intervals = sorted(j.trigger.interval.total_seconds() for j in sched.get_jobs())
     assert intervals == sorted([broker_worker.DESIRED_POLL_SEC,
                                 broker_worker.WATCHLIST_POLL_SEC,
-                                broker_worker.HEARTBEAT_SEC])
+                                broker_worker.HEARTBEAT_SEC,
+                                broker_worker.TICK_CLEANUP_SEC])
 
 
 def test_client_class_dispatches_to_the_real_clients_lazily():
@@ -782,6 +783,85 @@ def test_a_failed_write_is_not_swallowed_here(store, monkeypatch):
 
     with pytest.raises(ConnectionError):
         broker_worker._relay_tick(_tick())
+
+
+# ── the tick history relay (#52) ──────────────────────────────────────────
+
+def test_a_tick_is_also_appended_to_the_tick_history(store):
+    broker_worker._relay_tick(_tick())
+
+    assert store.table("live_price_ticks") == [{
+        "code": "031234",
+        "broker": "kgi",
+        "price": 1.23,
+        "qty": None,
+        "ts": "2026-08-04T05:30:00+00:00",
+    }]
+
+
+def test_repeated_ticks_accumulate_in_the_history_unlike_the_cache(store):
+    """The whole point of a second table: live_prices overwrites, this appends."""
+    broker_worker._relay_tick(_tick(price=1.23))
+    broker_worker._relay_tick(_tick(price=1.45))
+
+    assert [r["price"] for r in store.table("live_price_ticks")] == [1.23, 1.45]
+    assert len(store.table("live_prices")) == 1
+
+
+def test_tick_history_qty_is_relayed(store):
+    broker_worker._relay_tick(_tick(qty=5000))
+
+    assert store.table("live_price_ticks")[0]["qty"] == 5000
+
+
+def test_a_failed_history_write_is_not_swallowed_either(store, monkeypatch):
+    calls = []
+
+    def flaky(build):
+        calls.append(1)
+        if len(calls) == 1:
+            return build(_FakeClient(store))
+        raise ConnectionError("supabase unreachable")
+
+    monkeypatch.setattr(db, "_run", flaky)
+
+    with pytest.raises(ConnectionError):
+        broker_worker._relay_tick(_tick())
+
+    # The cache write (call 1) went through; only the history write (call 2) failed.
+    assert store.table("live_prices")
+
+
+def _old_tick(days_old, code="031234", price=1.0, broker="kgi"):
+    ts = datetime.now(timezone.utc) - timedelta(days=days_old)
+    return Tick(code=code, price=price, broker=broker, qty=None, ts=ts)
+
+
+def test_cleanup_drops_ticks_past_the_retention_window(store):
+    broker_worker._relay_tick(_old_tick(broker_worker.TICK_RETENTION_DAYS + 1))
+    broker_worker._relay_tick(_tick())
+
+    broker_worker._cleanup_tick_history()
+
+    rows = store.table("live_price_ticks")
+    assert len(rows) == 1
+    assert rows[0]["price"] == 1.23
+
+
+def test_cleanup_leaves_fresh_ticks_alone(store):
+    broker_worker._relay_tick(_tick())
+
+    broker_worker._cleanup_tick_history()
+
+    assert len(store.table("live_price_ticks")) == 1
+
+
+def test_a_failed_cleanup_is_not_swallowed(store, monkeypatch):
+    monkeypatch.setattr(db, "_run", lambda build: (_ for _ in ()).throw(
+        ConnectionError("supabase unreachable")))
+
+    with pytest.raises(ConnectionError):
+        broker_worker._cleanup_tick_history()
 
 
 # ── the live-depth relay (#51) ───────────────────────────────────────────
