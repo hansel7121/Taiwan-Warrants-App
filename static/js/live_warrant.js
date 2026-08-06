@@ -181,7 +181,7 @@ function _wlParseCodes(raw) {
 async function addWatchlistCodes() {
   const input = document.getElementById("wlCodes");
   const codes = _wlParseCodes(input ? input.value : "");
-  if (!codes.length) { _wlStatus("Enter a warrant code first.", true); return; }
+  if (!codes.length) { _wlStatus("Enter a warrant or TXO option code first.", true); return; }
 
   const btn = document.getElementById("wlAddBtn");
   btn.disabled = true;
@@ -245,6 +245,7 @@ async function loadWatchlistCodes() {
   }
   let html = '<table style="border-collapse:collapse;font-size:13px">'
     + '<tr><th style="text-align:left;padding:4px 12px 4px 0">Code</th>'
+    + '<th style="text-align:left;padding:4px 12px 4px 0">Instrument</th>'
     + '<th style="text-align:left;padding:4px 12px 4px 0">Price</th>'
     + '<th style="text-align:left;padding:4px 12px 4px 0">Updated</th>'
     + '<th style="text-align:left;padding:4px 12px 4px 0">Status</th>'
@@ -255,12 +256,13 @@ async function loadWatchlistCodes() {
     // Per-code cell ids so the stream can write one row without re-rendering
     // the table under whatever the user is mid-click on.
     html += `<tr><td style="padding:4px 12px 4px 0">${safe}</td>`
+      + `<td style="padding:4px 12px 4px 0;color:var(--muted)">${_wlInstrumentLabel(code)}</td>`
       + `<td id="wl-price-${safe}" style="padding:4px 12px 4px 0">—</td>`
       + `<td id="wl-ts-${safe}" style="padding:4px 12px 4px 0">—</td>`
       + `<td id="wl-status-${safe}" style="padding:4px 12px 4px 0;color:var(--muted)">—</td>`
       + `<td><button class="sm" id="wl-depth-toggle-${safe}" onclick="_wlToggleDepth('${safe}')">▸ depth</button></td>`
       + `<td><button class="sm" onclick="removeWatchlistCode('${safe}')">Remove</button></td></tr>`
-      + `<tr id="wl-depth-row-${safe}" style="display:none"><td colspan="6" id="wl-depth-${safe}"></td></tr>`;
+      + `<tr id="wl-depth-row-${safe}" style="display:none"><td colspan="7" id="wl-depth-${safe}"></td></tr>`;
   });
   container.innerHTML = html + "</table>";
 }
@@ -269,6 +271,14 @@ async function loadWatchlistCodes() {
 // not alphanumeric before either use.
 function _wlSafe(code) {
   return String(code).replace(/[^0-9A-Za-z]/g, "");
+}
+
+// Mirrors kgi_client.py::_is_option_code (#55): TWSE codes are all-digits,
+// TAIFEX option roots (e.g. TXO) start with a letter. Display-only — the
+// stream payload's own "instrument" field is the source of truth once a code
+// has ticked; this just labels a row before its first tick arrives.
+function _wlInstrumentLabel(code) {
+  return /^\d/.test(code) ? "Warrant" : "TW Option";
 }
 
 // ── Connection status ────────────────────────────────────────────────────────

@@ -10,10 +10,10 @@ Reads use `TTLCache.entry()`, never `.fresh()`, for the same reason live_price
 does: a code's last snapshot stays displayed after its connection drops
 (ADR-0005), staleness for the UI comes from Worker Status, not cache age.
 
-Cached value, keyed by warrant code:
+Cached value, keyed by code (warrant or, since #55, TXO):
 {"bid_prices": [float]*5, "bid_volumes": [int]*5,
  "ask_prices": [float]*5, "ask_volumes": [int]*5,
- "ts": datetime, "broker": str}
+ "ts": datetime, "broker": str, "instrument": str}
 
 Importing this module starts nothing; `start()` is called explicitly from
 wsgi.py and app.py's __main__ block.
@@ -41,7 +41,7 @@ _stop_event = threading.Event()
 
 def entry(code):
     """(epoch_float, {"bid_prices", "bid_volumes", "ask_prices", "ask_volumes",
-    "ts", "broker"}) for `code`, or None if never seen."""
+    "ts", "broker", "instrument"}) for `code`, or None if never seen."""
     return _cache.entry(code)
 
 
@@ -64,7 +64,8 @@ def _poll_once():
             row["code"],
             {"bid_prices": row["bid_prices"], "bid_volumes": row["bid_volumes"],
              "ask_prices": row["ask_prices"], "ask_volumes": row["ask_volumes"],
-             "ts": ts, "broker": row["broker"]},
+             "ts": ts, "broker": row["broker"],
+             "instrument": row.get("instrument", "warrant")},
             ts=ts.timestamp(),
         )
     return len(rows)

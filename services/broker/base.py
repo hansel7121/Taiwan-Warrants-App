@@ -42,6 +42,7 @@ class Tick:
     ts: datetime
     broker: str
     qty: int | None = None  # traded quantity; None where the broker's payload is unconfirmed (#54)
+    instrument: str = "warrant"  # "warrant" or "tw_option" (#55); default keeps every pre-#55 caller unchanged
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,7 @@ class Depth:
     ask_volumes: tuple[int, ...]
     ts: datetime
     broker: str
+    instrument: str = "warrant"  # "warrant" or "tw_option" (#55)
 
 
 class BrokerClient(ABC):

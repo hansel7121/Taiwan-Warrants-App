@@ -16,6 +16,11 @@ still need confirming against the live account.
 
 Credential dict keys: `person_id`, `person_pwd` (the SDK's own names), plus the
 Capacity Tier columns every stored credential carries.
+
+TAIFEX options (TXO, #55): `api.FutQuote` is a separate quote channel from
+`api.Quote` (warrants/stocks), so `subscribe`/`unsubscribe` route each code to
+the right one via `_is_option_code` — see that function for the code-format
+rule this rests on.
 """
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -28,6 +33,21 @@ from services.broker.base import BrokerClient, BrokerConnectionError, Depth, Tic
 # TWSE trades in exactly one timezone, so every KGI timestamp is Taipei
 # wall-clock time — see _tick_time.
 _TPE = ZoneInfo("Asia/Taipei")
+
+
+def _is_option_code(code):
+    """True for a TAIFEX futures/options symbol (e.g. TXO's strike/expiry-coded
+    contracts), false for a TWSE stock or warrant code.
+
+    TWSE-listed codes (warrants and the underlyings they track) are always
+    all-digits; every TAIFEX futures/options root starts with a letter (TXO,
+    TXF, MTX, ...). The two code spaces are therefore disjoint by construction,
+    which is what lets a single Watchlist and a single `code` column carry both
+    without a collision. The `instrument` this decides gets stamped onto the
+    Tick/Depth built here and rides along to broker_worker.py's relay, so
+    nothing downstream re-derives the rule.
+    """
+    return not code[:1].isdigit()
 
 
 class KGIClient(BrokerClient):
@@ -63,7 +83,18 @@ class KGIClient(BrokerClient):
         self._connected = False
 
     def subscribe(self, codes, on_tick, on_depth=None):
-        quote = self._api.Quote
+        stock_codes = [c for c in codes if not _is_option_code(c)]
+        option_codes = [c for c in codes if _is_option_code(c)]
+        if stock_codes:
+            self._subscribe_quote(self._api.Quote, stock_codes, on_tick, on_depth,
+                                  instrument="warrant", odd_lot=False)
+        if option_codes:
+            self._subscribe_quote(self._api.FutQuote, option_codes, on_tick, on_depth,
+                                  instrument="tw_option")
+
+    def _subscribe_quote(self, quote, codes, on_tick, on_depth, instrument, **sub_kwargs):
+        """Wire one quote channel (stock `Quote` or `FutQuote`, #55) the same way: tick
+        + optional bidask callbacks translated into the broker-agnostic dataclasses."""
 
         # No annotations on the callback: the SDK rejects a callback whose first
         # parameter is annotated with anything other than its own version-
@@ -77,12 +108,13 @@ class KGIClient(BrokerClient):
                     ts=_tick_time(tick.datetime),
                     broker=self.broker,
                     qty=int(tick.volume),
+                    instrument=instrument,
                 )
             )
 
         quote.set_cb_tick(_handle)
         for code in codes:
-            quote.subscribe_tick(code, odd_lot=False)
+            quote.subscribe_tick(code, **sub_kwargs)
 
         if on_depth is not None:
             def _handle_bidask(msg):
@@ -95,21 +127,24 @@ class KGIClient(BrokerClient):
                         ask_volumes=tuple(msg.ask_volumes),
                         ts=_tick_time(msg.datetime),
                         broker=self.broker,
+                        instrument=instrument,
                     )
                 )
 
             quote.set_cb_bidask(_handle_bidask)
             for code in codes:
-                quote.subscribe_bidask(code, odd_lot=False)
+                quote.subscribe_bidask(code, **sub_kwargs)
 
     def unsubscribe(self, codes):
         # Subscription ids are "{quote_type}.{symbol}.{version}" (e.g.
-        # "qtTick.2330.v1"), and unsubscribing takes the id, not the code.
+        # "qtTick.2330.v1"), and unsubscribing takes the id, not the code. Both
+        # channels are swept since a Watchlist code could be on either (#55).
         wanted = set(codes)
-        for sub_id in self._api.Quote.get_subscriptions():
-            parts = sub_id.split(".")
-            if len(parts) > 1 and parts[1] in wanted:
-                self._api.Quote.unsubscribe(sub_id)
+        for quote in (self._api.Quote, self._api.FutQuote):
+            for sub_id in quote.get_subscriptions():
+                parts = sub_id.split(".")
+                if len(parts) > 1 and parts[1] in wanted:
+                    quote.unsubscribe(sub_id)
 
     @property
     def is_connected(self):

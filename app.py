@@ -611,6 +611,7 @@ def _live_prices_event():
             "ts": value["ts"].isoformat(),
             "broker": value["broker"],
             "qty": value.get("qty"),
+            "instrument": value.get("instrument", "warrant"),  # "warrant" or "tw_option" (#55)
             "is_live": bool(live.get(code)),
             "depth": _depth_payload(depths.get(code)),
         }

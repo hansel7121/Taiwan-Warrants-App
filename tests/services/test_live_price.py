@@ -60,8 +60,9 @@ class _Store:
 
 
 def _row(code="030001", price=1.23, ts="2026-08-04T13:29:59+08:00", broker="kgi",
-         qty=None):
-    return {"code": code, "price": price, "ts": ts, "broker": broker, "qty": qty}
+         qty=None, instrument="warrant"):
+    return {"code": code, "price": price, "ts": ts, "broker": broker, "qty": qty,
+            "instrument": instrument}
 
 
 @pytest.fixture
@@ -102,7 +103,18 @@ def test_the_cached_row_carries_price_ts_and_broker(store):
         "ts": datetime(2026, 8, 4, 13, 29, 59, tzinfo=TPE),
         "broker": "fubon",
         "qty": None,
+        "instrument": "warrant",
     }
+
+
+def test_a_tw_option_row_is_cached_with_its_instrument(store):
+    """TXO rows (#55) share this table with warrants; the cache must not
+    silently coerce every row back to 'warrant'."""
+    store.rows["live_prices"] = [_row(code="TXO20500Q6", instrument="tw_option")]
+
+    live_price._poll_once()
+
+    assert live_price.entry("TXO20500Q6")[1]["instrument"] == "tw_option"
 
 
 def test_the_cached_row_carries_qty_when_present(store):

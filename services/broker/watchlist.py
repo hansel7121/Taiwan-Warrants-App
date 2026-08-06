@@ -15,6 +15,10 @@ answer 400 instead of catching.
 
 Mirrors credentials.py / desired_state.py: thin wrappers, no internal
 try/except — callers decide how to handle failures.
+
+TXO codes (#55) need no changes here: a code is an opaque string end to end
+in this module (and pool.py's packing) — which broker channel it routes to is
+decided downstream, in kgi_client.py's `_is_option_code`.
 """
 from dataclasses import dataclass, field
 

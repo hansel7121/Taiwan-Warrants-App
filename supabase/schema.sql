@@ -299,13 +299,18 @@ grant all on watchlist to service_role;
 -- code is the primary key, not a surrogate id: this is a live CACHE, not a
 -- tick history. One row per watched code, so the table stays the size of the
 -- Watchlist no matter how many ticks pass through it.
+-- code stays the sole key even with TXO options mixed in (migration 014,
+-- #55): TWSE codes are all-digits and TAIFEX option roots start with a
+-- letter (services/broker/kgi_client.py::_is_option_code), so the two code
+-- spaces never collide; `instrument` just labels which one a row is.
 create table if not exists live_prices (
   code text primary key,
   price double precision not null,
   -- The tick's own exchange timestamp, not the row's write time — no default now().
   ts timestamptz not null,
   broker text not null,
-  qty integer  -- traded quantity of the last print; null where unconfirmed (#54)
+  qty integer,  -- traded quantity of the last print; null where unconfirmed (#54)
+  instrument text not null default 'warrant'  -- 'warrant' or 'tw_option' (#55)
 );
 alter table live_prices enable row level security;
 -- md_* pattern: service-role only, no policy. Never add one.
@@ -320,7 +325,8 @@ create table if not exists live_depth (
   ask_prices double precision[] not null,
   ask_volumes integer[] not null,
   ts timestamptz not null,
-  broker text not null
+  broker text not null,
+  instrument text not null default 'warrant'  -- 'warrant' or 'tw_option' (#55)
 );
 alter table live_depth enable row level security;
 grant all on live_depth to service_role;
@@ -337,7 +343,8 @@ create table if not exists live_price_ticks (
   price double precision not null,
   qty integer,
   ts timestamptz not null,
-  inserted_at timestamptz not null default now()
+  inserted_at timestamptz not null default now(),
+  instrument text not null default 'warrant'  -- 'warrant' or 'tw_option' (#55)
 );
 create index if not exists live_price_ticks_code_ts_idx
   on live_price_ticks (code, ts);

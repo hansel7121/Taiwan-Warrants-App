@@ -51,10 +51,11 @@ def _watch(store, *codes):
         store.table("watchlist").append({"code": code, "added_by": USER})
 
 
-def _tick(store, code, price=1.23, ts=TS, broker="kgi", qty=None):
+def _tick(store, code, price=1.23, ts=TS, broker="kgi", qty=None, instrument="warrant"):
     """Put a tick in the web process's cache the way the poller would."""
     store.table("live_prices").append(
-        {"code": code, "price": price, "ts": ts, "broker": broker, "qty": qty})
+        {"code": code, "price": price, "ts": ts, "broker": broker, "qty": qty,
+         "instrument": instrument})
     live_price._poll_once()
 
 
@@ -154,6 +155,22 @@ def test_every_ticked_code_is_in_one_frame(store):
     _tick(store, "030002", price=4.5)
 
     assert set(_event()) == {"030001", "030002"}
+
+
+# -- instrument tagging (#55) ------------------------------------------------
+
+def test_a_warrant_row_is_tagged_warrant(store):
+    _watch(store, "030001")
+    _tick(store, "030001")
+
+    assert _event()["030001"]["instrument"] == "warrant"
+
+
+def test_a_tw_option_row_is_tagged_tw_option(store):
+    _watch(store, "TXO20500Q6")
+    _tick(store, "TXO20500Q6", instrument="tw_option")
+
+    assert _event()["TXO20500Q6"]["instrument"] == "tw_option"
 
 
 # -- is_live comes from Worker Status ---------------------------------------

@@ -11,6 +11,10 @@ threading it into the app's own Tick.
 
 Issue #51: same seam, `set_cb_bidask`/`subscribe_bidask` side, for 5-level
 depth via the separate `Depth` dataclass.
+
+Issue #55: a second fake channel, `_FakeFutQuote`, stands in for
+`api.FutQuote` — the TAIFEX options entry point, routed to by code shape
+(`_is_option_code`) rather than by any per-call instrument argument.
 """
 import sys
 import types
@@ -50,16 +54,21 @@ class _FakeBidAsk:
 
 
 class _FakeQuote:
+    """Stands in for `api.Quote` (stock/warrant channel)."""
+
     def __init__(self):
         self._cb = None
         self._bidask_cb = None
+        self.tick_subscriptions = []
         self.bidask_subscriptions = []
+        self._subs = []
 
     def set_cb_tick(self, cb):
         self._cb = cb
 
     def subscribe_tick(self, code, odd_lot=False):
-        pass
+        self.tick_subscriptions.append(code)
+        self._subs.append(f"qtTick.{code}.v1")
 
     def fire(self, tick):
         self._cb(tick)
@@ -69,14 +78,61 @@ class _FakeQuote:
 
     def subscribe_bidask(self, code, odd_lot=False):
         self.bidask_subscriptions.append(code)
+        self._subs.append(f"qtBidAsk.{code}.v1")
 
     def fire_bidask(self, msg):
         self._bidask_cb(msg)
+
+    def get_subscriptions(self):
+        return list(self._subs)
+
+    def unsubscribe(self, sub_id):
+        self._subs.remove(sub_id)
+
+
+class _FakeFutQuote:
+    """Stands in for `api.FutQuote` (#55): same shape as `_FakeQuote`, but its
+    real SDK counterpart takes no `odd_lot` — a call passing one would raise
+    TypeError here, which is the point."""
+
+    def __init__(self):
+        self._cb = None
+        self._bidask_cb = None
+        self.tick_subscriptions = []
+        self.bidask_subscriptions = []
+        self._subs = []
+
+    def set_cb_tick(self, cb):
+        self._cb = cb
+
+    def subscribe_tick(self, code):
+        self.tick_subscriptions.append(code)
+        self._subs.append(f"qtTick.{code}.v0")
+
+    def fire(self, tick):
+        self._cb(tick)
+
+    def set_cb_bidask(self, cb):
+        self._bidask_cb = cb
+
+    def subscribe_bidask(self, code):
+        self.bidask_subscriptions.append(code)
+        self._subs.append(f"qtBidAsk.{code}.v0")
+
+    def fire_bidask(self, msg):
+        self._bidask_cb(msg)
+
+    def get_subscriptions(self):
+        return list(self._subs)
+
+    def unsubscribe(self, sub_id):
+        self._subs.remove(sub_id)
 
 
 class _FakeApi:
     def __init__(self):
         self.Quote = _FakeQuote()
+        self.FutQuote = _FakeFutQuote()
 
 
 def _client():
@@ -163,3 +219,97 @@ def test_the_depth_carries_all_five_levels_each_side():
     assert depth.ask_volumes == (5, 15, 25, 35, 45)
     assert depth.broker == "kgi"
     assert depth.ts.tzinfo is not None
+
+
+def test_a_warrant_tick_is_tagged_warrant():
+    client = _client()
+    received = []
+    client.subscribe(["031234"], received.append)
+
+    client._api.Quote.fire(_FakeTick("031234", 1.23, 5000, "2026-08-06 09:30:00"))
+
+    assert received[0].instrument == "warrant"
+
+
+# -- TAIFEX options via FutQuote (issue #55) ----------------------------------
+
+def test_an_option_code_is_subscribed_on_futquote_not_quote():
+    client = _client()
+    client.subscribe(["TXO20500Q6"], lambda t: None)
+
+    assert client._api.FutQuote.tick_subscriptions == ["TXO20500Q6"]
+    assert client._api.Quote.tick_subscriptions == []
+
+
+def test_a_warrant_code_never_touches_futquote():
+    client = _client()
+    client.subscribe(["031234"], lambda t: None)
+
+    assert client._api.Quote.tick_subscriptions == ["031234"]
+    assert client._api.FutQuote.tick_subscriptions == []
+
+
+def test_mixed_codes_are_split_across_both_channels():
+    client = _client()
+    client.subscribe(["031234", "TXO20500Q6"], lambda t: None)
+
+    assert client._api.Quote.tick_subscriptions == ["031234"]
+    assert client._api.FutQuote.tick_subscriptions == ["TXO20500Q6"]
+
+
+def test_an_option_tick_is_tagged_tw_option():
+    client = _client()
+    received = []
+    client.subscribe(["TXO20500Q6"], received.append)
+
+    client._api.FutQuote.fire(_FakeTick("TXO20500Q6", 45.0, 3, "2026-08-06 09:30:00"))
+
+    tick = received[0]
+    assert tick.code == "TXO20500Q6"
+    assert tick.price == 45.0
+    assert tick.qty == 3
+    assert tick.instrument == "tw_option"
+    assert tick.broker == "kgi"
+
+
+def test_option_depth_is_subscribed_and_tagged():
+    client = _client()
+    received = []
+    client.subscribe(["TXO20500Q6"], lambda t: None, on_depth=received.append)
+
+    assert client._api.FutQuote.bidask_subscriptions == ["TXO20500Q6"]
+
+    client._api.FutQuote.fire_bidask(_FakeBidAsk(
+        "TXO20500Q6",
+        bid_prices=[45.0, 44.5, 44.0, 43.5, 43.0],
+        bid_volumes=[1, 2, 3, 4, 5],
+        ask_prices=[45.5, 46.0, 46.5, 47.0, 47.5],
+        ask_volumes=[1, 2, 3, 4, 5],
+        dt="2026-08-06 09:30:00",
+    ))
+
+    depth = received[0]
+    assert depth.instrument == "tw_option"
+    assert depth.bid_prices == (45.0, 44.5, 44.0, 43.5, 43.0)
+
+
+def test_unsubscribe_sweeps_both_channels():
+    client = _client()
+    client.subscribe(["031234", "TXO20500Q6"], lambda t: None)
+
+    client.unsubscribe(["031234", "TXO20500Q6"])
+
+    assert client._api.Quote.get_subscriptions() == []
+    assert client._api.FutQuote.get_subscriptions() == []
+
+
+def test_unsubscribe_leaves_untouched_codes_alone():
+    client = _client()
+    client.subscribe(["031234", "031999", "TXO20500Q6"], lambda t: None)
+
+    client.unsubscribe(["031234"])
+
+    assert client._api.Quote.tick_subscriptions == ["031234", "031999"]
+    assert [s for s in client._api.Quote.get_subscriptions() if "031234" in s] == []
+    assert any("031999" in s for s in client._api.Quote.get_subscriptions())
+    assert any("TXO20500Q6" in s for s in client._api.FutQuote.get_subscriptions())

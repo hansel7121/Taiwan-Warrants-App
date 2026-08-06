@@ -413,6 +413,7 @@ def _relay_tick(tick):
         "ts": tick.ts.isoformat(),
         "broker": tick.broker,
         "qty": tick.qty,  # None for Fubon today (#54); column is nullable
+        "instrument": tick.instrument,  # "warrant" or "tw_option" (#55)
     }
     db._run(
         lambda c: c.table(LIVE_PRICES_TABLE)
@@ -424,7 +425,8 @@ def _relay_tick(tick):
     db._run(
         lambda c: c.table(LIVE_PRICE_TICKS_TABLE)
         .insert({"code": tick.code, "broker": tick.broker, "price": tick.price,
-                 "qty": tick.qty, "ts": tick.ts.isoformat()})
+                 "qty": tick.qty, "ts": tick.ts.isoformat(),
+                 "instrument": tick.instrument})
         .execute()
     )
 
@@ -451,6 +453,7 @@ def _relay_depth(depth):
         "ask_volumes": list(depth.ask_volumes),
         "ts": depth.ts.isoformat(),
         "broker": depth.broker,
+        "instrument": depth.instrument,  # "warrant" or "tw_option" (#55)
     }
     db._run(
         lambda c: c.table(LIVE_DEPTH_TABLE)

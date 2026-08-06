@@ -718,8 +718,8 @@ def store(monkeypatch):
     return s
 
 
-def _tick(code="031234", price=1.23, broker="kgi", qty=None):
-    return Tick(code=code, price=price, broker=broker, qty=qty,
+def _tick(code="031234", price=1.23, broker="kgi", qty=None, instrument="warrant"):
+    return Tick(code=code, price=price, broker=broker, qty=qty, instrument=instrument,
                 ts=datetime(2026, 8, 4, 5, 30, 0, tzinfo=timezone.utc))
 
 
@@ -736,6 +736,7 @@ def test_a_tick_is_written_to_the_live_price_relay(worker, monkeypatch, store):
         "ts": "2026-08-04T05:30:00+00:00",
         "broker": "kgi",
         "qty": None,
+        "instrument": "warrant",
     }]
 
 
@@ -775,6 +776,24 @@ def test_the_writing_broker_is_recorded(store):
     assert store.table("live_prices")[0]["broker"] == "fubon"
 
 
+def test_a_tw_option_tick_is_tagged_in_both_relay_tables(store):
+    """TXO ticks (#55) share these tables with warrants; instrument is the
+    disambiguator, on both the cache row and the history row."""
+    broker_worker._relay_tick(_tick(code="TXO20500Q6", instrument="tw_option"))
+
+    assert store.table("live_prices")[0]["instrument"] == "tw_option"
+    assert store.table("live_price_ticks")[0]["instrument"] == "tw_option"
+
+
+def test_a_warrant_and_a_tw_option_code_do_not_collide(store):
+    """The whole point of the disjoint code spaces: two different rows, not
+    one overwriting the other."""
+    broker_worker._relay_tick(_tick(code="031234", instrument="warrant"))
+    broker_worker._relay_tick(_tick(code="TXO20500Q6", instrument="tw_option"))
+
+    assert len(store.table("live_prices")) == 2
+
+
 def test_a_failed_write_is_not_swallowed_here(store, monkeypatch):
     """Thin wrapper, per desired_state: the caller decides, and the SDK callback
     thread logging a traceback beats prices silently freezing."""
@@ -796,6 +815,7 @@ def test_a_tick_is_also_appended_to_the_tick_history(store):
         "price": 1.23,
         "qty": None,
         "ts": "2026-08-04T05:30:00+00:00",
+        "instrument": "warrant",
     }]
 
 
@@ -866,7 +886,7 @@ def test_a_failed_cleanup_is_not_swallowed(store, monkeypatch):
 
 # ── the live-depth relay (#51) ───────────────────────────────────────────
 
-def _depth(code="031234", broker="kgi"):
+def _depth(code="031234", broker="kgi", instrument="warrant"):
     return Depth(
         code=code,
         bid_prices=(1.20, 1.19, 1.18, 1.17, 1.16),
@@ -874,6 +894,7 @@ def _depth(code="031234", broker="kgi"):
         ask_prices=(1.21, 1.22, 1.23, 1.24, 1.25),
         ask_volumes=(5, 15, 25, 35, 45),
         broker=broker,
+        instrument=instrument,
         ts=datetime(2026, 8, 4, 5, 30, 0, tzinfo=timezone.utc),
     )
 
@@ -889,6 +910,7 @@ def test_a_depth_snapshot_is_written_to_the_live_depth_relay(store):
         "ask_volumes": [5, 15, 25, 35, 45],
         "ts": "2026-08-04T05:30:00+00:00",
         "broker": "kgi",
+        "instrument": "warrant",
     }]
 
 
@@ -897,6 +919,12 @@ def test_the_depth_relay_keeps_one_row_per_code(store):
     broker_worker._relay_depth(_depth())
 
     assert len(store.table("live_depth")) == 1
+
+
+def test_a_tw_option_depth_snapshot_is_tagged(store):
+    broker_worker._relay_depth(_depth(code="TXO20500Q6", instrument="tw_option"))
+
+    assert store.table("live_depth")[0]["instrument"] == "tw_option"
 
 
 def test_a_failed_depth_write_is_not_swallowed_here(store, monkeypatch):

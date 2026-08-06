@@ -54,7 +54,8 @@ class _Store:
 
 
 def _row(code="030001", ts="2026-08-04T13:29:59+08:00", broker="kgi",
-         bid_prices=None, bid_volumes=None, ask_prices=None, ask_volumes=None):
+         bid_prices=None, bid_volumes=None, ask_prices=None, ask_volumes=None,
+         instrument="warrant"):
     return {
         "code": code,
         "bid_prices": bid_prices or [1.20, 1.19, 1.18, 1.17, 1.16],
@@ -63,6 +64,7 @@ def _row(code="030001", ts="2026-08-04T13:29:59+08:00", broker="kgi",
         "ask_volumes": ask_volumes or [5, 15, 25, 35, 45],
         "ts": ts,
         "broker": broker,
+        "instrument": instrument,
     }
 
 
@@ -83,6 +85,14 @@ def test_a_poll_puts_every_row_in_the_cache(store):
     assert live_depth._poll_once() == 2
     assert live_depth.entry("030001") is not None
     assert live_depth.entry("030002") is not None
+
+
+def test_a_tw_option_row_is_cached_with_its_instrument(store):
+    store.rows["live_depth"] = [_row(code="TXO20500Q6", instrument="tw_option")]
+
+    live_depth._poll_once()
+
+    assert live_depth.entry("TXO20500Q6")[1]["instrument"] == "tw_option"
 
 
 def test_the_cached_row_carries_all_four_arrays(store):
