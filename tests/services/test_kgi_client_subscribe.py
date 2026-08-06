@@ -91,9 +91,7 @@ class _FakeQuote:
 
 
 class _FakeFutQuote:
-    """Stands in for `api.FutQuote` (#55): same shape as `_FakeQuote`, but its
-    real SDK counterpart takes no `odd_lot` — a call passing one would raise
-    TypeError here, which is the point."""
+    """Stands in for `api.FutQuote` (#55); unlike `_FakeQuote` takes no `odd_lot`, so a stray call raises TypeError here."""
 
     def __init__(self):
         self._cb = None

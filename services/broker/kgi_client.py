@@ -36,18 +36,8 @@ _TPE = ZoneInfo("Asia/Taipei")
 
 
 def _is_option_code(code):
-    """True for a TAIFEX futures/options symbol (e.g. TXO's strike/expiry-coded
-    contracts), false for a TWSE stock or warrant code.
-
-    TWSE-listed codes (warrants and the underlyings they track) are always
-    all-digits; every TAIFEX futures/options root starts with a letter (TXO,
-    TXF, MTX, ...). The two code spaces are therefore disjoint by construction,
-    which is what lets a single Watchlist and a single `code` column carry both
-    without a collision. The `instrument` this decides gets stamped onto the
-    Tick/Depth built here and rides along to broker_worker.py's relay, so
-    nothing downstream re-derives the rule.
-    """
-    return not code[:1].isdigit()
+    """True for a letter-first TAIFEX symbol (e.g. TXO...); TWSE stock/warrant codes are all-digits."""
+    return bool(code) and not code[0].isdigit()
 
 
 class KGIClient(BrokerClient):
@@ -93,8 +83,7 @@ class KGIClient(BrokerClient):
                                   instrument="tw_option")
 
     def _subscribe_quote(self, quote, codes, on_tick, on_depth, instrument, **sub_kwargs):
-        """Wire one quote channel (stock `Quote` or `FutQuote`, #55) the same way: tick
-        + optional bidask callbacks translated into the broker-agnostic dataclasses."""
+        """Wire one quote channel (`Quote` or `FutQuote`, #55) the same way: tick + optional bidask."""
 
         # No annotations on the callback: the SDK rejects a callback whose first
         # parameter is annotated with anything other than its own version-

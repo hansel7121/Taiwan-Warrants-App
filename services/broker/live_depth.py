@@ -40,8 +40,7 @@ _stop_event = threading.Event()
 
 
 def entry(code):
-    """(epoch_float, {"bid_prices", "bid_volumes", "ask_prices", "ask_volumes",
-    "ts", "broker", "instrument"}) for `code`, or None if never seen."""
+    """(epoch_float, {"bid_prices", "bid_volumes", "ask_prices", "ask_volumes", "ts", "broker", "instrument"}) for `code`, or None if never seen."""
     return _cache.entry(code)
 
 
