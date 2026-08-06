@@ -112,13 +112,48 @@ Fetched live via `gh api repos/hansel7121/Taiwan-Websocket-Data/contents/...` on
     `_data.pyx`/`_data_url` module) — investigation stopped there. **No successful
     login, no live session, and no timing/speed measurement of any kind was ever
     taken.**
-  - It also surfaces a functional dealbreaker unrelated to speed: `kgisuperpy`'s
-    quote layer (`marketdata/starwave/sw_subscription_rule.py`) has a hardcoded
-    client-side whitelist that excludes TAIFEX options entirely
-    (`TAIFEX: {"whitelist": ["TXF*"]}` — matches index futures only, not `CDO*`
-    stock options or `TXO*` index options). If this app ever wants KGI-sourced TW
-    *options* data (today it's warrants only), kgisuperpy cannot provide it at all,
-    regardless of speed.
+  - **Correction (2026-08-05, supersedes the claim below)**: the `TXF*`-only
+    whitelist in `marketdata/starwave/sw_subscription_rule.py` is scoped to the
+    **`SWQuote`/StarWave channel** (`Quote_sw.py`) only — a secondary,
+    stock-quote-oriented channel where `TXF*` futures are handled as a fallback
+    (`if symbol.startswith('TXF')`, `Quote_sw.py:94`). That is not the channel
+    this app should use for TAIFEX options. `kgisuperpy` exposes a separate,
+    dedicated **`FutQuote` channel** (`api.FutQuote`, backed by `_FutQuote` in
+    `Quote.py:318` / `PRoboQuoteAPI` in `marketdata/quote.py`, not StarWave)
+    covering TW futures *and* options together — mirroring how TAIFEX itself
+    groups the two product families. Confirmed directly from the vendored
+    source:
+    - `_FutQuote.subscribe_tick` / `subscribe_bidask` / `subscribe_all`
+      (`Quote.py:318-384`) — same push-subscription shape as the stock `Quote`
+      channel; its symbol check (`_symbol not in self._list`) validates against
+      `self._api.Contracts.keys()`, a live/dynamic contract list, not a
+      hardcoded whitelist.
+    - `trading/FutOrder.py`'s own docstring gives `"TXO23100L4"` as a worked
+      `symbol` example tagged `（選擇權）` = option (`FutOrder.py:104`),
+      confirming TXO (TAIFEX index options) is a first-class symbol here, not
+      just futures.
+    - `marketdata/contract.py:65` defines `class Option(Contract)` with
+      `contract_type = ContractType.Option`, `strike_price`, `call_put`,
+      `contract_month` — a full option schema, separate from `Future`.
+
+    So: **kgisuperpy does carry TAIFEX options (TXO) websocket data** — via
+    `api.FutQuote`, not the stock `Quote` channel and not `SWQuote`. The
+    original claim below (kgisuperpy "cannot provide TAIFEX options data at
+    all") was wrong; it conflated the `SWQuote` fallback channel's whitelist
+    with kgisuperpy's overall capability. kgisuperpy actually has three quote
+    channels — `Quote` (TW stocks/warrants), `USQuote`, `FutQuote` (TW
+    futures+options) — and the whitelist only ever applied to the first.
+    `kgi_client.py` today only wires up `Quote`; if TW-option live data becomes
+    in-scope (the deferred #19 epic), `FutQuote` is the entry point — no SDK
+    swap or workaround needed.
+
+  - Original (superseded) claim, kept for the record: "kgisuperpy's quote layer
+    (`marketdata/starwave/sw_subscription_rule.py`) has a hardcoded client-side
+    whitelist that excludes TAIFEX options entirely (`TAIFEX: {"whitelist":
+    ["TXF*"]}` — matches index futures only, not `CDO*` stock options or `TXO*`
+    index options). If this app ever wants KGI-sourced TW *options* data (today
+    it's warrants only), kgisuperpy cannot provide it at all, regardless of
+    speed." — see correction above.
 
 - No issues or pull requests exist on `hansel7121/Taiwan-Websocket-Data`
   (`gh api repos/hansel7121/Taiwan-Websocket-Data/issues` and `/pulls` both return
