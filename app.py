@@ -413,8 +413,8 @@ def save_broker_credential():
     if cert is not None:
         if broker not in _CERT_BROKERS:
             return jsonify({"error": f"{broker} takes no certificate upload"}), 400
-        if not cert.filename.lower().endswith(".pfx"):
-            return jsonify({"error": "certificate must be a .pfx file"}), 400
+        if not cert.filename.lower().endswith((".pfx", ".p12")):
+            return jsonify({"error": "certificate must be a .p12 or .pfx file"}), 400
 
     # Omitted tier fields are left out entirely so credentials.upsert_credential
     # applies the broker's default (kgi 30/2, fubon 200/5) rather than writing

@@ -107,6 +107,15 @@ def test_save_fubon_stores_the_uploaded_pfx(client, store):
     assert store.rows[0]["cert_path"] == f"{USER}/fubon/cert.pfx"
 
 
+def test_save_fubon_accepts_a_p12_cert(client, store):
+    cert = (io.BytesIO(b"p12-bytes"), "mycert.p12")
+
+    r = _save(client, FUBON_FORM, cert=cert)
+
+    assert r.status_code == 200
+    assert store.objects[f"{USER}/fubon/cert.pfx"] == b"p12-bytes"
+
+
 def test_save_fubon_without_a_cert_is_allowed(client, store):
     # Re-saving the text fields must not force a re-upload of an already
     # stored cert.
@@ -276,7 +285,7 @@ def test_index_ships_the_live_warrant_script_and_form(client):
     for element_id in ("bcBroker", "bcPersonId", "bcPersonPwd", "bcPassword",
                        "bcCertPass", "bcCert", "bcSymbols", "bcConnections"):
         assert f'id="{element_id}"' in html
-    assert 'accept=".pfx"' in html
+    assert 'accept=".p12,.pfx"' in html
 
 
 def test_remove_cannot_touch_another_users_credential(client, store, monkeypatch):

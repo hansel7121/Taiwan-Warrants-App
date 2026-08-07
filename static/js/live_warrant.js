@@ -68,8 +68,9 @@ async function saveBrokerCredential() {
     // Optional: a re-save of the text fields must not force re-uploading a
     // cert that is already stored.
     if (file) {
-      if (!file.name.toLowerCase().endsWith(".pfx")) {
-        _bcStatus("Certificate must be a .pfx file", true); return;
+      const name = file.name.toLowerCase();
+      if (!name.endsWith(".pfx") && !name.endsWith(".p12")) {
+        _bcStatus("Certificate must be a .p12 or .pfx file", true); return;
       }
       form.append("cert", file);
     }
