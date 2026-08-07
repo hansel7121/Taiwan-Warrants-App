@@ -28,7 +28,17 @@ kgisuperpy==2.1.0
 # from Fubon's TradeAPI site), so pinning it here would break
 # `pip install -r requirements.txt` for anyone without the file. It is fetched
 # from private Supabase Storage and installed at container start instead (#48,
-# see worker-entrypoint.sh and scripts/install_worker_binaries.py).
+# see worker-entrypoint.sh and scripts/install_worker_binaries.py). Its own
+# declared dependency IS pinned here though: fubon_neo only requires
+# fugle-marketdata (its realtime layer is Fugle's, not homegrown -- no numpy),
+# and pinning it at build time means the runtime wheel install at container
+# boot finds it already satisfied instead of re-resolving a fresh version from
+# PyPI on every restart. Verified against the wheel's actual resolved
+# dependency tree for the worker's target platform (manylinux2014_x86_64,
+# Python 3.11): requests/urllib3/certifi already pinned above are compatible
+# with fugle-marketdata's constraints; orjson (its compiled dep) has a cp311
+# manylinux wheel, so no source build needed.
+fugle-marketdata==2.4.1
 # pythonnet: issue #47's benchmark-only client (services/broker/kgi_pythonnet_client.py).
 # The pip package installs fine anywhere, but its `clr` module needs a Mono
 # runtime and KGI's vendored QuoteCom DLLs to actually load (see
