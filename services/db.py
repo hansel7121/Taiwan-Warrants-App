@@ -3,10 +3,20 @@
 The client is created lazily so the module imports fine without any env vars
 (local no-auth dev, sanity checks). A tiny .env loader runs at import so
 SUPABASE_* vars in a local .env are visible to this module and auth.py.
+
+supabase/httpx are imported here at module load (not deferred into client()):
+deferred imports raced across gunicorn's request-handling threads on cold
+start, since several threads could all hit the first-ever `import supabase`
+at once — CPython surfaced this as "partially initialized module" errors
+under that concurrent first import. Importing at module load happens once,
+single-threaded, before gunicorn ever serves a request.
 """
 import json
 import os
 from datetime import datetime, timezone
+
+import httpx
+from supabase import create_client
 
 
 def _load_dotenv():
@@ -46,7 +56,6 @@ def client():
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
         if not url or not key:
             raise RuntimeError("Supabase not configured")
-        from supabase import create_client
         _client = create_client(url, key)
     return _client
 
@@ -66,7 +75,6 @@ def _run(build):
     error. That is transient: discard the stale client and rebuild the query
     against a fresh connection. A second failure is real and propagates.
     """
-    import httpx
     try:
         return build(client())
     except httpx.TransportError as e:
