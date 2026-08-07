@@ -4,12 +4,17 @@ The client is created lazily so the module imports fine without any env vars
 (local no-auth dev, sanity checks). A tiny .env loader runs at import so
 SUPABASE_* vars in a local .env are visible to this module and auth.py.
 
-supabase/httpx are imported here at module load (not deferred into client()):
-deferred imports raced across gunicorn's request-handling threads on cold
-start, since several threads could all hit the first-ever `import supabase`
-at once — CPython surfaced this as "partially initialized module" errors
-under that concurrent first import. Importing at module load happens once,
-single-threaded, before gunicorn ever serves a request.
+supabase/httpx are imported here at module load, and the client itself is
+built eagerly below when creds are present (not deferred into client()'s
+first call): importing `supabase`/`httpx` alone was not enough, because
+postgrest/gotrue only build their real httpx.Client (and its httpcore
+transport) lazily on first *construction* of the supabase client, not on
+import. That first construction was still happening inside the first
+request thread(s) to reach client(), so concurrent requests at cold start
+still raced on it — CPython surfaced this as "partially initialized module"
+errors on whichever module lost the race (supabase, httpx, httpcore — all
+three seen in practice). Constructing the client at module load happens
+once, single-threaded, before gunicorn ever serves a request.
 """
 import json
 import os
@@ -45,18 +50,25 @@ def _load_dotenv():
 
 _load_dotenv()
 
-_client = None
+
+def _build_client():
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not key:
+        raise RuntimeError("Supabase not configured")
+    return create_client(url, key)
+
+
+# Built eagerly here (module load, single-threaded) when creds are present,
+# rather than left to client()'s first caller — see module docstring.
+_client = _build_client() if (os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY")) else None
 
 
 def client():
-    """Lazily create the service-role supabase-py client. Raises if unconfigured."""
+    """Return the service-role supabase-py client, building it if not already built. Raises if unconfigured."""
     global _client
     if _client is None:
-        url = os.environ.get("SUPABASE_URL")
-        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-        if not url or not key:
-            raise RuntimeError("Supabase not configured")
-        _client = create_client(url, key)
+        _client = _build_client()
     return _client
 
 
