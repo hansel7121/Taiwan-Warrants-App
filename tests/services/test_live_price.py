@@ -1,10 +1,13 @@
 """The web process's live-price cache + poller (issue #46).
 
-Real in-process calls; the only faked boundary is db._run / the supabase client,
-following test_watchlist.py's _FakeClient/_Store pair, so no Supabase request is
-ever made. The fakes here are cut down to the one table and one operation this
-module uses (`select *` on live_prices) — there is no capacity or multi-table
-coupling to express.
+Real in-process calls; the only faked boundary is live_price._conn.run / the
+supabase client, following test_watchlist.py's _FakeClient/_Store pair, so no
+Supabase request is ever made. The fakes here are cut down to the one table
+and one operation this module uses (`select *` on live_prices) — there is no
+capacity or multi-table coupling to express. `scheduler.relay_market_open` is
+forced True by default so poll tests don't depend on the wall-clock time
+pytest happens to run at; the market-hours gate itself (issue #56) is tested
+separately below.
 
 Nothing here starts the real poll thread: `start()` is only ever called from
 wsgi.py and app.py's __main__ block, and the loop's error handling is pinned by
@@ -14,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from services import db
+from services import scheduler
 from services.broker import live_price
 
 
@@ -67,7 +70,8 @@ def _row(code="030001", price=1.23, ts="2026-08-04T13:29:59+08:00", broker="kgi"
 
 @pytest.fixture
 def store(monkeypatch):
-    """A fake live_prices table behind db._run, plus an empty cache per test.
+    """A fake live_prices table behind live_price._conn.run, plus an empty
+    cache per test, with the market-hours gate forced open.
 
     The cache is a module-level singleton (one per process, like every other
     TTLCache in the app), so it is emptied between tests rather than rebuilt —
@@ -75,7 +79,8 @@ def store(monkeypatch):
     """
     live_price._cache.invalidate()
     s = _Store()
-    monkeypatch.setattr(db, "_run", lambda build: build(_FakeClient(s)))
+    monkeypatch.setattr(live_price._conn, "run", lambda build: build(_FakeClient(s)))
+    monkeypatch.setattr(scheduler, "relay_market_open", lambda: True)
     yield s
     live_price._cache.invalidate()
 
@@ -221,6 +226,28 @@ def test_a_stale_entry_is_still_served(store):
 
     assert live_price.entry("030001") is not None
     assert live_price._cache.fresh("030001") is None   # would have hidden it
+
+
+# -- the market-hours gate (issue #56) --------------------------------------
+
+def test_the_poll_is_skipped_outside_market_hours(monkeypatch, store):
+    """A poller with no gate hits Supabase every second, forever, even when
+    no market is open to produce a tick."""
+    monkeypatch.setattr(scheduler, "relay_market_open", lambda: False)
+    store.rows["live_prices"] = [_row(price=1.23)]
+
+    live_price._poll_guarded()
+
+    assert live_price.entry("030001") is None
+
+
+def test_the_poll_runs_during_market_hours(monkeypatch, store):
+    monkeypatch.setattr(scheduler, "relay_market_open", lambda: True)
+    store.rows["live_prices"] = [_row(price=1.23)]
+
+    live_price._poll_guarded()
+
+    assert live_price.entry("030001")[1]["price"] == 1.23
 
 
 # -- the loop's error handling ---------------------------------------------

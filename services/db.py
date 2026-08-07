@@ -15,13 +15,28 @@ still raced on it — CPython surfaced this as "partially initialized module"
 errors on whichever module lost the race (supabase, httpx, httpcore — all
 three seen in practice). Constructing the client at module load happens
 once, single-threaded, before gunicorn ever serves a request.
+
+The shared `_client` singleton is what request routes and scheduler jobs run
+queries against; `client()`/`_reset_client()` are guarded by `_client_lock` so
+concurrent rebuilds (e.g. two threads both catching a transport error at once)
+can't race and clobber each other (issue #56). `Conn` builds a second,
+independent client for callers that must never contend with that singleton —
+namely the live_price/live_depth pollers, so a poller's connection hiccup
+can't stall an unrelated user's request.
 """
 import json
 import os
+import threading
 from datetime import datetime, timezone
 
 import httpx
 from supabase import create_client
+from supabase.client import ClientOptions
+
+# supabase-py's ClientOptions.postgrest_client_timeout defaults to 120s; a
+# connection that hangs mid-request would then block a thread for up to 2
+# minutes (issue #56) instead of failing fast into _run's retry-once path.
+_TIMEOUT_SEC = float(os.environ.get("SUPABASE_TIMEOUT_SEC", "10"))
 
 
 def _load_dotenv():
@@ -56,26 +71,55 @@ def _build_client():
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not key:
         raise RuntimeError("Supabase not configured")
-    return create_client(url, key)
+    return create_client(url, key, options=ClientOptions(postgrest_client_timeout=_TIMEOUT_SEC))
 
 
 # Built eagerly here (module load, single-threaded) when creds are present,
 # rather than left to client()'s first caller — see module docstring.
 _client = _build_client() if (os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY")) else None
+_client_lock = threading.Lock()
 
 
 def client():
     """Return the service-role supabase-py client, building it if not already built. Raises if unconfigured."""
     global _client
     if _client is None:
-        _client = _build_client()
+        with _client_lock:
+            if _client is None:
+                _client = _build_client()
     return _client
 
 
 def _reset_client():
     """Drop the cached client so the next call() builds a fresh connection pool."""
     global _client
-    _client = None
+    with _client_lock:
+        _client = None
+
+
+class Conn:
+    """A standalone, lazily-built client + retry-once-on-transport-error, isolated from the shared `_client` singleton (issue #56)."""
+
+    def __init__(self):
+        self._client = None
+        self._lock = threading.Lock()
+
+    def _get_client(self):
+        if self._client is None:
+            with self._lock:
+                if self._client is None:
+                    self._client = _build_client()
+        return self._client
+
+    def run(self, build):
+        """Execute build(client) and retry once on a transport-level failure, same as `_run`."""
+        try:
+            return build(self._get_client())
+        except httpx.TransportError as e:
+            print(f"DB: transport error on dedicated conn ({type(e).__name__}: {e}); resetting and retrying once", flush=True)
+            with self._lock:
+                self._client = _build_client()
+            return build(self._client)
 
 
 def _run(build):

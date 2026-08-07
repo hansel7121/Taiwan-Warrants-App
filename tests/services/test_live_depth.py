@@ -1,14 +1,16 @@
 """The web process's live-depth cache + poller (issue #51).
 
-Same shape as test_live_price.py: the only faked boundary is db._run / the
-supabase client, and the poll loop's error handling is pinned by calling its
-body directly rather than spinning a thread up and killing it.
+Same shape as test_live_price.py: the only faked boundary is
+live_depth._conn.run / the supabase client, the market-hours gate (issue #56)
+is forced open by default so poll tests don't depend on wall-clock time, and
+the poll loop's error handling is pinned by calling its body directly rather
+than spinning a thread up and killing it.
 """
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from services import db
+from services import scheduler
 from services.broker import live_depth
 
 
@@ -72,7 +74,8 @@ def _row(code="030001", ts="2026-08-04T13:29:59+08:00", broker="kgi",
 def store(monkeypatch):
     live_depth._cache.invalidate()
     s = _Store()
-    monkeypatch.setattr(db, "_run", lambda build: build(_FakeClient(s)))
+    monkeypatch.setattr(live_depth._conn, "run", lambda build: build(_FakeClient(s)))
+    monkeypatch.setattr(scheduler, "relay_market_open", lambda: True)
     yield s
     live_depth._cache.invalidate()
 
@@ -170,6 +173,26 @@ def test_snapshot_skips_never_seen_codes(store):
     got = live_depth.snapshot(["030001", "030999"])
 
     assert list(got) == ["030001"]
+
+
+# -- the market-hours gate (issue #56) --------------------------------------
+
+def test_the_poll_is_skipped_outside_market_hours(monkeypatch, store):
+    monkeypatch.setattr(scheduler, "relay_market_open", lambda: False)
+    store.rows["live_depth"] = [_row()]
+
+    live_depth._poll_guarded()
+
+    assert live_depth.entry("030001") is None
+
+
+def test_the_poll_runs_during_market_hours(monkeypatch, store):
+    monkeypatch.setattr(scheduler, "relay_market_open", lambda: True)
+    store.rows["live_depth"] = [_row()]
+
+    live_depth._poll_guarded()
+
+    assert live_depth.entry("030001") is not None
 
 
 # -- the loop's error handling -----------------------------------------------

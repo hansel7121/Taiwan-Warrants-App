@@ -15,6 +15,12 @@ Cached value, keyed by code (warrant or, since #55, TXO):
  "ask_prices": [float]*5, "ask_volumes": [int]*5,
  "ts": datetime, "broker": str, "instrument": str}
 
+Polls on its own dedicated Supabase client (`db.Conn`), not the shared
+`db._client` used by request routes and scheduler jobs, and only during
+market hours: issue #56 found this poller and live_price's, unconditional and
+sharing one client/connection pool with user-facing requests, could let a
+poller hiccup stall an unrelated login for up to 2 minutes.
+
 Importing this module starts nothing; `start()` is called explicitly from
 wsgi.py and app.py's __main__ block.
 """
@@ -24,7 +30,7 @@ import threading
 from datetime import datetime
 
 from logic.ttl_cache import TTLCache
-from services import db
+from services import db, scheduler
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +39,7 @@ POLL_SEC = float(os.environ.get("LIVE_DEPTH_POLL_SEC", "1"))
 _TTL_SECONDS = 3600
 
 _cache = TTLCache("live_depth", _TTL_SECONDS)
+_conn = db.Conn()
 
 _thread = None
 _start_lock = threading.Lock()
@@ -56,7 +63,7 @@ def snapshot(codes):
 
 def _poll_once():
     """Refresh the cache from one read of live_depth; a missing code keeps its last snapshot. Returns rows applied."""
-    rows = db._run(lambda c: c.table(TABLE).select("*").execute()).data or []
+    rows = _conn.run(lambda c: c.table(TABLE).select("*").execute()).data or []
     for row in rows:
         ts = _parse_ts(row["ts"])
         _cache.set(
@@ -83,7 +90,10 @@ def _poll_forever():
 
 
 def _poll_guarded():
-    """One _poll_once() that logs instead of raising."""
+    """One _poll_once() that logs instead of raising, skipped outside market
+    hours (issue #56)."""
+    if not scheduler.relay_market_open():
+        return
     try:
         _poll_once()
     except Exception as e:

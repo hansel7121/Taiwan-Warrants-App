@@ -2,7 +2,8 @@
 
 Same shape as test_broker_status_route.py: the real watchlist, pool,
 credentials and live_price modules run, and the only faked boundary is
-db._run / the supabase client (fakes borrowed from test_watchlist.py).
+live_price._conn.run / live_depth._conn.run / the supabase client (fakes
+borrowed from test_watchlist.py).
 
 The route's generator is an infinite loop, so it is never driven here — the
 tests call the single-frame builder `app._live_prices_event()` directly, the
@@ -32,6 +33,8 @@ def store(monkeypatch):
     live_depth._cache.invalidate()
     s = _Store()
     monkeypatch.setattr(db, "_run", lambda build: build(_FakeClient(s)))
+    monkeypatch.setattr(live_price._conn, "run", lambda build: build(_FakeClient(s)))
+    monkeypatch.setattr(live_depth._conn, "run", lambda build: build(_FakeClient(s)))
     yield s
     live_price._cache.invalidate()
     live_depth._cache.invalidate()

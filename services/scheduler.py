@@ -150,6 +150,11 @@ def is_market_open(market, now=None):
     raise ValueError(f"unknown market: {market}")
 
 
+def relay_market_open(now=None):
+    """Whether either market the live_price/live_depth pollers relay ticks for is open (issue #56)."""
+    return is_market_open("tw_equity", now) or is_market_open("tw_option", now)
+
+
 # ---------------------------------------------------------------------------
 # Core writers — plain fetch + align + write_snapshot. No gate, no _job wrapper;
 # callable directly by force_refresh and the validation harness.
