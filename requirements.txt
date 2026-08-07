@@ -26,8 +26,9 @@ pytest==8.4.2
 kgisuperpy==2.1.0
 # fubon_neo is deliberately NOT listed: it is not on PyPI (manual .whl download
 # from Fubon's TradeAPI site), so pinning it here would break
-# `pip install -r requirements.txt` for anyone without the file. It is installed
-# from a vendored wheel in Dockerfile.worker.
+# `pip install -r requirements.txt` for anyone without the file. It is fetched
+# from private Supabase Storage and installed at container start instead (#48,
+# see worker-entrypoint.sh and scripts/install_worker_binaries.py).
 # pythonnet: issue #47's benchmark-only client (services/broker/kgi_pythonnet_client.py).
 # The pip package installs fine anywhere, but its `clr` module needs a Mono
 # runtime and KGI's vendored QuoteCom DLLs to actually load (see

@@ -256,6 +256,14 @@ alter table broker_credentials enable row level security;
 create policy "own rows" on broker_credentials for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 grant all on broker_credentials to service_role;
 
+-- Also requires, ONCE, by hand in the dashboard (Storage -> New bucket): a
+-- PRIVATE bucket named "broker-binaries" holding KGI's libCGCrypt.so and
+-- Fubon's fubon_neo wheel (uploaded under its own filename, not renamed —
+-- see migration 015), fetched into the broker-worker container at boot
+-- (worker-entrypoint.sh / scripts/install_worker_binaries.py). These are
+-- proprietary compiled binaries this public repo can't commit, so they never
+-- appear here — the bucket only ever holds them.
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Shared Watchlist (Live warrant sub-tab; migration 008).
 --

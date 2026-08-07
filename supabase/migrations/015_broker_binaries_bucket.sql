@@ -1,0 +1,32 @@
+-- Migration 015: broker-binaries Storage bucket — no table changes, this file
+-- is documentation for a manual, one-time dashboard step (same shape as
+-- migration 005's broker-certs bucket note).
+--
+-- Why: KGI's libCGCrypt.so and Fubon's fubon_neo wheel are proprietary
+-- compiled binaries this public repo can't commit (docs/vendor/README.md).
+-- Instead of baking them into the broker-worker Docker image at build time,
+-- they're staged once here and fetched by worker-entrypoint.sh /
+-- scripts/install_worker_binaries.py at container start (issue #48).
+--
+-- Required, ONCE, by hand in the Supabase dashboard (Storage -> New bucket):
+-- a bucket named "broker-binaries", PRIVATE (not public), holding:
+--   libCGCrypt.so                        — KGI's native signing library
+--   fubon_neo-<version>-*.whl            — Fubon's TradeAPI wheel, downloaded
+--                                           from their dev site and uploaded
+--                                           under its OWN filename (do not
+--                                           rename it — pip parses the
+--                                           package name/version/platform
+--                                           tags from the wheel filename
+--                                           itself; install_worker_binaries.py
+--                                           finds it by listing the bucket
+--                                           for anything ending in .whl)
+-- A private bucket needs no storage policies: the worker uses the
+-- service-role key, which bypasses Storage RLS the same way it bypasses
+-- table RLS (same reasoning as broker-certs).
+--
+-- NOT staged here: KGI's per-account cert data (output of running
+-- `KGI_CGCrypt genDat` against a real account). kgisuperpy.login() takes no
+-- cert-path argument, so where that data actually needs to live is
+-- unconfirmed — see scripts/install_worker_binaries.py's note. Do not invent
+-- a path or object key for it before that's confirmed against KGI's own
+-- install docs.
