@@ -38,6 +38,7 @@ log = logging.getLogger(__name__)
 
 TABLE = "live_prices"
 POLL_SEC = float(os.environ.get("LIVE_PRICE_POLL_SEC", "1"))
+CLOSED_POLL_SEC = float(os.environ.get("LIVE_PRICE_CLOSED_POLL_SEC", "60"))
 _TTL_SECONDS = 3600
 
 _cache = TTLCache("live_price", _TTL_SECONDS)
@@ -88,21 +89,24 @@ def _parse_ts(raw):
 
 def _poll_forever():
     while not _stop_event.is_set():
-        _poll_guarded()
-        _stop_event.wait(POLL_SEC)
+        is_open = _poll_guarded()
+        _stop_event.wait(POLL_SEC if is_open else CLOSED_POLL_SEC)
 
 
 def _poll_guarded():
     """One _poll_once() that logs instead of raising, skipped outside market
     hours (issue #56: pollers must not hit Supabase every second, forever,
-    regardless of whether the market is even open)."""
+    regardless of whether the market is even open). Returns whether the
+    market was open, so _poll_forever can back off to CLOSED_POLL_SEC while
+    closed instead of still waking up every POLL_SEC to find nothing to do."""
     if not scheduler.relay_market_open():
-        return
+        return False
     try:
         _poll_once()
     except Exception as e:
         log.error("live price poll failed: %s: %s", type(e).__name__, e,
                   exc_info=True)
+    return True
 
 
 def start():
