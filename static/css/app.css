@@ -537,3 +537,8 @@ tbody tr:last-child td { border-bottom: none; }
 .np-leg select:disabled{opacity:.6}
 .np-actions{display:flex;align-items:center;gap:10px}
 .np-error{color:var(--danger);font-size:12px}
+.dash-exp{font-size:10px;color:var(--muted);border:1px solid var(--border);border-radius:8px;padding:1px 6px;white-space:nowrap}
+.dash-exp-soon{color:#fbbf24;border-color:#7c5b12}
+.dash-exp-gone{color:var(--danger);border-color:var(--danger)}
+.dash-alert-warn{border-color:#7c5b12;background:rgba(251,191,36,.08)}
+.dash-alert-badge-warn{color:#fbbf24}

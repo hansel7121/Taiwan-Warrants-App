@@ -15,6 +15,8 @@
 
 const WARRANT_UNITS_PER_LOT = 1000;
 const TW_CONTRACT_SIZE = 2000;
+// Expiry warning window, in days, for starred instruments.
+const EXPIRY_WARN_DAYS = 5;
 
 let watchlistData = [];
 let alertsData = [];
@@ -242,8 +244,16 @@ function isStarred(kind, code) {
 }
 
 // Star cell for a scanner table row. Payload is URI-encoded so it survives the
-// HTML attribute intact.
+// HTML attribute intact. The expiry DATE is derived and stored alongside the
+// DTE, because a DTE snapshot goes stale the moment it is written — and an
+// expired instrument leaves the chain, so there is no live quote to re-derive
+// it from later.
 function starCell(kind, code, underlying, label, meta) {
+  meta = Object.assign({}, meta);
+  if (meta.days_to_expiry != null && meta.expiry_date == null) {
+    meta.expiry_date = new Date(Date.now() + meta.days_to_expiry * 864e5)
+      .toISOString().slice(0, 10);
+  }
   const payload = encodeURIComponent(JSON.stringify(
     { kind, code, underlying_code: underlying, label, meta: meta || {} }));
   const on = isStarred(kind, code);
@@ -285,9 +295,14 @@ function renderWatchlist() {
   let html = "";
   watchlistData.forEach(w => {
     const q = quoteMap[qKey(w.kind, w.code)] || {};
+    const days = watchExpiryDays(w);
+    const expiryTag = days == null ? ""
+      : days <= 0 ? `<span class="dash-exp dash-exp-gone">expired</span>`
+      : days <= EXPIRY_WARN_DAYS ? `<span class="dash-exp dash-exp-soon">${days}d left</span>`
+      : `<span class="dash-exp">${days}d</span>`;
     html += `<div class="dash-watch-row">
       <div class="dash-watch-head">
-        <b>${w.label || w.code}</b>
+        <b>${w.label || w.code}</b>${expiryTag}
         <span class="dash-watch-sub">${w.underlying_code || ""} ${w.kind === "warrant" ? "warrant" : "option"}</span>
         <button class="sm" onclick="removeStarred('${w.kind}','${w.code}')">✕</button>
       </div>
@@ -313,6 +328,59 @@ async function removeStarred(kind, code) {
   renderDashboard();
 }
 
+// ── Expiry alerts ────────────────────────────────────────────────────
+// Every starred instrument gets an expiry alert for free — no threshold to
+// configure, since an expiring warrant is always worth knowing about.
+
+const _utcDay = (d) => Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+
+// Days until a starred instrument expires, or null if unknowable.
+// Prefer the live quote — it tracks the real chain. Fall back to the expiry
+// date captured when it was starred, which is what makes this work at all: an
+// expired instrument drops out of the chain entirely, so there is no quote left
+// to read a DTE from. Rows starred before expiry_date was recorded fall back
+// again to counting the star-time DTE forward from created_at.
+function watchExpiryDays(w) {
+  const q = quoteMap[qKey(w.kind, w.code)] || {};
+  if (q.days_to_expiry != null) return Math.floor(q.days_to_expiry);
+  const meta = w.meta || {};
+  let expiryMs = null;
+  if (meta.expiry_date) {
+    expiryMs = Date.parse(meta.expiry_date + "T00:00:00Z");
+  } else if (meta.days_to_expiry != null && w.created_at) {
+    expiryMs = _utcDay(new Date(w.created_at)) + meta.days_to_expiry * 864e5;
+  }
+  if (expiryMs == null || !isFinite(expiryMs)) return null;
+  return Math.round((expiryMs - _utcDay(new Date())) / 864e5);
+}
+
+// [{ item, days, level }] for anything expired or inside the warning window.
+function expiryAlerts() {
+  const out = [];
+  watchlistData.forEach(w => {
+    const days = watchExpiryDays(w);
+    if (days == null) return;
+    if (days <= 0) out.push({ item: w, days, level: "expired" });
+    else if (days <= EXPIRY_WARN_DAYS) out.push({ item: w, days, level: "soon" });
+  });
+  return out.sort((a, b) => a.days - b.days);
+}
+
+function renderExpiryAlerts() {
+  return expiryAlerts().map(e => `
+    <div class="dash-alert ${e.level === "expired" ? "dash-alert-on" : "dash-alert-warn"}">
+      <div class="dash-alert-head">
+        <b>${e.item.label || e.item.code}</b>
+        <span>expiry</span>
+      </div>
+      <div class="dash-alert-body">
+        ${e.level === "expired"
+          ? `<span class="dash-alert-badge">EXPIRED</span>${e.days < 0 ? ` ${-e.days}d ago` : " today"}`
+          : `<span class="dash-alert-badge dash-alert-badge-warn">EXPIRES IN ${e.days}D</span>`}
+      </div>
+    </div>`).join("");
+}
+
 // ── Alerts ───────────────────────────────────────────────────────────
 // Evaluated in the browser each time the dashboard loads, against the same
 // quote snapshot the rest of the tab uses. A fire is posted back so the row
@@ -333,11 +401,12 @@ function alertFires(alert, value) {
 function renderAlerts() {
   const el = document.getElementById("dash-alerts");
   if (!el) return;
-  if (!alertsData.length) {
-    el.innerHTML = `<p class="dash-empty">No alerts. Star an instrument, then use <b>+ Alert</b> to set a threshold.</p>`;
+  const expiry = renderExpiryAlerts();
+  if (!alertsData.length && !expiry) {
+    el.innerHTML = `<p class="dash-empty">No alerts. Star an instrument, then use <b>+ Alert</b> to set a threshold. Expiry alerts appear here automatically.</p>`;
     return;
   }
-  let html = "";
+  let html = expiry;
   alertsData.forEach(a => {
     const value = alertValue(a);
     const fired = alertFires(a, value);
