@@ -153,11 +153,13 @@ function restoreView() {
     if (btn && document.getElementById("tab-" + tab)) {
       switchTab(tab, btn);
       if (tab === "portfolio" && typeof loadPortfolioOnce === "function") loadPortfolioOnce();
+      if (tab === "dashboard") loadDashboardOnce();
     }
   }
-  // Whatever landed active: if it's Home, populate it now.
+  // Whatever landed active: if it's Home or Dashboard, populate it now.
   if (document.getElementById("tab-home")?.classList.contains("active")
       && typeof loadHomeOnce === "function") loadHomeOnce();
+  if (document.getElementById("tab-dashboard")?.classList.contains("active")) loadDashboardOnce();
   if (_readView("ws_optMarket") === "us") {
     const b = document.getElementById("optmkt-btn-us");
     if (b) setOptMarket("us", b);
@@ -223,10 +225,12 @@ function currentSelection(id) {
 // refresh; the hardcoded fallback only applies the first time (nothing
 // selected yet).
 async function initProductSelects() {
+  // The US ADR chain is admin-only; user mode is Taiwan instruments only, so
+  // don't even ask for the list.
   const [warrants, twOpts, usOpts] = await Promise.all([
     fetchProductList("/list_warrant_stocks"),
     fetchProductList("/list_tw_option_products"),
-    fetchProductList("/list_us_option_products"),
+    can("usoptions") ? fetchProductList("/list_us_option_products") : Promise.resolve([]),
   ]);
   // Exposed for the add/remove UI to reuse without re-fetching.
   window._productLists = { warrants, twOpts, usOpts };

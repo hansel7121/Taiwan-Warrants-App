@@ -27,10 +27,15 @@ MODE_COOKIE = "app_mode"
 # FEATURES in static/js/features.js.
 FEATURES = {
     "scanner": USER,      # Warrant Scanner tab
-    "options": USER,      # Options Scanner tab (TW + US)
+    "options": USER,      # Options Scanner tab — Taiwan side only
     "ivsurface": USER,    # IV Surface tab
     "live": USER,         # live warrant fetch ("Sync now"); reserved for the
                           # broker-fed Live sub-tab on ian/warrant-live-price
+    "dashboard": USER,    # user Dashboard tab
+    "watchlist": USER,    # starred instruments (user_watchlist)
+    "alerts": USER,       # threshold alerts (user_alerts)
+    "positions": USER,    # multi-leg positions (user_positions)
+    "usoptions": ADMIN,   # US ADR chain — user mode is Taiwan instruments only
     "arb": ADMIN,         # Arb Finder tab + /match_* routes
     "portfolio": ADMIN,   # Portfolio tab + /get_portfolio, /save_portfolio
     "suggestions": ADMIN, # Suggestions sub-tab + /list_suggestions

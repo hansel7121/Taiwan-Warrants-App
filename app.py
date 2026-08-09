@@ -8,12 +8,14 @@ from services import auth
 from services import db
 from services import db_products
 from services import db_suggestions
+from services import db_user
 from services import roles
 from services import store
 from logic import arb_logic
 # Aliased: the route functions below are named iv_surface / close_quote.
 from logic import iv_surface as iv_surface_logic
 from logic import close_quote as close_quote_logic
+from logic import user_marks
 from services.auth import require_auth
 from services.roles import require_role, ADMIN
 import os
@@ -258,6 +260,174 @@ def lookup_warrant_stock():
     return jsonify({"code": code, "name": info.name if info else None})
 
 
+# ── User dashboard: watchlist / alerts / positions ───────────────────
+# Every route below scopes to g.user["id"] — the user_id NEVER comes from the
+# request body. These are the only per-user-owned tables besides `portfolio`.
+
+_WATCH_KINDS = {"warrant", "tw_option"}
+_LEG_KINDS = {"warrant", "tw_option", "underlying"}
+_ALERT_METRICS = {"bid", "ask", "iv", "underlying"}
+_LEG_FIELDS = ("kind", "code", "label", "direction", "quantity", "entry_price",
+               "option_type", "strike", "days_to_expiry", "exercise_ratio",
+               "contract_size", "iv")
+
+
+@app.route("/list_watchlist")
+@require_auth
+def list_watchlist():
+    return jsonify(db_user.list_watchlist(g.user["id"]))
+
+
+@app.route("/add_watchlist", methods=["POST"])
+@require_auth
+def add_watchlist():
+    d = request.json or {}
+    kind, code = d.get("kind"), (d.get("code") or "").strip()
+    if kind not in _WATCH_KINDS or not code:
+        return jsonify({"error": "kind and code required"}), 400
+    db_user.add_watchlist(g.user["id"], kind, code,
+                          underlying_code=d.get("underlying_code"),
+                          label=d.get("label"), meta=d.get("meta") or {})
+    return jsonify({"ok": True})
+
+
+@app.route("/remove_watchlist", methods=["POST"])
+@require_auth
+def remove_watchlist():
+    d = request.json or {}
+    kind, code = d.get("kind"), (d.get("code") or "").strip()
+    if kind not in _WATCH_KINDS or not code:
+        return jsonify({"error": "kind and code required"}), 400
+    db_user.remove_watchlist(g.user["id"], kind, code)
+    return jsonify({"ok": True})
+
+
+@app.route("/list_alerts")
+@require_auth
+def list_alerts():
+    return jsonify(db_user.list_alerts(g.user["id"]))
+
+
+@app.route("/add_alert", methods=["POST"])
+@require_auth
+def add_alert():
+    d = request.json or {}
+    kind, code = d.get("kind"), (d.get("code") or "").strip()
+    metric, direction = d.get("metric"), d.get("direction")
+    if kind not in _WATCH_KINDS or not code:
+        return jsonify({"error": "kind and code required"}), 400
+    if metric not in _ALERT_METRICS or direction not in ("above", "below"):
+        return jsonify({"error": "bad metric/direction"}), 400
+    try:
+        threshold = float(d.get("threshold"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "threshold must be a number"}), 400
+    row = db_user.add_alert(g.user["id"], kind, code, metric, direction, threshold,
+                            underlying_code=d.get("underlying_code"), note=d.get("note"))
+    return jsonify({"ok": True, "alert": row})
+
+
+@app.route("/remove_alert", methods=["POST"])
+@require_auth
+def remove_alert():
+    alert_id = (request.json or {}).get("id")
+    if not alert_id:
+        return jsonify({"error": "id required"}), 400
+    db_user.remove_alert(g.user["id"], alert_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/record_alert_trigger", methods=["POST"])
+@require_auth
+def record_alert_trigger():
+    """Persist a browser-side alert fire so it survives a reload."""
+    d = request.json or {}
+    alert_id = d.get("id")
+    if not alert_id:
+        return jsonify({"error": "id required"}), 400
+    fired_at = datetime.now(timezone.utc).isoformat()
+    db_user.record_trigger(g.user["id"], alert_id, d.get("value"), fired_at)
+    return jsonify({"ok": True, "last_triggered_at": fired_at})
+
+
+@app.route("/list_positions")
+@require_auth
+def list_positions():
+    return jsonify(db_user.list_positions(g.user["id"]))
+
+
+@app.route("/add_position", methods=["POST"])
+@require_auth
+def add_position():
+    """Create a multi-leg position. At least one leg; no cap on leg count."""
+    d = request.json or {}
+    raw_legs = d.get("legs") or []
+    if not isinstance(raw_legs, list) or not raw_legs:
+        return jsonify({"error": "at least one leg required"}), 400
+    legs = []
+    for raw in raw_legs:
+        kind = raw.get("kind")
+        code = (raw.get("code") or "").strip()
+        if kind not in _LEG_KINDS or not code:
+            return jsonify({"error": f"bad leg: {raw}"}), 400
+        try:
+            quantity = float(raw.get("quantity"))
+            entry_price = float(raw.get("entry_price"))
+            direction = int(raw.get("direction", 1))
+        except (TypeError, ValueError):
+            return jsonify({"error": f"leg needs numeric quantity/entry_price: {code}"}), 400
+        if direction not in (-1, 1) or quantity <= 0:
+            return jsonify({"error": f"leg direction must be ±1 and quantity > 0: {code}"}), 400
+        # Taiwan warrants are long-only: they cannot be written or shorted, so a
+        # short warrant leg is not a position anyone can actually hold.
+        if kind == "warrant" and direction != 1:
+            return jsonify({"error": f"warrants are long-only, cannot short {code}"}), 400
+        leg = {k: raw.get(k) for k in _LEG_FIELDS}
+        leg.update({"kind": kind, "code": code, "quantity": quantity,
+                    "entry_price": entry_price, "direction": direction})
+        if leg.get("option_type") not in ("Call", "Put"):
+            leg["option_type"] = None
+        legs.append(leg)
+    position = db_user.add_position(
+        g.user["id"], legs, name=d.get("name"),
+        underlying_code=d.get("underlying_code"), note=d.get("note"))
+    return jsonify({"ok": True, "position": position})
+
+
+@app.route("/remove_position", methods=["POST"])
+@require_auth
+def remove_position():
+    position_id = (request.json or {}).get("id")
+    if not position_id:
+        return jsonify({"error": "id required"}), 400
+    db_user.remove_position(g.user["id"], position_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/close_position", methods=["POST"])
+@require_auth
+def close_position():
+    position_id = (request.json or {}).get("id")
+    if not position_id:
+        return jsonify({"error": "id required"}), 400
+    now = datetime.now(timezone.utc).isoformat()
+    db_user.close_position(g.user["id"], position_id, now)
+    return jsonify({"ok": True, "closed_at": now})
+
+
+@app.route("/user_quotes", methods=["POST"])
+@require_auth
+def user_quotes():
+    """Current bid/ask/IV/spot for the caller's watchlist + position legs."""
+    instruments = (request.json or {}).get("instruments") or []
+    try:
+        marks = user_marks.quotes(instruments)
+    except Exception as e:
+        applog.log("USER", f"user_quotes failed: {e}\n{traceback.format_exc()}", level="ERROR")
+        return jsonify({"quotes": {}, "error": str(e)})
+    return jsonify({"quotes": marks})
+
+
 @app.route("/list_suggestions")
 @require_auth
 @require_role(ADMIN)
@@ -324,6 +494,7 @@ def remove_tw_option_product():
 
 @app.route("/list_us_option_products")
 @require_auth
+@require_role(ADMIN)
 def list_us_option_products():
     return jsonify(db_products.list_us_option_products())
 
@@ -455,6 +626,7 @@ def read_tw_option():
 
 @app.route("/read_us_option", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def read_us_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
@@ -479,6 +651,7 @@ def read_us_option():
 
 @app.route("/read_us_option_csv", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def read_us_option_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])

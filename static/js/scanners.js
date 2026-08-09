@@ -239,7 +239,9 @@ function renderTable(rows) {
     return;
   }
   const cols = Object.keys(rows[0]);
+  const star = can("watchlist");
   let html = "<table><thead><tr>";
+  if (star) html += `<th title="Watchlist">☆</th>`;
   cols.forEach((c, i) => {
     const arrow = sortCol === i ? (sortAsc ? " ▲" : " ▼") : "";
     html += `<th onclick="sortBy(${i})">${c}${arrow}</th>`;
@@ -248,6 +250,10 @@ function renderTable(rows) {
   rows.forEach(row => {
     const cls = row.type === "Call" ? "call" : "put";
     html += "<tr>";
+    if (star) html += starCell("warrant", row.warrant_code, row.underlying_code,
+      row.warrant_name || row.warrant_code,
+      { type: row.type, strike: row.strike, days_to_expiry: row.days_to_expiry,
+        exercise_ratio: row.exercise_ratio });
     cols.forEach(c => {
       const val = row[c];
       html += `<td>${c === "type" ? `<span class="${cls}">${val}</span>` : val}</td>`;
@@ -455,8 +461,8 @@ function setOptMarket(m, btn) {
   _saveView("ws_optMarket", m);
   document.querySelectorAll("#optmkt-btn-tw,#optmkt-btn-us").forEach(b => b.classList.remove("active"));
   btn.classList.add("active");
-  document.getElementById("optionStockSelect").style.display = m === "tw" ? "" : "none";
-  document.getElementById("optionUsSelect").style.display   = m === "us" ? "" : "none";
+  _setDisplay("optionStockSelect", m === "tw" ? "" : "none");
+  _setDisplay("optionUsSelect", m === "us" ? "" : "none");
   // Product add/remove controls are admin-only, so absent in user mode.
   _setDisplay("twProductBtnRow", m === "tw" ? "" : "none");
   _setDisplay("usProductBtnRow", m === "us" ? "" : "none");
@@ -544,7 +550,10 @@ function renderOptionsTable(rows) {
     return;
   }
   const cols = Object.keys(rows[0]);
+  // Only Taiwan options are starrable — the US chain is admin-only.
+  const star = can("watchlist") && _optMarket === "tw";
   let html = "<table><thead><tr>";
+  if (star) html += `<th title="Watchlist">☆</th>`;
   cols.forEach((c, i) => {
     const arrow = optSortCol === i ? (optSortAsc ? " ▲" : " ▼") : "";
     html += `<th onclick="sortOptBy(${i})">${c}${arrow}</th>`;
@@ -553,6 +562,9 @@ function renderOptionsTable(rows) {
   rows.forEach(row => {
     const cls = row.type === "Call" ? "call" : "put";
     html += "<tr>";
+    if (star) html += starCell("tw_option", row.contract, row.stock_code, row.contract,
+      { type: row.type, strike: row.strike, days_to_expiry: row.days_to_expiry,
+        contract_size: row.exercise_ratio });
     cols.forEach(c => {
       const val = row[c] === null ? "—" : row[c];
       html += `<td>${c === "type" ? `<span class="${cls}">${val}</span>` : val}</td>`;
