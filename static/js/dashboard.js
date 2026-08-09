@@ -25,6 +25,18 @@ let _dashboardLoaded = false;
 
 const qKey = (kind, code) => `${kind}:${code}`;
 
+// PGRST205 = PostgREST cannot find the table. For this tab that always means
+// the migration hasn't been applied, so say that instead of echoing the raw
+// PostgREST payload.
+function _dashError(e) {
+  const msg = (e && e.message) ? e.message : String(e);
+  if (msg.includes("PGRST205") || msg.includes("user_watchlist")) {
+    return "Database tables not created yet — run supabase/migrations/020_user_dashboard.sql "
+         + "in the Supabase SQL editor, then reload.";
+  }
+  return msg;
+}
+
 function _money(v) {
   if (v == null || !isFinite(v)) return "—";
   const sign = v < 0 ? "-" : "";
@@ -73,7 +85,7 @@ async function loadDashboard() {
     await refreshQuotes();
     if (status) status.textContent = "";
   } catch (e) {
-    if (status) status.textContent = "Could not load dashboard: " + (e.message || e);
+    if (status) status.textContent = "Could not load dashboard: " + _dashError(e);
   }
   renderDashboard();
 }
@@ -255,9 +267,9 @@ async function toggleStar(el, payload) {
     // Roll the optimistic toggle back and say why — a silently un-starring
     // star just looks like the button is broken.
     el.textContent = on ? "★" : "☆";
-    el.title = "Watchlist write failed: " + (e.message || e);
+    el.title = "Watchlist write failed: " + _dashError(e);
     if (on) watchSet.add(key); else watchSet.delete(key);
-    alert("Could not update watchlist: " + (e.message || e));
+    alert("Could not update watchlist: " + _dashError(e));
     return;
   }
   _dashboardLoaded = false;   // next dashboard visit re-reads the list
@@ -399,7 +411,7 @@ async function submitAlert() {
     closeAlertForm();
     renderAlerts();
   } catch (e) {
-    err.textContent = "Could not save alert: " + (e.message || e);
+    err.textContent = "Could not save alert: " + _dashError(e);
   }
 }
 
@@ -535,7 +547,7 @@ async function submitPosition() {
     closeNewPosition();
     await loadDashboard();
   } catch (e) {
-    err.textContent = "Could not save position: " + (e.message || e);
+    err.textContent = "Could not save position: " + _dashError(e);
   }
 }
 
