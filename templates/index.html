@@ -11,11 +11,18 @@
   </head>
   <body>
     <button id="logoutBtn" onclick="_logout()" style="display:none;position:fixed;top:8px;right:12px;z-index:9999;padding:5px 10px;font-size:11px;font-family:inherit;background:var(--surface,#1a1d2a);color:var(--muted,#8b90a0);border:1px solid var(--border,#252836);border-radius:6px;cursor:pointer">Logout</button>
+    <!-- Dev-only mode switch: writes the app_mode cookie and reloads, so the
+         SERVER re-renders without the admin markup/scripts. Not a security
+         gate — see services/roles.py. -->
+    <button id="modeBtn" onclick="toggleMode()"
+            title="Switch between admin (all features) and user (scanner product) mode"
+            style="position:fixed;top:36px;right:12px;z-index:9999;padding:5px 10px;font-size:11px;font-family:inherit;background:var(--surface,#1a1d2a);color:{% if show_admin %}#fbbf24{% else %}#4f8ef7{% endif %};border:1px solid var(--border,#252836);border-radius:6px;cursor:pointer">{% if show_admin %}Admin mode{% else %}User mode{% endif %}</button>
     <header>
       <h1>Warrant Scanner</h1>
       <span class="badge">TW</span>
     </header>
 
+    {% if show_admin %}
     <style>
       #market-clock{position:fixed;right:14px;bottom:14px;z-index:900;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 11px;font-size:11px;color:var(--muted);box-shadow:0 4px 16px rgba(0,0,0,.35);min-width:150px;user-select:none}
       #market-clock .mc-clocks{display:flex;justify-content:space-between;gap:10px;margin-bottom:7px;padding-bottom:6px;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums}
@@ -37,17 +44,24 @@
       <div class="mc-row" id="mc-row-tw"><span class="mc-lbl">TWSE</span><span class="mc-badge mc-closed" id="mc-tw-st">–</span></div>
       <div class="mc-row" id="mc-row-tx"><span class="mc-lbl">TAIFEX opt</span><span class="mc-badge mc-closed" id="mc-tx-st">–</span></div>
     </div>
+    {% endif %}
 
+    <!-- Home is the landing tab in admin mode; user mode starts on Options. -->
     <div class="tab-bar">
+      {% if show_admin %}
       <button class="active" onclick="switchTab('home', this); loadHomeOnce()">Home</button>
-      <button onclick="switchTab('options', this)">Options Scanner</button>
+      {% endif %}
+      <button {% if not show_admin %}class="active"{% endif %} onclick="switchTab('options', this)">Options Scanner</button>
       <button onclick="switchTab('scanner', this)">Warrant Scanner</button>
       <button onclick="switchTab('ivsurface', this)">IV Surface</button>
+      {% if show_admin %}
       <button onclick="switchTab('arb', this)">Arb Finder</button>
       <button onclick="switchTab('portfolio', this); loadPortfolioOnce()">Portfolio</button>
+      {% endif %}
     </div>
 
-    <!-- OPTIONS TAB -->
+    {% if show_admin %}
+    <!-- HOME TAB -->
     <div id="tab-home" class="tab-content active">
       <div class="home-dash">
         <div id="home-scan" class="home-scanline"></div>
@@ -121,8 +135,10 @@
         </section>
       </div>
     </div>
+    {% endif %}
 
-    <div id="tab-options" class="tab-content">
+    <!-- OPTIONS TAB -->
+    <div id="tab-options" class="tab-content{% if not show_admin %} active{% endif %}">
       <main>
         <div style="display:flex;gap:6px;border-bottom:1px solid var(--border);margin-bottom:14px">
           <button id="optmkt-btn-tw" class="pfsub-btn active" onclick="setOptMarket('tw', this)">Taiwan options</button>
@@ -134,6 +150,7 @@
             <!-- Taiwan-listed TAIFEX options -->
             <select id="optionStockSelect" multiple size="6">
             </select>
+            {% if show_admin %}
             <div class="btn-row" id="twProductBtnRow">
               <button class="sm" onclick="toggleAddProduct('tw_option')">+ Add Product</button>
               <button class="sm" onclick="removeSelectedProduct('tw_option')">Remove Selected</button>
@@ -146,9 +163,11 @@
               <input type="text" id="newTwName" placeholder="Name (optional)" />
               <button class="sm" onclick="addTwOptionProduct()">Confirm</button>
             </div>
+            {% endif %}
             <!-- US ADR (American) options — hidden until toggled -->
             <select id="optionUsSelect" multiple size="6" style="display:none">
             </select>
+            {% if show_admin %}
             <div class="btn-row" id="usProductBtnRow" style="display:none">
               <button class="sm" onclick="toggleAddProduct('us_option')">+ Add Product</button>
               <button class="sm" onclick="removeSelectedProduct('us_option')">Remove Selected</button>
@@ -161,6 +180,7 @@
               <input type="text" id="newUsName" placeholder="Name (optional)" />
               <button class="sm" onclick="addUsOptionProduct()">Confirm</button>
             </div>
+            {% endif %}
           </div>
           <label>Option Type
             <select id="optionsType">
@@ -211,14 +231,18 @@
             </select>
             <div class="btn-row">
               <button class="sm" onclick="toggleSelectAll()">Select All</button>
+              {% if show_admin %}
               <button class="sm" onclick="toggleAddProduct('warrant')">+ Add Stock</button>
               <button class="sm" onclick="removeSelectedProduct('warrant')">Remove Selected</button>
+              {% endif %}
             </div>
+            {% if show_admin %}
             <div id="addForm_warrant" class="add-product-form" style="display:none">
               <input type="text" id="newWarrantCode" placeholder="Code e.g. 2412" oninput="lookupWarrantName()" />
               <span id="warrantLookupResult" style="font-size:12px;color:var(--muted)"></span>
               <button class="sm" onclick="addWarrantStock()">Confirm</button>
             </div>
+            {% endif %}
           </div>
 
           <label>Option Type
@@ -247,7 +271,7 @@
           <div class="action-group compact">
             <button class="primary" id="readWarrantBtn" onclick="readWarrant()">Read Warrants</button>
             <button class="sm" id="refreshWarrantsBtn" onclick="syncWarrant()">Sync now</button>
-            <button class="sm" id="syncUniverseBtn" onclick="syncUniverse()" title="Re-scrape all TWSE/TPEx listed securities (~3-5 min) — updates which warrants exist and their listing dates. Separate from the price sync above.">Sync Universe</button>
+            {% if show_admin %}<button class="sm" id="syncUniverseBtn" onclick="syncUniverse()" title="Re-scrape all TWSE/TPEx listed securities (~3-5 min) — updates which warrants exist and their listing dates. Separate from the price sync above.">Sync Universe</button>{% endif %}
             <button class="success" id="downloadBtn" onclick="downloadCSV()" style="display:none">
               Download CSV
             </button>
@@ -320,6 +344,7 @@
       </main>
     </div>
 
+    {% if show_admin %}
     <!-- ARB FINDER TAB -->
     <div id="tab-arb" class="tab-content">
       <main>
@@ -839,19 +864,26 @@
         <div id="straddle-modal-body"></div>
       </div>
     </div>
+    {% endif %}
 
     <!-- Server-injected config (Jinja); the static JS reads these off window. -->
     <script>
       window.SUPABASE_URL = "{{ supabase_url }}";
       window.SUPABASE_ANON_KEY = "{{ supabase_anon_key }}";
       window.LOCAL_MODE = {{ 'true' if local_mode else 'false' }};
+      window.APP_MODE = "{{ app_mode }}";
     </script>
-    <!-- Load order matters: common -> quant -> scanners -> arb -> portfolio (boot runs last). -->
+    <!-- Load order matters: features -> common -> scanners, then the admin-only
+         bundle (quant -> arb -> portfolio -> home). _boot() lives at the end of
+         common.js and runs on DOMContentLoaded, after every file has parsed. -->
+    <script src="{{ url_for('static', filename='js/features.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/common.js', v=ASSET_VERSION) }}"></script>
-    <script src="{{ url_for('static', filename='js/quant.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/scanners.js', v=ASSET_VERSION) }}"></script>
+    {% if show_admin %}
+    <script src="{{ url_for('static', filename='js/quant.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/arb.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/portfolio.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/home.js', v=ASSET_VERSION) }}"></script>
+    {% endif %}
   </body>
 </html>

@@ -143,14 +143,16 @@ function switchTab(tab, btn) {
 // different view was active. Runs after auth in _boot.
 
 function restoreView() {
-  // Home is the landing tab (rendered active in the HTML). Only act when a
-  // different tab was saved before the last reload.
+  // Home is the landing tab in admin mode (rendered active in the HTML); user
+  // mode lands on Options. Only act when a different tab was saved before the
+  // last reload — and only if that tab exists in this mode, so a saved arb tab
+  // doesn't strand a user-mode page on nothing.
   const tab = _readView("ws_activeTab");
   if (tab && tab !== "home") {
     const btn = document.querySelector(`.tab-bar button[onclick*="switchTab('${tab}'"]`);
-    if (btn) {
+    if (btn && document.getElementById("tab-" + tab)) {
       switchTab(tab, btn);
-      if (tab === "portfolio") loadPortfolioOnce();
+      if (tab === "portfolio" && typeof loadPortfolioOnce === "function") loadPortfolioOnce();
     }
   }
   // Whatever landed active: if it's Home, populate it now.
@@ -215,7 +217,7 @@ function currentSelection(id) {
 }
 
 // Fetch all three product lists and populate every product/stock <select> on
-// the page. Called once from _boot() (portfolio.js), and again after every
+// the page. Called once from _boot(), and again after every
 // add/remove (Phase 5.5) so derived selects (the two-list intersections)
 // stay correct. Each select's current selection is preserved across a
 // refresh; the hardcoded fallback only applies the first time (nothing
@@ -279,9 +281,12 @@ function _mcSet(id, txt, cls) {
   e.textContent = txt; e.className = "mc-badge " + cls;
 }
 function updateMarketClock() {
+  // The widget is admin-only, so the elements are absent in user mode.
+  const nyEl = document.getElementById("mc-ny-time");
+  if (!nyEl) return;
   const et = _tzParts("America/New_York"), tp = _tzParts("Asia/Taipei"),
         pt = _tzParts("America/Los_Angeles");
-  document.getElementById("mc-ny-time").textContent = et.str;
+  nyEl.textContent = et.str;
   document.getElementById("mc-pt-time").textContent = pt.str;
   document.getElementById("mc-tw-time").textContent = tp.str;
   const nyWknd = et.wd === "Sat" || et.wd === "Sun", nt = et.mins;
@@ -349,5 +354,39 @@ function mcBuildTips() {
   }
 }
 
-updateMarketClock(); mcBuildTips();
-setInterval(() => { updateMarketClock(); mcBuildTips(); }, 15000);
+if (can("clock")) {
+  updateMarketClock(); mcBuildTips();
+  setInterval(() => { updateMarketClock(); mcBuildTips(); }, 15000);
+}
+
+// ── Boot ─────────────────────────────────────────────────────────────
+// Auth gate + first render. Lives here, not in portfolio.js, because user mode
+// never loads portfolio.js and would otherwise boot without a session check.
+// Deferred to DOMContentLoaded so the admin-only scripts loaded after this file
+// have defined loadPortfolioOnce/loadHomeOnce by the time restoreView runs.
+
+async function _boot() {
+  if (!LOCAL_MODE && SUPABASE_URL && !_sb) {
+    // Auth is configured but supabase-js never loaded (CDN blocked).
+    document.body.innerHTML =
+      '<div style="max-width:420px;margin:15vh auto;text-align:center;font-family:inherit;color:#e2e8f0">' +
+      '<h2 style="font-size:18px;margin-bottom:10px">Could not load the sign-in library</h2>' +
+      '<p style="color:#8b90a0;font-size:13px">The script from cdn.jsdelivr.net was blocked. Disable ad-blockers for this site and reload.</p></div>';
+    return;
+  }
+  if (_sb) {
+    const { data } = await _sb.auth.getSession();
+    if (!data.session) { location.replace("/login"); return; }
+    document.getElementById("logoutBtn").style.display = "block";
+    _sb.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_OUT" || !session) location.replace("/login");
+    });
+  }
+  await initProductSelects();
+  // Portfolio is loaded lazily on first Portfolio-tab click (loadPortfolioOnce),
+  // not here — the landing tab doesn't use it. Saves /get_portfolio +
+  // /adr_premium_scenario calls on every reload.
+  restoreView();   // put the user back on the tab/market they had before reload
+}
+
+document.addEventListener("DOMContentLoaded", _boot);

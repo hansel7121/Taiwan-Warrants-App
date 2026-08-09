@@ -444,6 +444,12 @@ async function fetchIVSurface() {
 
 let _optMarket = "tw";   // "tw" = TAIFEX (European), "us" = US ADR (American)
 
+// Set an element's display, tolerating elements the current mode doesn't render.
+function _setDisplay(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = value;
+}
+
 function setOptMarket(m, btn) {
   _optMarket = m;
   _saveView("ws_optMarket", m);
@@ -451,10 +457,11 @@ function setOptMarket(m, btn) {
   btn.classList.add("active");
   document.getElementById("optionStockSelect").style.display = m === "tw" ? "" : "none";
   document.getElementById("optionUsSelect").style.display   = m === "us" ? "" : "none";
-  document.getElementById("twProductBtnRow").style.display = m === "tw" ? "" : "none";
-  document.getElementById("usProductBtnRow").style.display = m === "us" ? "" : "none";
-  document.getElementById("addForm_tw_option").style.display = "none";
-  document.getElementById("addForm_us_option").style.display = "none";
+  // Product add/remove controls are admin-only, so absent in user mode.
+  _setDisplay("twProductBtnRow", m === "tw" ? "" : "none");
+  _setDisplay("usProductBtnRow", m === "us" ? "" : "none");
+  _setDisplay("addForm_tw_option", "none");
+  _setDisplay("addForm_us_option", "none");
   // Min Leverage is a warrant/TW-option metric; US chain has no leverage col.
   const lev = document.getElementById("optMinLeverage").closest("label");
   if (lev) lev.style.display = m === "us" ? "none" : "";

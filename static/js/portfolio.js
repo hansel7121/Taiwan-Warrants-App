@@ -607,28 +607,3 @@ document.getElementById("portfolioModal").addEventListener("click", e => {
   if (e.target === document.getElementById("portfolioModal")) closePortfolioModal();
 });
 
-async function _boot() {
-  if (!LOCAL_MODE && SUPABASE_URL && !_sb) {
-    // Auth is configured but supabase-js never loaded (CDN blocked).
-    document.body.innerHTML =
-      '<div style="max-width:420px;margin:15vh auto;text-align:center;font-family:inherit;color:#e2e8f0">' +
-      '<h2 style="font-size:18px;margin-bottom:10px">Could not load the sign-in library</h2>' +
-      '<p style="color:#8b90a0;font-size:13px">The script from cdn.jsdelivr.net was blocked. Disable ad-blockers for this site and reload.</p></div>';
-    return;
-  }
-  if (_sb) {
-    const { data } = await _sb.auth.getSession();
-    if (!data.session) { location.replace("/login"); return; }
-    document.getElementById("logoutBtn").style.display = "block";
-    _sb.auth.onAuthStateChange((event, session) => {
-      if (event === "SIGNED_OUT" || !session) location.replace("/login");
-    });
-  }
-  await initProductSelects();
-  // Portfolio is loaded lazily on first Portfolio-tab click (loadPortfolioOnce),
-  // not here — the landing tab doesn't use it. Saves /get_portfolio +
-  // /adr_premium_scenario calls on every reload.
-  restoreView();   // put the user back on the tab/market they had before reload
-}
-
-_boot();

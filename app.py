@@ -8,12 +8,14 @@ from services import auth
 from services import db
 from services import db_products
 from services import db_suggestions
+from services import roles
 from services import store
 from logic import arb_logic
 # Aliased: the route functions below are named iv_surface / close_quote.
 from logic import iv_surface as iv_surface_logic
 from logic import close_quote as close_quote_logic
 from services.auth import require_auth
+from services.roles import require_role, ADMIN
 import os
 import io
 import json
@@ -154,7 +156,9 @@ def _log_request_teardown(exc):
 
 @app.route("/")
 def index():
-    return render_template("index.html", **auth.public_config())
+    # roles.template_flags() decides which tabs and script tags the page even
+    # contains — user mode never receives the arb/portfolio markup or JS.
+    return render_template("index.html", **auth.public_config(), **roles.template_flags())
 
 
 @app.route("/login")
@@ -176,12 +180,14 @@ def check_email():
 
 @app.route("/get_portfolio")
 @require_auth
+@require_role(ADMIN)
 def get_portfolio():
     return jsonify(store.get_portfolio(g.user["id"]))
 
 
 @app.route("/save_portfolio", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def save_portfolio():
     store.save_portfolio(g.user["id"], request.json or [])
     return jsonify({"ok": True})
@@ -189,6 +195,7 @@ def save_portfolio():
 
 @app.route("/close_quote", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def close_quote():
     """Current market inputs used to book a trade's realized P&L at close.
 
@@ -220,6 +227,7 @@ def list_warrant_stocks():
 
 @app.route("/add_warrant_stock", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def add_warrant_stock():
     data = request.json or {}
     code = (data.get("code") or "").strip()
@@ -231,6 +239,7 @@ def add_warrant_stock():
 
 @app.route("/remove_warrant_stock", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def remove_warrant_stock():
     data = request.json or {}
     code = (data.get("code") or "").strip()
@@ -242,6 +251,7 @@ def remove_warrant_stock():
 
 @app.route("/lookup_warrant_stock")
 @require_auth
+@require_role(ADMIN)
 def lookup_warrant_stock():
     code = (request.args.get("code") or "").strip()
     info = warrant_logic._universe().get(code)
@@ -250,12 +260,14 @@ def lookup_warrant_stock():
 
 @app.route("/list_suggestions")
 @require_auth
+@require_role(ADMIN)
 def list_suggestions():
     return jsonify(db_suggestions.list_active_suggestions())
 
 
 @app.route("/remove_suggestion", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def remove_suggestion():
     data = request.json or {}
     sug_id = (data.get("id") or "").strip()
@@ -267,6 +279,7 @@ def remove_suggestion():
 
 @app.route("/clear_suggestions", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def clear_suggestions():
     db_suggestions.clear_active_suggestions()
     return jsonify({"ok": True})
@@ -280,6 +293,7 @@ def list_tw_option_products():
 
 @app.route("/add_tw_option_product", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def add_tw_option_product():
     data = request.json or {}
     code = (data.get("code") or "").strip()
@@ -297,6 +311,7 @@ def add_tw_option_product():
 
 @app.route("/remove_tw_option_product", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def remove_tw_option_product():
     data = request.json or {}
     code = (data.get("code") or "").strip()
@@ -315,6 +330,7 @@ def list_us_option_products():
 
 @app.route("/add_us_option_product", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def add_us_option_product():
     data = request.json or {}
     code = (data.get("code") or "").strip()
@@ -330,6 +346,7 @@ def add_us_option_product():
 
 @app.route("/remove_us_option_product", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def remove_us_option_product():
     data = request.json or {}
     code = (data.get("code") or "").strip()
@@ -595,6 +612,7 @@ def universe_status():
 
 @app.route("/adr_premium", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def adr_premium():
     data = request.json
     stock_code = data.get("stock_code")
@@ -608,6 +626,7 @@ def adr_premium():
 
 @app.route("/adr_premium_scenario", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def adr_premium_scenario():
     data = request.json
     stock_code = data.get("stock_code")
@@ -622,6 +641,7 @@ def adr_premium_scenario():
 
 @app.route("/match_warrant_us_option", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def match_warrant_us_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
@@ -651,6 +671,7 @@ def match_warrant_us_option():
 
 @app.route("/match_warrant_us_option_csv", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def match_warrant_us_option_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
@@ -681,6 +702,7 @@ def match_warrant_us_option_csv():
 
 @app.route("/match_tw_us_option", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def match_tw_us_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
@@ -708,6 +730,7 @@ def match_tw_us_option():
 
 @app.route("/match_tw_us_option_csv", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def match_tw_us_option_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
@@ -737,6 +760,7 @@ def match_tw_us_option_csv():
 
 @app.route("/match_warrant_tw_option", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def match_warrant_tw_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["2330"])
@@ -778,6 +802,7 @@ def match_warrant_tw_option():
 
 @app.route("/match_warrant_tw_option_csv", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def match_warrant_tw_option_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2330"])
@@ -822,6 +847,7 @@ def _straddle_params(data):
 
 @app.route("/straddle_arbitrage", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def straddle_arbitrage():
     p = _straddle_params(request.json)
     try:
@@ -843,6 +869,7 @@ def straddle_arbitrage():
 
 @app.route("/straddle_arbitrage_csv", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def straddle_arbitrage_csv():
     p = _straddle_params(request.json)
     try:
@@ -932,6 +959,7 @@ def sync_us_option():
 
 @app.route("/sync_universe", methods=["POST"])
 @require_auth
+@require_role(ADMIN)
 def sync_universe():
     return jsonify(scheduler.force_refresh("universe"))
 
