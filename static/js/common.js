@@ -47,6 +47,23 @@ async function api(url, opts) {
   return res;
 }
 
+// api() + JSON, raising on any non-2xx instead of handing back an error page.
+// api() only redirects/throws for 401/403, so a 500 would otherwise reach
+// res.json() as Flask's HTML error page and fail with the opaque
+// "Unexpected token '<'". Surfaces the server's {"error": ...} when there is
+// one, the status line otherwise.
+
+async function apiJson(url, opts) {
+  const res = await api(url, opts);
+  const body = await res.text();
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (JSON.parse(body) || {}).error || ""; } catch (e) {}
+    throw new Error(detail || `${res.status} ${res.statusText || "request failed"}`);
+  }
+  return body ? JSON.parse(body) : null;
+}
+
 // "updated N min ago" suffix for scanner status lines, from the
 // as_of/cached fields the backend attaches to cached market data.
 

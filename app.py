@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, jsonify, Response, g
+from werkzeug.exceptions import HTTPException
 from services import applog
 from logic import warrant_logic
 from logic import options_logic
@@ -154,6 +155,23 @@ def _log_request_teardown(exc):
     # always runs, so an unhandled error still gets its completion line.
     if exc is not None:
         _log_request_end(f"EXC {type(exc).__name__}: {exc}")
+
+
+@app.errorhandler(Exception)
+def _json_error(exc):
+    """Fail as JSON on API routes — the frontend parses every response body.
+
+    Without this, an unhandled exception returns Flask's HTML error page and the
+    browser reports "Unexpected token '<'", which says nothing about the actual
+    failure. Page routes keep their normal HTML error.
+    """
+    code = exc.code if isinstance(exc, HTTPException) else 500
+    if request.path in ("/", "/login"):
+        raise exc
+    if not isinstance(exc, HTTPException):
+        applog.log("REQ", f"unhandled {type(exc).__name__}: {exc}\n"
+                          f"{traceback.format_exc()}", level="ERROR")
+    return jsonify({"error": str(exc)}), code
 
 
 @app.route("/")

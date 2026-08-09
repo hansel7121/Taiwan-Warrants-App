@@ -62,9 +62,9 @@ async function loadDashboard() {
   if (status) status.textContent = "Loading…";
   try {
     const [w, a, p] = await Promise.all([
-      api("/list_watchlist").then(r => r.json()),
-      api("/list_alerts").then(r => r.json()),
-      api("/list_positions").then(r => r.json()),
+      apiJson("/list_watchlist"),
+      apiJson("/list_alerts"),
+      apiJson("/list_positions"),
     ]);
     watchlistData = Array.isArray(w) ? w : [];
     alertsData = Array.isArray(a) ? a : [];
@@ -92,12 +92,11 @@ async function refreshQuotes() {
   positionsData.forEach(p => (p.legs || []).forEach(
     l => add(l.kind, l.code, (l.meta && l.meta.underlying_code) || p.underlying_code)));
   if (!instruments.length) { quoteMap = {}; return; }
-  const res = await api("/user_quotes", {
+  const data = await apiJson("/user_quotes", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ instruments }),
   });
-  const data = await res.json();
   quoteMap = data.quotes || {};
 }
 
@@ -205,11 +204,10 @@ function renderPositions() {
 // Closing keeps the row (and its history) but drops it out of the P&L widget,
 // which only marks open positions.
 async function closePosition(id) {
-  const res = await api("/close_position", {
+  const data = await apiJson("/close_position", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id }),
   });
-  const data = await res.json();
   const p = positionsData.find(x => x.id === id);
   if (p) p.closed_at = data.closed_at;
   renderDashboard();
@@ -217,7 +215,7 @@ async function closePosition(id) {
 
 async function deletePosition(id) {
   if (!confirm("Delete this position? This cannot be undone.")) return;
-  await api("/remove_position", {
+  await apiJson("/remove_position", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id }),
   });
@@ -249,14 +247,17 @@ async function toggleStar(el, payload) {
   el.textContent = on ? "☆" : "★";
   if (on) watchSet.delete(key); else watchSet.add(key);
   try {
-    await api(route, {
+    await apiJson(route, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(item),
     });
   } catch (e) {
-    // Roll the optimistic toggle back if the write failed.
+    // Roll the optimistic toggle back and say why — a silently un-starring
+    // star just looks like the button is broken.
     el.textContent = on ? "★" : "☆";
+    el.title = "Watchlist write failed: " + (e.message || e);
     if (on) watchSet.add(key); else watchSet.delete(key);
+    alert("Could not update watchlist: " + (e.message || e));
     return;
   }
   _dashboardLoaded = false;   // next dashboard visit re-reads the list
@@ -291,7 +292,7 @@ function renderWatchlist() {
 }
 
 async function removeStarred(kind, code) {
-  await api("/remove_watchlist", {
+  await apiJson("/remove_watchlist", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ kind, code }),
   });
@@ -351,7 +352,7 @@ function renderAlerts() {
 
 // Fire-and-forget: a failed write only costs the "last fired" timestamp.
 function recordTrigger(alert, value) {
-  api("/record_alert_trigger", {
+  apiJson("/record_alert_trigger", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id: alert.id, value }),
   }).catch(() => {});
@@ -390,12 +391,10 @@ async function submitAlert() {
     threshold,
   };
   try {
-    const res = await api("/add_alert", {
+    const data = await apiJson("/add_alert", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const data = await res.json();
-    if (data.error) { err.textContent = data.error; return; }
     alertsData.unshift(data.alert);
     closeAlertForm();
     renderAlerts();
@@ -405,7 +404,7 @@ async function submitAlert() {
 }
 
 async function deleteAlert(id) {
-  await api("/remove_alert", {
+  await apiJson("/remove_alert", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id }),
   });
@@ -529,12 +528,10 @@ async function submitPosition() {
     legs,
   };
   try {
-    const res = await api("/add_position", {
+    await apiJson("/add_position", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const data = await res.json();
-    if (data.error) { err.textContent = data.error; return; }
     closeNewPosition();
     await loadDashboard();
   } catch (e) {
