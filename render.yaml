@@ -4,11 +4,10 @@ services:
     runtime: python
     # Upgraded from starter (512 MB) after repeated OOM restarts: a forced
     # full warrant re-fetch following a universe change has been observed
-    # peaking at 640 MB RSS, over the starter cap (issue #57). standard gives
-    # 1 vCPU / 2 GB. Keep this in sync with the dashboard — Render calls this
-    # tier "Pro" in the UI but "standard" is its API/blueprint slug; a stale
-    # `starter` here would silently downgrade the service on the next
-    # blueprint sync even though the dashboard shows Pro.
+    # peaking at 640 MB RSS, over the starter cap (issue #57). `standard`
+    # gives 1 vCPU / 2 GB. Keep this in sync with the dashboard's actual
+    # tier -- a stale `starter` here would silently downgrade the service
+    # on the next blueprint sync.
     plan: standard
     buildCommand: pip install -r requirements.txt
     # Exactly 1 worker: market-data caches live in process memory + APScheduler.
@@ -18,7 +17,16 @@ services:
     # observed in production on the starter plan). More headroom, paired with
     # services/scheduler.py's sync lock and fewer arb_logic threads, which cut
     # the actual CPU contention causing the stalls.
-    startCommand: gunicorn -w 1 --threads 8 --timeout 240 -b 0.0.0.0:$PORT wsgi:app
+    #
+    # threads 24 (was 8, issue #57): /live_prices/stream holds a gthread for
+    # its entire connection lifetime (one per open Live Warrant tab, capped by
+    # _SSE_MAX_STREAMS=4), not just per-request. At 8 threads, a couple of
+    # open tabs plus a page load's burst of @require_auth calls could pin
+    # enough of the pool to starve /healthz past Render's 5s check, killing
+    # the instance -- observed only after the live-warrant SSE route shipped.
+    # Threads are cheap and this workload is I/O-bound, so headroom here comes
+    # free with the standard-plan CPU/RAM upgrade above.
+    startCommand: gunicorn -w 1 --threads 24 --timeout 240 -b 0.0.0.0:$PORT wsgi:app
     healthCheckPath: /healthz
     envVars:
       - key: PYTHON_VERSION

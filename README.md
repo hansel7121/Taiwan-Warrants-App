@@ -148,7 +148,7 @@ After the service is created, set these three secrets in the Render dashboard (t
 - `SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`
 
-The blueprint uses the **starter** plan; the free tier's 512 MB is tight for the pandas/numpy/scipy working set.
+The blueprint uses the **standard** plan (1 vCPU / 2 GB) — the starter tier's 512 MB proved too tight for the pandas/numpy/scipy working set (a forced full warrant re-fetch has been observed peaking near 640 MB RSS).
 
 **Post-deploy:** add the live Render URL (e.g. `https://<service>.onrender.com`) to your Supabase project's **Auth → URL Configuration → Redirect URLs**, or magic-link sign-in will fail.
 

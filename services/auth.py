@@ -22,6 +22,13 @@ _jwks_client = None
 _allow_cache = {}  # email -> (expiry_epoch, bool)
 _ALLOW_TTL = 60
 
+# PyJWKClient defaults to a 30s network timeout. On a single gthread-worker
+# process every @require_auth route (and the SSE handshake) runs this on
+# whatever thread picks up the request, so a slow/flaky Supabase auth backend
+# could pin a thread for up to 30s per hit -- enough, combined with a few
+# threads held open by /live_prices/stream, to starve /healthz (issue #57).
+_JWKS_TIMEOUT_SEC = float(os.environ.get("JWKS_TIMEOUT_SEC", "5"))
+
 
 def local_mode():
     """True on a local redundancy instance that acts as a fixed user with no login.
@@ -46,7 +53,7 @@ def _jwks():
     global _jwks_client
     if _jwks_client is None:
         url = os.environ["SUPABASE_URL"].rstrip("/") + "/auth/v1/.well-known/jwks.json"
-        _jwks_client = PyJWKClient(url)
+        _jwks_client = PyJWKClient(url, timeout=_JWKS_TIMEOUT_SEC)
     return _jwks_client
 
 
