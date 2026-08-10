@@ -82,11 +82,13 @@ def _is_allowed(email):
     if hit and hit[0] > now:
         return hit[1]
     try:
-        r = db.client().table("allowed_users").select("email").eq("email", email).execute()
-        ok = bool(r.data)
+        r = db.run(lambda c: c.table("allowed_users").select("email").eq("email", email).execute())
     except Exception as e:
+        # A transient Supabase hiccup is not proof the user isn't allowed -
+        # don't cache it, or one blip locks a real user out for _ALLOW_TTL.
         print(f"AUTH: allowlist check failed for {email}: {e}", flush=True)
-        ok = False
+        return False
+    ok = bool(r.data)
     _allow_cache[email] = (now + _ALLOW_TTL, ok)
     return ok
 
