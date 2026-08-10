@@ -139,11 +139,6 @@ def _run(build):
         return build(client())
 
 
-def run(build):
-    """Public entry point to `_run`'s retry-once-on-transport-error query execution."""
-    return _run(build)
-
-
 def _now():
     return datetime.now(timezone.utc).isoformat()
 
