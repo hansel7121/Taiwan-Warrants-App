@@ -317,7 +317,7 @@ async function loadConnectionStatus() {
   let html = '<table style="border-collapse:collapse;font-size:13px">'
     + '<tr><th style="text-align:left;padding:4px 12px 4px 0">Account</th>'
     + '<th style="text-align:left;padding:4px 12px 4px 0">Status</th>'
-    + '<th style="text-align:left;padding:4px 12px 4px 0">Subscribed</th></tr>';
+    + '<th style="text-align:left;padding:4px 12px 4px 0">Subscribed</th><th></th></tr>';
   rows.forEach(r => {
     const account = r.broker.toUpperCase() + (r.is_you ? " (you)" : "");
     const status = r.status || "not yet reported";
@@ -326,11 +326,49 @@ async function loadConnectionStatus() {
     // printing its share of the watchlist would claim a subscription that has
     // never existed.
     const subscribed = r.status ? `${r.subscribed}/${r.capacity}` : `—/${r.capacity}`;
+    // Only the caller's own account can be told to connect/disconnect — this
+    // panel lists every account in the shared pool, not just the caller's.
+    let action = "";
+    if (r.is_you) {
+      const live = r.status === "connected" || r.status === "reconnecting";
+      action = live
+        ? `<button class="sm" onclick="disconnectBroker('${r.broker}')">Disconnect</button>`
+        : `<button class="sm" onclick="connectBroker('${r.broker}')">Connect</button>`;
+    }
     html += `<tr><td style="padding:4px 12px 4px 0">${account}</td>`
       + `<td style="padding:4px 12px 4px 0;color:${colour}">${status}</td>`
-      + `<td style="padding:4px 12px 4px 0">${subscribed}</td></tr>`;
+      + `<td style="padding:4px 12px 4px 0">${subscribed}</td>`
+      + `<td>${action}</td></tr>`;
   });
   container.innerHTML = html + "</table>";
+}
+
+// Records connect/disconnect intent (broker_desired_state); the worker picks
+// it up on its own poll (~20s), so the panel is re-fetched after a short delay
+// rather than expecting an immediate status flip.
+async function connectBroker(broker) {
+  await _setBrokerDesiredState("/broker/connect", broker);
+}
+
+async function disconnectBroker(broker) {
+  await _setBrokerDesiredState("/broker/disconnect", broker);
+}
+
+async function _setBrokerDesiredState(path, broker) {
+  try {
+    const res = await api(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ broker }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) { _bcStatus(data.error || "Request failed", true); return; }
+  } catch (e) {
+    _bcStatus("Request failed: " + (e && e.message ? e.message : e), true);
+    return;
+  }
+  await loadConnectionStatus();
+  setTimeout(loadConnectionStatus, 5000);
 }
 
 // ── Live prices ─────────────────────────────────────────────────────────────
