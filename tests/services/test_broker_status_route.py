@@ -51,6 +51,14 @@ def _watch(store, *codes):
         store.table("watchlist").append({"code": code, "added_by": USER})
 
 
+def _assign(store, user_id, broker, *codes):
+    """Seed `live_assignment` the way the worker's publish() would: one row per
+    code actually carried, independent of what pool.assign() would have packed."""
+    for code in codes:
+        store.table("live_assignment").append(
+            {"code": code, "broker": broker, "user_id": user_id, "connection_index": 0})
+
+
 def _rows(client):
     r = client.get("/broker/status")
     assert r.status_code == 200
@@ -140,9 +148,9 @@ def test_capacity_is_the_accounts_whole_tier(client, store):
 
 def test_subscribed_sums_every_connection_of_the_account(client, store):
     """One combined count per account, not a per-connection breakdown — these
-    three codes land on two different connections of the same account."""
+    three codes are spread across the account's connections by the worker."""
     store.credit(USER, "kgi", symbols_per_connection=2, connections=2)
-    _watch(store, "A", "B", "C")
+    _assign(store, USER, "kgi", "A", "B", "C")
 
     row = _rows(client)[0]
     assert row["subscribed"] == 3
@@ -155,28 +163,35 @@ def test_an_idle_account_reports_zero_subscribed(client, store):
     assert _rows(client)[0]["subscribed"] == 0
 
 
-def test_a_watchlist_past_one_accounts_capacity_spills_to_the_next(client, store):
-    """The pool packs one account full before using the next (pool.assign), so
-    the counts have to reflect that packing rather than an even split."""
+def test_a_credentialed_but_unconnected_account_reports_zero_even_with_room(client, store):
+    """The worker's own live_assignment is the only source of truth here — an
+    idle KGI credential must never claim codes it never actually opened a
+    session to carry, even though pool.assign() would have packed them there
+    first by broker order."""
+    store.credit(USER, "kgi", symbols_per_connection=10, connections=1)
+    store.credit(USER, "fubon", symbols_per_connection=10, connections=1)
+    _watch(store, "A", "B", "C")
+    _assign(store, USER, "fubon", "A", "B", "C")
+
+    rows = _by_account(_rows(client))
+
+    assert rows[("kgi", True)]["subscribed"] == 0
+    assert rows[("fubon", True)]["subscribed"] == 3
+
+
+def test_subscribed_counts_are_independent_per_account(client, store):
     store.credit(USER, "kgi", symbols_per_connection=2, connections=1)
     store.credit(OTHER, "kgi", symbols_per_connection=1, connections=1)
     store.credit(USER, "fubon", symbols_per_connection=3, connections=1)
-    _watch(store, "A", "B", "C", "D")
+    _assign(store, USER, "kgi", "A", "B")
+    _assign(store, OTHER, "kgi", "C")
+    _assign(store, USER, "fubon", "D")
 
     rows = _by_account(_rows(client))
 
     assert (rows[("kgi", True)]["subscribed"], rows[("kgi", True)]["capacity"]) == (2, 2)
     assert (rows[("kgi", False)]["subscribed"], rows[("kgi", False)]["capacity"]) == (1, 1)
     assert (rows[("fubon", True)]["subscribed"], rows[("fubon", True)]["capacity"]) == (1, 3)
-
-
-def test_subscribed_never_exceeds_capacity_when_the_watchlist_overflows(client, store):
-    """Codes past total capacity are unassigned, not crammed onto an account."""
-    store.credit(USER, "kgi", symbols_per_connection=2, connections=1)
-    _watch(store, "A", "B", "C", "D")
-
-    row = _rows(client)[0]
-    assert row["subscribed"] == 2 and row["capacity"] == 2
 
 
 # ── the route never writes ───────────────────────────────────────────────

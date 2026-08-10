@@ -511,20 +511,22 @@ def broker_status():
 
     `subscribed` is a single count per account, not a per-connection breakdown:
     which of an account's connections carries a code is the pool's business, and
-    what the user needs is how full the account is. It is recomputed with the
-    same pool.assign the worker packs with rather than tracked separately, so
-    the panel cannot drift from how the pool is actually filled.
+    what the user needs is how full the account is. It is read from
+    `live_assignment` — what the worker actually published — rather than
+    recomputed with pool.assign(): a fresh assign() packs every credentialed
+    account from scratch in fixed broker order regardless of who is actually
+    connected, so an idle KGI credential would claim capacity (and codes) that
+    are really streaming on Fubon, undercounting it to zero.
 
     A missing worker_status row becomes a null status, not "disconnected": an
     account no worker has ever reported on has not been observed to be down.
     """
     accounts = broker_pool.accounts_for(broker_credentials.list_all_user_ids())
-    assignment = broker_pool.assign(accounts, watchlist.list_codes())
 
     subscribed = {}
-    for slot in assignment.slots:
-        key = (slot.user_id, slot.broker)
-        subscribed[key] = subscribed.get(key, 0) + len(slot.codes)
+    for broker, user_id in live_assignment.read_all().values():
+        key = (user_id, broker)
+        subscribed[key] = subscribed.get(key, 0) + 1
 
     reported = {(row["user_id"], row["broker"]): row["status"]
                 for row in desired_state.list_all_worker_status()}
