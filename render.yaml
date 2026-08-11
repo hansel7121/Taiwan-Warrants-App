@@ -56,6 +56,53 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      # Where the browser's live-price EventSource connects (issue #58 item
+      # 1) -- the warrant-live-sse service below. Assumes Render's default
+      # <name>.onrender.com hostname; update if a custom domain is added to
+      # that service.
+      - key: SSE_STREAM_BASE_URL
+        value: https://warrant-live-sse.onrender.com
+
+  # Live-price SSE service (issue #58 item 1), split out of the web service
+  # above so an open Live Warrant tab no longer pins a gunicorn thread on the
+  # same pool that serves every other (CPU-bound) route for the connection's
+  # whole life. Runs sse_wsgi.py alone, on gunicorn's gevent worker class --
+  # safe here specifically because this service does no CPU-bound work, only
+  # I/O (Supabase reads, holding idle SSE connections). The main web service
+  # stays on gthread deliberately: its other routes (IV solves, IV surface
+  # interpolation, arb matching) are synchronous and CPU-bound, and gevent's
+  # single-threaded event loop would let one slow request there stall every
+  # other greenlet in the process, including every open SSE stream.
+  #
+  # No shared memory with the web service (same pattern as broker-worker
+  # below): this process runs its own live_price/live_depth pollers against
+  # the same Supabase project.
+  - type: web
+    name: warrant-live-sse
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    # Exactly 1 worker, same reason as the main service: live_price/live_depth
+    # caches live in process memory. No --threads flag -- gevent concurrency
+    # comes from greenlets, not OS threads.
+    startCommand: gunicorn -w 1 --worker-class gevent --timeout 30 -b 0.0.0.0:$PORT sse_wsgi:app
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      # The main web service's own origin, so its cross-origin EventSource
+      # request is allowed (sse.py's CORS header). Assumes Render's default
+      # <name>.onrender.com hostname; update alongside SSE_STREAM_BASE_URL
+      # above if either service gets a custom domain.
+      - key: SSE_CORS_ORIGIN
+        value: https://warrant-scanner.onrender.com
+      # Paste these in the Render dashboard — never commit real values.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
 
   # Broker worker (issue #43, part of the Live warrant epic #39).
   #
