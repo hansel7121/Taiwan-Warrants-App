@@ -23,6 +23,7 @@ from logic import arb_logic
 from logic import iv_surface as iv_surface_logic
 from logic import close_quote as close_quote_logic
 from services.auth import require_auth
+from sse import bp as sse_bp
 import os
 import io
 import json
@@ -42,6 +43,8 @@ app = Flask(
     template_folder=os.path.join(base_dir, "templates"),
     static_folder=os.path.join(base_dir, "static"),
 )
+
+app.register_blueprint(sse_bp)
 
 app.json.sort_keys = False
 # Re-read templates from disk on every request so index.html edits show up on a
@@ -541,97 +544,6 @@ def broker_status():
         }
         for account in accounts
     ])
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Live prices — SSE stream of the Watchlist's latest ticks (issue #46).
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-LIVE_PRICES_SSE_SEC = 1
-_SSE_MAX_STREAMS = int(os.environ.get("LIVE_PRICES_SSE_MAX_STREAMS", "4"))
-_sse_slots = threading.BoundedSemaphore(_SSE_MAX_STREAMS)
-
-
-@app.route("/live_prices/stream")
-def live_prices_stream():
-    """Push the live-price cache to the browser once a second, forever.
-
-    Not @require_auth: EventSource cannot send an Authorization header, so the
-    token arrives as ?token= and is checked by hand here.
-
-    Capped at `_SSE_MAX_STREAMS` concurrent streams (env
-    `LIVE_PRICES_SSE_MAX_STREAMS`, default 4) so a burst of open tabs cannot
-    exhaust every gunicorn thread and starve the rest of the app (single
-    worker, 8 threads — CLAUDE.md).
-    """
-    _user, err = auth.authenticate_for_stream()
-    if err:
-        body, status = err
-        return jsonify(body), status
-
-    if not _sse_slots.acquire(blocking=False):
-        return jsonify({"error": "stream_capacity"}), 503
-
-    def gen():
-        try:
-            while True:
-                yield _live_prices_event()
-                time.sleep(LIVE_PRICES_SSE_SEC)
-        finally:
-            _sse_slots.release()
-
-    return Response(stream_with_context(gen()), mimetype="text/event-stream")
-
-
-def _live_prices_event():
-    """One SSE frame: every watched code that has ever ticked, plus is_live.
-
-    Codes never seen are omitted entirely rather than sent as null (ADR-0005 —
-    "nothing yet" is not a price), so an all-quiet Watchlist emits `data: {}`;
-    the client keeps whatever it last drew.
-
-    is_live comes from the Worker Status of the connection carrying the code,
-    not from tick age. The placement is read from `live_assignment` — what the
-    worker actually published — rather than recomputed here, because the
-    worker's intraday reassign() is sticky and a fresh assign() would name the
-    wrong connection. A cached code the worker is not carrying is not live.
-    """
-    codes = watchlist.list_codes()
-    prices = live_price.snapshot(codes)
-    depths = live_depth.snapshot(codes)
-    live = {}
-    if prices:
-        reported = {(row["user_id"], row["broker"]): row["status"]
-                    for row in desired_state.list_all_worker_status()}
-        live = {code: reported.get((user_id, broker)) == "connected"
-                for code, (broker, user_id) in live_assignment.read_all().items()}
-
-    payload = {
-        code: {
-            "price": value["price"],
-            "ts": value["ts"].isoformat(),
-            "broker": value["broker"],
-            "qty": value.get("qty"),
-            "instrument": value.get("instrument", "warrant"),  # "warrant" or "tw_option" (#55)
-            "is_live": bool(live.get(code)),
-            "depth": _depth_payload(depths.get(code)),
-        }
-        for code, value in prices.items()
-    }
-    return f"data: {json.dumps(payload)}\n\n"
-
-
-def _depth_payload(depth):
-    """A code's depth snapshot as JSON-safe fields, or None if never seen (#51)."""
-    if depth is None:
-        return None
-    return {
-        "bid_prices": depth["bid_prices"],
-        "bid_volumes": depth["bid_volumes"],
-        "ask_prices": depth["ask_prices"],
-        "ask_volumes": depth["ask_volumes"],
-    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

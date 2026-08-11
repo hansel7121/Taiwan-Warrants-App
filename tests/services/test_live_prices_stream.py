@@ -6,7 +6,7 @@ live_price._conn.run / live_depth._conn.run / the supabase client (fakes
 borrowed from test_watchlist.py).
 
 The route's generator is an infinite loop, so it is never driven here — the
-tests call the single-frame builder `app._live_prices_event()` directly, the
+tests call the single-frame builder `sse._live_prices_event()` directly, the
 way test_live_price.py pins `_poll_once` instead of the poll thread. The
 route function itself is only exercised for its auth/response envelope.
 """
@@ -15,6 +15,7 @@ import json
 import pytest
 
 import app as app_module
+import sse
 from services import auth, db
 from services.broker import desired_state, live_depth, live_price
 
@@ -85,7 +86,7 @@ def _assign(store, code, broker="kgi", user_id=USER, connection_index=0):
 
 def _event():
     """The decoded payload of one SSE frame."""
-    raw = app_module._live_prices_event()
+    raw = sse._live_prices_event()
     assert raw.startswith("data: ") and raw.endswith("\n\n")
     return json.loads(raw[len("data: "):])
 
@@ -289,7 +290,7 @@ def test_a_frame_is_one_sse_data_event(store):
     _watch(store, "030001")
     _tick(store, "030001")
 
-    raw = app_module._live_prices_event()
+    raw = sse._live_prices_event()
 
     assert raw.startswith("data: ")
     assert raw.endswith("\n\n")
@@ -399,15 +400,15 @@ def slots(monkeypatch):
     import threading
 
     monkeypatch.setattr(
-        app_module, "_sse_slots",
-        threading.BoundedSemaphore(app_module._SSE_MAX_STREAMS))
-    yield app_module._sse_slots
+        sse, "_sse_slots",
+        threading.BoundedSemaphore(sse._SSE_MAX_STREAMS))
+    yield sse._sse_slots
 
 
 def test_a_stream_over_capacity_is_rejected(client, store, slots):
     """Every open tab pins a gunicorn thread for its whole session, so the
     (8-thread, single-worker) app has to refuse rather than starve."""
-    for _ in range(app_module._SSE_MAX_STREAMS):
+    for _ in range(sse._SSE_MAX_STREAMS):
         assert slots.acquire(blocking=False)
 
     r = client.get("/live_prices/stream")
@@ -417,7 +418,7 @@ def test_a_stream_over_capacity_is_rejected(client, store, slots):
 
 
 def test_a_freed_slot_lets_the_next_stream_in(client, store, slots):
-    for _ in range(app_module._SSE_MAX_STREAMS):
+    for _ in range(sse._SSE_MAX_STREAMS):
         assert slots.acquire(blocking=False)
     slots.release()
 
@@ -433,7 +434,7 @@ def test_capacity_is_checked_after_auth(client, store, monkeypatch, slots):
     401 is the more useful answer, and a rejected caller takes no slot."""
     monkeypatch.delenv("LOCAL_USER_ID", raising=False)
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
-    for _ in range(app_module._SSE_MAX_STREAMS):
+    for _ in range(sse._SSE_MAX_STREAMS):
         assert slots.acquire(blocking=False)
 
     r = client.get("/live_prices/stream")
