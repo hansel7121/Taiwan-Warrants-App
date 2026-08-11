@@ -1,10 +1,6 @@
-"""Validate Phase-2 Step-3 writers + market gate.
-
-Two parts, no live clock for the gate:
-
-1. is_market_open — assert against FIXED injected tz-aware datetimes.
-2. Writers fill tables — call the CORE writers directly (bypassing cron+gate),
-   then read each snapshot back and assert the row counts / columns are sane.
+"""Validates is_market_open (against fixed injected tz-aware datetimes, no live
+clock) and the core snapshot writers, called directly bypassing cron/gate, by
+reading each snapshot back and asserting row counts / columns are sane.
 
 Run with:
     TZ=Asia/Taipei OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES \

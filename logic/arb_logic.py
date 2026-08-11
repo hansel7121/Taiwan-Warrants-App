@@ -45,21 +45,15 @@ def _finish_empty_scan(hard_errors, skip_reasons):
 
 
 # ── Straddle arbitrage (volatility relative-value) ───────────────────────────
-# A "straddle package" = one call leg + one put leg on the same underlying (their
-# strikes may differ within ΔK — a strangle — so packages carry net delta). We
-# LONG the cheapest-implied-vol package (legs from either warrant or option, all
-# bought) and SHORT the dearest-implied-vol package (OPTION legs only, since
-# Taiwan warrants can't be shorted). Edge = short_iv − long_iv, in vol points.
-# The comparison is done in IMPLIED VOL, not price, to strip out the intrinsic
-# |F−K| (strike) and √T (expiry) terms that dominate raw straddle prices.
+# A "straddle package" = one call + one put leg (strikes may differ within ΔK,
+# so packages carry net delta). LONG the cheapest-IV package (warrant or option
+# legs); SHORT the dearest-IV package (option legs only — warrants can't be
+# shorted). Edge = short_iv − long_iv. Compared in IV, not price, to strip out
+# the intrinsic/√T terms that dominate raw straddle prices.
 #
-# IV is scale-invariant: the sigma that reprices a per-share quote at ratio=1 is
-# the same sigma the warrant leg carries at its own exercise ratio, so warrant
-# iv_ask/iv_bid (already solved at fetch time) and the option IV solved here at
-# ratio=1.0 are directly comparable. options_logic's fetch-time IV instead mixes
-# a per-share price with the contract ratio (~2000), mis-scaling it, so it is
-# never trusted here — the option leg's IV is always recomputed at ratio=1.0
-# below, exactly as _match_warrants_to_options marks its option leg.
+# The option leg's IV is always recomputed here at ratio=1.0 to stay scale-
+# comparable with warrant IV; options_logic's fetch-time IV mixes in the
+# contract ratio (~2000) and is never trusted here.
 
 def _straddle_legs(warrant_df, opt_df, loose=False, short_warrants=False):
     """Flatten warrants + options into a common leg record list.
@@ -393,14 +387,10 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                 (candidates["days_to_expiry"] - w["days_to_expiry"]).abs()
             )
 
-            # The residual after pairing two same-type contracts is a vertical
-            # spread; it must be the FAVORABLE one (payoff >= 0 at every spot) so
-            # the entry credit is never clawed back at expiry.
+            # The residual vertical spread must be FAVORABLE (payoff >= 0 everywhere)
+            # so the entry credit is never clawed back at expiry:
             #   calls: favorable iff K_short >= K_long (bull call spread)
-            #   puts : favorable iff K_short <= K_long (bear put spread)
-            # Puts invert because a put pays off downward — the short leg must be
-            # the one that starts paying LAST. Positive = buy warrant / sell
-            # option (long leg = warrant); negative flips the comparison.
+            #   puts : favorable iff K_short <= K_long (bear put spread, inverted)
             is_put_w = w["type"] == "Put"
             long_side_is_warrant = direction == "positive"
             opt_ge_warrant = long_side_is_warrant != is_put_w
@@ -415,25 +405,14 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             candidates["max_loss_per_share"] = np.where(
                 favorable, 0.0, (candidates["strike"] - w["strike"]).abs()
             )
-            # Only the favorable side is emitted, so every row out of this
-            # matcher is a true riskless arb: the residual vertical pays >= 0 at
-            # every spot and the entry credit is never clawed back at expiry.
-            # The unfavorable side (capped loss up to |Kw - Ko|) is deliberately
-            # NOT emitted — callers want pure arb only. Consequence:
-            # max_strike_diff_pct no longer gates anything in THIS function; it
-            # is retained in the signature because callers pass it positionally
-            # and _match_warrants_pcp still uses it. No distance cap is needed
-            # either — the far favorable side is self-policing: as Ko runs from
-            # Kw the option cheapens per share and the price test below rejects
-            # it.
+            # Only the favorable side is emitted (pure riskless arb only) — the
+            # unfavorable side (capped loss up to |Kw - Ko|) is dropped by design.
+            # max_strike_diff_pct is kept in the signature only because callers
+            # pass it positionally and _match_warrants_pcp still uses it.
             strike_ok = favorable
 
-            # Never hold the SHORT leg as the longer-dated one — the long
-            # (hedge) leg would expire first, leaving a naked short position.
-            #   Positive: short = option -> require opt_dte <= warrant_dte.
-            #   Negative: short = warrant -> require warrant_dte <= opt_dte,
-            #     with max_dte_diff bounding the remaining (safe) gap.
-            # The safe side (long leg outliving the short) is otherwise fine.
+            # Never hold the SHORT leg as the longer-dated one — the hedge leg
+            # would expire first, leaving a naked short position.
             if direction == "positive":
                 dte_ok = candidates["days_to_expiry"] <= w["days_to_expiry"]
             else:
@@ -472,13 +451,9 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             # strike/DTE-closest one — a farther-but-profitable pair must not be
             # hidden behind a closer-but-unprofitable "best".
             for _, opt in candidates.iterrows():
-                # Each arb direction executes against only ONE side of the option
-                # book, so a one-sided quote is still a valid benchmark. The chain
-                # now carries per-side liveness flagged BEFORE the settlement/last
-                # fallback backfilled the missing side, so read them directly —
-                # opt["ask"]/["bid"] are post-fallback and can't tell a genuine
-                # quote from a stale settlement mark. Each formula below then
-                # requires the side it actually trades.
+                # ask_live/bid_live are flagged before the settlement/last fallback
+                # backfills a missing side, so they distinguish a real quote from a
+                # stale settlement mark — opt["ask"]/["bid"] alone can't.
                 opt_ask_live = bool(opt.get("ask_live", False))
                 opt_bid_live = bool(opt.get("bid_live", False))
                 if not (opt_ask_live or opt_bid_live):
@@ -486,18 +461,9 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                 opt_bid_per_share = round(float(opt["bid"]), 4) if opt_bid_live else None
                 opt_ask_per_share = round(float(opt["ask"]), 4) if opt_ask_live else None
 
-                # Both directions honour the loose/tight toggle symmetrically.
-                # Tight = the prices you can actually hit: LIFT the ask on whatever
-                # you buy, HIT the bid on whatever you sell. Loose = the optimistic
-                # (favorable-side) mark, for ranking only.
-                #   positive (buy warrant / sell option)
-                #     tight: opt_bid  - warrant_ask  > 0
-                #     loose: opt_ask  - warrant_bid  > 0
-                #   negative (buy option / sell warrant)
-                #     tight: opt_ask  - warrant_bid  < 0   (real warrant bid only)
-                #     loose: opt_bid  - warrant_ask  < 0
-                # Negative previously used the loose formula unconditionally, which
-                # priced a BUY at the bid and a SELL at the ask — both unattainable.
+                # Tight = prices you can actually hit (lift the ask you buy, hit
+                # the bid you sell). Loose = optimistic favorable-side mark, for
+                # ranking only. Both directions honor the toggle symmetrically.
                 if direction == "positive":
                     if positive_loose:
                         if opt_ask_per_share is None:
@@ -976,14 +942,10 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
     # the warrant filter, so fetch every type and filter downstream.
     opt_type_fetch = "All" if strategy in ("pcp", "butterfly") else option_type
 
-    # Fetch ONCE for every selected code, not per-code: read_warrant/read_tw_option
-    # already accept a list and the underlying Supabase snapshot read
-    # (db_market.read_snapshot) already filters server-side on `codes` in one
-    # query — the old per-code loop paid a redundant md_batches round-trip +
-    # paginated read for every single selected stock, so wall time scaled with
-    # product count instead of being ~constant. No time-value cap / IV solve on
-    # the arb path: a positive price arb only needs warrant ask + option bid, so
-    # nothing should drop a leg over time value or a non-converging IV.
+    # Fetch ONCE for every selected code, not per-code — read_warrant/read_tw_option
+    # accept a list and the snapshot read already filters server-side on `codes`,
+    # so a per-code loop would pay a redundant round-trip per stock. No time-value
+    # cap / IV solve here: a positive price arb only needs warrant ask + option bid.
     all_warrant_df, warrant_err, warrant_meta = (
         warrant_logic.read_warrant(stock_codes, option_type, 0, 365, 0, 1e9, 0, compute_iv=False)
         if stock_codes else (pd.DataFrame(), None, None)

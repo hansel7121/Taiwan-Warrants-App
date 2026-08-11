@@ -1,16 +1,9 @@
-"""Background market-data refresh.
-
-Runs inside the (single) web process via APScheduler so the jobs share the
-module-level caches in warrant_logic / options_logic / us_options_logic.
-Started once from wsgi.py (production) or app.py __main__ (dev).
-
-Step 3 of the Supabase market-data migration: the refresh jobs now WRITE
-Supabase snapshots (db_market.write_snapshot / set_key). The core writers are
-plain functions (fetch + align columns + write) so they can be called directly
-by force_refresh and the validation harness, bypassing the cron grid and the
-market-hours gate. The scheduler registers them wrapped in _job (logging) and,
-for the three intraday data jobs, _gated (skip when the relevant market is
-closed) on a wall-clock 15-minute cron grid.
+"""Background market-data refresh, running inside the single web process via
+APScheduler so jobs share the module-level caches in warrant_logic /
+options_logic / us_options_logic. Core writers (fetch + align + write_snapshot)
+are plain functions callable directly by force_refresh and the validation
+harness; the scheduler wraps them in _job (logging) and, for the three intraday
+data jobs, _gated (skip when the market is closed) on a 15-minute cron grid.
 """
 import json
 import threading
@@ -224,8 +217,7 @@ def _sync_option_products(codes, scraper, cols, int_cols, *, label,
         df = df.copy()
         df["stock_code"] = code
         if set_source:
-            # Provenance is informational and nullable; leaving it null is the
-            # accepted Step-3 scope (we don't infer mis/eod here).
+            # Provenance is informational and nullable; not inferred (mis/eod) here.
             df["source"] = None
         frames.append(df)
     if not frames:
@@ -484,16 +476,10 @@ def start():
     with _start_lock:
         if _scheduler is not None:
             return _scheduler
-        # Single-threaded executor: with max_workers=1 no two pandas-heavy
-        # refresh jobs can overlap, which is what keeps the process under
-        # Render's 512 MB cap. That same single worker means jobs due at the
-        # same cron tick queue up behind one another; APScheduler's default
-        # misfire_grace_time (1s) is far shorter than a scrape can take, so a
-        # job second (or third) in the queue gets silently dropped as
-        # "missed" before its turn ever comes up rather than actually
-        # running late. A generous grace window (10 min — comfortably longer
-        # than any single job observed in MEM: logs) lets queued jobs still
-        # fire instead of vanishing.
+        # Single-threaded executor keeps two pandas-heavy jobs from overlapping
+        # (Render's 512MB cap), but that queues same-tick jobs behind each other.
+        # A generous misfire_grace_time (default 1s is far shorter than a scrape)
+        # keeps queued jobs firing instead of being dropped as "missed".
         sched = BackgroundScheduler(
             daemon=True,
             executors={"default": ThreadPoolExecutor(max_workers=1)},

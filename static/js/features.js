@@ -1,12 +1,7 @@
 // Browser-side mirror of services/roles.py: what the current mode may see, and
-// the corner toggle that switches between them. Loaded before common.js so
-// every other script can call can(). The server has already stripped
-// admin-only markup and script tags from the page (index.html reads
-// show_admin), so can() is for guarding code paths, not for hiding DOM.
-//
-// The toggle writes a cookie and reloads — the server, not the browser,
-// decides what gets sent. That is the same path a real deployment gate will
-// use; only the source of the role changes. Not a security boundary today.
+// the toggle that switches between them. The server already strips admin-only
+// markup/script tags from the page, so can() guards code paths, not DOM. The
+// toggle writes a cookie and reloads — the server decides what gets sent.
 
 // Keep in sync with FEATURES in services/roles.py.
 const FEATURES = {

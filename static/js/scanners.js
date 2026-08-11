@@ -35,14 +35,10 @@ function toggleSelectAllIV() {
   document.querySelector("#tab-ivsurface .sm").textContent = allSelectedIV ? "Deselect All" : "Select All";
 }
 
-// ---------------------------------------------------------------------------
-// Unified Add / Remove product UI (Phase 5.5). Warrant = code + an
-// auto-looked-up name shown as a confirm step before adding. TW/US option =
-// every field entered manually (no auto-lookup — ADR ratios / commodity IDs
-// aren't reliably derivable). All three refresh every derived select
-// afterward via initProductSelects(), since add/remove can change the
-// cross-market intersections too.
-// ---------------------------------------------------------------------------
+// Unified Add / Remove product UI. Warrant = code + an auto-looked-up name
+// shown as a confirm step; TW/US option = every field entered manually (no
+// auto-lookup, since ADR ratios / commodity IDs aren't reliably derivable).
+// All three refresh every derived select afterward via initProductSelects().
 
 function toggleAddProduct(kind) {
   const form = document.getElementById("addForm_" + kind);
