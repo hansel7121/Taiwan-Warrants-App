@@ -12,6 +12,9 @@ urllib3==2.7.0
 yfinance==1.5.1
 statsmodels==0.14.6
 gunicorn==26.0.0
+# Worker class for sse_wsgi.py (issue #58 item 1) only — the main app
+# (wsgi.py) stays on gthread. See sse_wsgi.py for why.
+gevent==26.8.0
 apscheduler==3.11.3
 supabase==2.31.0
 PyJWT[crypto]==2.13.0
