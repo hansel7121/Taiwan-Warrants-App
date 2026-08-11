@@ -15,6 +15,7 @@ from services import db_user
 from services import roles
 from services import store
 from logic import arb_logic
+from logic import static_arb
 # Aliased: the route functions below are named iv_surface / close_quote.
 from logic import iv_surface as iv_surface_logic
 from logic import close_quote as close_quote_logic
@@ -73,6 +74,8 @@ _ROUTE_LABELS = {
     "/match_tw_us_option_csv": "tw/us match csv",
     "/match_warrant_tw_option": "arb scan",
     "/match_warrant_tw_option_csv": "arb scan csv",
+    "/match_static_arb": "static arb lp",
+    "/match_static_arb_csv": "static arb lp csv",
 }
 
 
@@ -1002,6 +1005,83 @@ def match_warrant_tw_option_csv():
         output.getvalue(),
         mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=arb_finder.csv"},
+    )
+
+
+def _static_arb_params(data):
+    return dict(
+        stock_codes=data.get("stock_codes", ["2330"]),
+        min_volume=int(data.get("min_volume", 0) or 0),
+        min_edge=float(data.get("min_edge", 0) or 0),
+        max_horizon_dte=int(data.get("max_horizon_dte") or 0) or None,
+    )
+
+
+def _static_arb_as_of(stock_codes):
+    return min(
+        (t for t in (warrant_logic.cache_as_of(stock_codes),
+                     options_logic.data_as_of(stock_codes)) if t),
+        default=None,
+    )
+
+
+@app.route("/match_static_arb", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def match_static_arb():
+    data = request.json
+    params = _static_arb_params(data)
+    stock_codes = params["stock_codes"]
+    try:
+        df = static_arb.match_static_arb(**params)
+        # to_json would stringify the nested per-leg dicts; to_dict keeps them.
+        rows = df.to_dict(orient="records") if not df.empty else []
+        applog.set_rows(len(rows))
+        as_of = _static_arb_as_of(stock_codes)
+        return jsonify({
+            "rows": rows, "count": len(rows),
+            "dropped_no_depth": int(df.attrs.get("dropped_no_depth", 0)),
+            "as_of": datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None,
+        })
+    except arb_logic.NoMatchesError as e:
+        # Clean scan that found nothing. The message carries why (including any
+        # legs dropped for missing resting size), which is the whole difference
+        # between "chain is arb-free" and "TAIFEX MIS was down".
+        applog.set_rows(0)
+        as_of = _static_arb_as_of(stock_codes)
+        return jsonify({
+            "rows": [], "count": 0, "note": str(e),
+            "as_of": datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None,
+        })
+    except Exception as e:
+        applog.log("ARB", f"match_static_arb failed: {e}\n{traceback.format_exc()}",
+                   level="ERROR")
+        return jsonify({"rows": [], "count": 0, "error": str(e)})
+
+
+@app.route("/match_static_arb_csv", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def match_static_arb_csv():
+    """One CSV row per LEG, keyed by structure_id — a structure has a variable
+    number of legs, so it cannot be flattened into fixed columns."""
+    try:
+        df = static_arb.match_static_arb(**_static_arb_params(request.json))
+    except Exception:
+        df = pd.DataFrame()
+    flat = []
+    for i, r in enumerate(df.to_dict(orient="records") if not df.empty else []):
+        head = {k: v for k, v in r.items() if k != "legs"}
+        for leg in r["legs"]:
+            flat.append({"structure_id": i, **head,
+                         **{f"leg_{k}": v for k, v in leg.items()}})
+    output = io.StringIO()
+    pd.DataFrame(flat).to_csv(output, index=False)
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=static_arb.csv"},
     )
 
 

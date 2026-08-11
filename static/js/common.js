@@ -278,6 +278,9 @@ async function initProductSelects() {
   // products are added (no hardcoded code list).
   populateProductSelect(document.getElementById("straddleStockSelect"), warrantXTw,
     { selectedCodes: sel("straddleStockSelect", ["2330"]) });
+  // Experiment (static-arb LP) needs the same warrant∩TW-option overlap.
+  populateProductSelect(document.getElementById("expStockSelect"), warrantXTw,
+    { selectedCodes: sel("expStockSelect", ["2330"]) });
   populateProductSelect(document.getElementById("usStockSelect"), warrantXUs,
     { selectedCodes: sel("usStockSelect", ["2303"]) });
   populateProductSelect(document.getElementById("twusStockSelect"), twXUs,
