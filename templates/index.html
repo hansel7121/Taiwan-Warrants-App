@@ -963,6 +963,7 @@
       window.SUPABASE_URL = "{{ supabase_url }}";
       window.SUPABASE_ANON_KEY = "{{ supabase_anon_key }}";
       window.LOCAL_MODE = {{ 'true' if local_mode else 'false' }};
+      window.SSE_STREAM_BASE = "{{ sse_stream_base }}";
     </script>
     <!-- Load order matters: common -> quant -> scanners -> arb -> portfolio (boot runs last). -->
     <script src="{{ url_for('static', filename='js/common.js', v=ASSET_VERSION) }}"></script>

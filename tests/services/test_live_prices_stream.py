@@ -440,3 +440,27 @@ def test_capacity_is_checked_after_auth(client, store, monkeypatch, slots):
     r = client.get("/live_prices/stream")
 
     assert r.status_code == 401
+
+
+# -- CORS (issue #58 item 1) -------------------------------------------------
+#
+# Same-origin when mounted into app.py for local dev (the default, tested by
+# every other case above with no header asserted); a real origin only when
+# this blueprint runs as the standalone sse_wsgi.py service in production.
+
+def test_no_cors_header_by_default(client, store):
+    """The app.py mount is same-origin, so no header is needed — and adding
+    one unconditionally would be a silent green light for any origin."""
+    r = client.get("/live_prices/stream")
+
+    assert "Access-Control-Allow-Origin" not in r.headers
+    r.close()
+
+
+def test_cors_header_reflects_the_configured_origin(client, store, monkeypatch):
+    monkeypatch.setattr(sse, "_CORS_ORIGIN", "https://warrant-scanner.onrender.com")
+
+    r = client.get("/live_prices/stream")
+
+    assert r.headers["Access-Control-Allow-Origin"] == "https://warrant-scanner.onrender.com"
+    r.close()

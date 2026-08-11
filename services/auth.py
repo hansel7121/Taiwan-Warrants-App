@@ -46,6 +46,10 @@ def public_config():
         "supabase_url": os.environ.get("SUPABASE_URL", ""),
         "supabase_anon_key": os.environ.get("SUPABASE_ANON_KEY", ""),
         "local_mode": local_mode(),
+        # Empty (default) means /live_prices/stream is same-origin, mounted
+        # into this app (local dev, sse_wsgi.py off). Set to the standalone
+        # SSE service's origin in production (issue #58 item 1).
+        "sse_stream_base": os.environ.get("SSE_STREAM_BASE_URL", ""),
     }
 
 

@@ -384,7 +384,10 @@ let _lpSource = null;
 async function startLivePriceStream() {
   if (_lpSource && _lpSource.readyState !== EventSource.CLOSED) return;
 
-  let url = "/live_prices/stream";
+  // SSE_STREAM_BASE is empty in local dev (same-origin, mounted into app.py);
+  // in production it's the standalone SSE service's own origin (issue #58
+  // item 1), so this request goes cross-origin — see sse.py's CORS header.
+  let url = window.SSE_STREAM_BASE + "/live_prices/stream";
   // EventSource cannot set an Authorization header, so the bearer token rides
   // in the query string. Local mode has no Supabase client and no auth at all.
   if (!LOCAL_MODE && _sb) {

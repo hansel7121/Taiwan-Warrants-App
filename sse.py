@@ -1,10 +1,10 @@
 """Live-price SSE feed (issue #46), as a Flask Blueprint.
 
-Split out from app.py (issue #58 item 1) so this route can eventually run as
-its own lightweight service instead of holding a gunicorn thread per open
-Live Warrant tab on the main app's pool for the connection's whole life.
-Mounted into app.py for now with no behavior change; a standalone entrypoint
-mounting just this blueprint comes in a later step.
+Split out from app.py (issue #58 item 1) so this route can run as its own
+lightweight service (sse_wsgi.py) instead of holding a gunicorn thread per
+open Live Warrant tab on the main app's pool for the connection's whole life.
+Still mounted into app.py too, for local dev — same-origin there, so the CORS
+header below is a no-op (browsers don't check it same-origin).
 """
 import json
 import os
@@ -21,6 +21,19 @@ bp = Blueprint("sse", __name__)
 LIVE_PRICES_SSE_SEC = 1
 _SSE_MAX_STREAMS = int(os.environ.get("LIVE_PRICES_SSE_MAX_STREAMS", "4"))
 _sse_slots = threading.BoundedSemaphore(_SSE_MAX_STREAMS)
+
+# Set only when this blueprint runs as the standalone SSE service
+# (sse_wsgi.py in production): the main app's own origin, so its
+# cross-origin EventSource request is allowed. Empty (default) adds no
+# header, which is correct for the same-origin app.py mount.
+_CORS_ORIGIN = os.environ.get("SSE_CORS_ORIGIN", "")
+
+
+@bp.after_request
+def _add_cors_header(response):
+    if _CORS_ORIGIN:
+        response.headers["Access-Control-Allow-Origin"] = _CORS_ORIGIN
+    return response
 
 
 @bp.route("/live_prices/stream")
