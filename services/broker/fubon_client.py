@@ -134,7 +134,10 @@ class FubonClient(BrokerClient):
             )
         )
 
-    def _on_disconnect(self, *_):
+    def _on_disconnect(self, *args, **kwargs):
+        # Args logged as-is: Fugle's disconnect callback signature isn't
+        # documented here, so this is diagnostic-only until we see a real one.
+        print(f"FUBON: websocket disconnected, args={args!r} kwargs={kwargs!r}", flush=True)
         self._connected = False
 
 
