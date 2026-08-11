@@ -343,9 +343,34 @@ class Worker:
         except Exception as e:
             log.error("%s failed for %s (%s) on %s: %s: %s", kind, op.broker,
                       _short(op.user_id), codes, type(e).__name__, e)
+            self._evict(op.user_id, op.broker, client)
             return False
         log.info("%s %s on %s (%s)", kind, codes, op.broker, _short(op.user_id))
         return True
+
+    def _evict(self, user_id, broker, client):
+        """Drop a session whose op just failed, so reconcile() reopens it fresh.
+
+        A failed subscribe/unsubscribe is the only signal this worker can trust:
+        the SDK's own disconnect callback does not fire on every drop (seen on a
+        dead Fubon socket that kept throwing with no callback ever firing), so
+        `is_connected` can stay stuck reporting True forever. Retrying against
+        the same broken client is what let a dead session sit in `held`
+        indefinitely with prices never landing; dropping it here is what lets
+        the next reconcile() see the account as wanted-but-not-held again and
+        log it back in.
+        """
+        with self._lock:
+            # Already gone or replaced by another op/poll - nothing to evict.
+            if self._clients.get((user_id, broker)) is not client:
+                return
+            del self._clients[(user_id, broker)]
+        try:
+            client.logout()
+        except Exception as e:
+            log.warning("logout failed for %s (%s) during reconnect: %s: %s",
+                        broker, _short(user_id), type(e).__name__, e)
+        self.set_status(user_id, broker, "reconnecting")
 
     def _note_rejected(self, rejected):
         """Report codes the open pool has no room for, once per change.

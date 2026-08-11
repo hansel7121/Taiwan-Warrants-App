@@ -605,16 +605,50 @@ def test_one_connections_failed_subscribe_does_not_block_another(worker, monkeyp
     assert clients[(OTHER, "fubon")].subscribes == [["032222"]]
 
 
-def test_a_refused_subscribe_is_retried_on_the_next_poll(worker, monkeypatch):
-    """Same contract as a failed login: the code comes back round again."""
+def test_a_refused_subscribe_evicts_the_session_for_reconcile_to_reopen(worker, monkeypatch):
+    """A dead connection is not worth retrying subscribe against forever - the
+    SDK's own disconnect callback does not reliably fire, so a failed op is what
+    drops it from `held` and reports 'reconnecting' instead of a stale 'connected'."""
     kgi = _live(worker, monkeypatch, [_account(USER, "kgi")])[(USER, "kgi")]
     kgi.subscribe_error = RuntimeError("websocket closed")
+
     worker.apply_watchlist(["031234"])
 
-    kgi.subscribe_error = None
+    assert worker._clients == {}
+    assert kgi.logged_out is True
+    assert (USER, "kgi", "reconnecting") in worker.statuses
+
+
+def test_an_evicted_session_gets_a_fresh_client_on_the_next_reconcile(worker, monkeypatch):
+    """The whole point of eviction: reconcile() treats the account as
+    wanted-but-not-held again and logs in a genuinely new client, closing the
+    gap where a dead session sat in `held` forever."""
+    kgi = _brokers(worker, monkeypatch, kgi=_Broker("kgi"))["kgi"]
+    monkeypatch.setattr(broker_worker, "is_market_open", lambda market: True)
+    monkeypatch.setattr(
+        broker_worker.pool, "accounts_for",
+        lambda user_ids: [_account(USER, "kgi")] if USER in user_ids else [])
+    rows = [_row(USER, "kgi", "connect")]
+
+    worker.reconcile(rows)
+    kgi.built[0].subscribe_error = RuntimeError("websocket closed")
+    worker.apply_watchlist(["031234"])
+    worker.reconcile(rows)
     worker.apply_watchlist(["031234"])
 
-    assert kgi.subscribes == [["031234"], ["031234"]]
+    assert len(kgi.built) == 2
+    assert kgi.built[1].subscribes == [["031234"]]
+
+
+def test_a_refused_unsubscribe_also_evicts_the_session(worker, monkeypatch):
+    kgi = _live(worker, monkeypatch, [_account(USER, "kgi")])[(USER, "kgi")]
+    worker.apply_watchlist(["031234"])
+    kgi.unsubscribe_error = RuntimeError("already gone")
+
+    worker.apply_watchlist([])
+
+    assert worker._clients == {}
+    assert (USER, "kgi", "reconnecting") in worker.statuses
 
 
 def test_a_code_that_did_subscribe_is_not_retried_alongside_one_that_failed(worker, monkeypatch):
