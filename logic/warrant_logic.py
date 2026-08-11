@@ -1,3 +1,7 @@
+"""CMoney warrant fetch and pricing: Black-Scholes IV (Brent's method) with a
+vectorized Newton fast path, delta, real leverage, and the live cmkey/underlying-
+universe scrape that resolves warrant codes to their true underlying stock.
+"""
 import twstock
 from twstock.codes.fetch import (
     make_row_tuple,
@@ -205,15 +209,9 @@ def implied_vol_vec(price, S, K, T, r, ratio, is_put):
         norm_vega = np.abs(vega_final) / (rt * s)
 
     # Accept Newton only where it MUST agree with brentq after round(...,4):
-    #   * price residual is tight (< 1e-9), and
-    #   * the root is well-conditioned — norm_vega > 1e-6, so bs_price genuinely
-    #     moves with sigma near the root. In flat/degenerate regions (deep ITM/
-    #     OTM, price≈intrinsic) the residual can hit exactly 0 across a wide
-    #     sigma band, so brentq and Newton settle on different points; those rows
-    #     fall back to the scalar brentq and thus match the scalar solver
-    #     exactly. Empirically this leaves only genuine .00005 rounding-boundary
-    #     ties (|sigma diff| < 1e-6), which round identically in all tested cases.
-    #   * sigma strictly inside the bracket (bound-pinned rows go to brentq too).
+    # tight price residual (< 1e-9), well-conditioned root (norm_vega > 1e-6,
+    # else flat/degenerate regions can settle on a different root), and sigma
+    # strictly inside the bracket. Everything else falls back to scalar brentq.
     accept = (
         (resid < 1e-9)
         & (norm_vega > 1e-6)
@@ -691,17 +689,10 @@ def _stream_isin(url, prog_band=None):
     r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"},
                      verify=False, timeout=60, stream=True)
     r.raise_for_status()
-    # The ISIN listing is served as Big5/MS950 (its Content-Type charset) with
-    # no <meta> charset. fetch_data decodes it through requests' r.text, which
-    # honours the header charset (r.encoding). In stream mode r.apparent_encoding
-    # would force-load the whole body (defeating streaming), so take the header
-    # charset and fall back to cp950 (what these pages always are) instead of the
-    # chardet sniff. A pinned "utf-8" mangles the ideographic space in each
-    # "code　name" cell into U+FFFD, so make_row_tuple's split("　") returns
-    # a single field and unpacking raises "not enough values to unpack (expected
-    # 2, got 1)" on the very first data row. libxml2 needs an encoding name it
-    # recognises, so normalise via the Python codec registry (MS950 -> cp950,
-    # which it accepts); anything it can't resolve degrades to cp950.
+    # Page is Big5/MS950 with no <meta> charset; use the header charset (not
+    # apparent_encoding, which would defeat streaming) and normalize it to a
+    # name libxml2 accepts. A pinned "utf-8" would mangle the ideographic space
+    # in each "code　name" cell, breaking make_row_tuple's split.
     enc = r.encoding or "cp950"
     try:
         enc = codecs.lookup(enc).name
@@ -1029,15 +1020,10 @@ def get_warrant_results(stock_codes, force=False, errors_out=None):
             for sc in need:
                 sc_codes = code_map.get(sc, [])
                 sc_results = {c: fetched[c] for c in sc_codes if c in fetched}
-                # A stock that HAS warrant codes but returned none was a
-                # wholesale fetch failure (cmoney unreachable / cmkey fetch
-                # failed), not a stock with no warrants. Caching that empty
-                # result would pin "no warrants found" for WARRANT_CACHE_TTL
-                # and block retries, keeping the app dark long after cmoney
-                # recovers — so skip it and let the next request retry. Any
-                # prior good entry is left in place (its stale timestamp
-                # keeps it "expired", so it still serves last-known-good and
-                # retries). sc_codes empty == genuinely no warrants: cache it.
+                # A stock with codes but no results is a fetch failure, not "no
+                # warrants" — skip caching it so the next request retries instead
+                # of pinning a false empty for WARRANT_CACHE_TTL. Any prior good
+                # entry is left in place, stale but still served as last-known-good.
                 if sc_codes and not sc_results:
                     failed.append(sc)
                     continue

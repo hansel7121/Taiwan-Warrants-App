@@ -1021,15 +1021,10 @@ function openStraddleModal(r) {
       P&L at the FIRST expiry (${r.first_expiry}d) across spot. <b>Every leg is settled at intrinsic</b> — ITM legs exercised, OTM legs worthless — including legs with time left. No Black-Scholes, no IV anywhere in this curve, so it can't be distorted by the unreliable vols solved off near-intrinsic or deep-OTM quotes. ${stubNote} Because strikes/expiries differ this is a strangle-vs-strangle carrying the <b>net Δ</b> above. Warrant legs can't be shorted, so only option legs are written unless the debug toggle is on. Quotes are delayed; run during the TW session (09:00–13:30) for live two-sided option prices.
     </div>`;
 
-  // Payoff at first expiry — every leg settled at INTRINSIC, including the ones
-  // with time left. Deliberately not marked at Black-Scholes: the solved IVs are
-  // unreliable on near-intrinsic and deep-OTM quotes, and an arb should stand on
-  // payoff structure plus entry price alone, with no vol input in the P&L.
-  //
-  // Range must span every strike AND spot. A spot±20% window hides the kinks
-  // whenever the legs are far from the money (deep-ITM warrants sit hundreds of
-  // points below spot), rendering the payoff as a featureless flat line and
-  // hiding exactly where the risk turns.
+  // Payoff at first expiry — every leg settled at intrinsic, no Black-Scholes,
+  // since solved IVs are unreliable near-intrinsic and deep-OTM.
+  // Range must span every strike AND spot, not just spot±20%, or deep-ITM
+  // warrants (hundreds of points from spot) flatten the payoff and hide the kinks.
   const strikes = legs.map(l => l.K);
   const anchors = [S, ...strikes];
   let lo = Math.min(...anchors), hi = Math.max(...anchors);

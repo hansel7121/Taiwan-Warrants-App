@@ -236,11 +236,9 @@ function currentSelection(id) {
 }
 
 // Fetch all three product lists and populate every product/stock <select> on
-// the page. Called once from _boot(), and again after every
-// add/remove (Phase 5.5) so derived selects (the two-list intersections)
-// stay correct. Each select's current selection is preserved across a
-// refresh; the hardcoded fallback only applies the first time (nothing
-// selected yet).
+// the page. Called once from _boot(), and again after every add/remove so
+// derived selects (the two-list intersections) stay correct. Each select's
+// selection is preserved across a refresh.
 async function initProductSelects() {
   // The US ADR chain is admin-only; user mode is Taiwan instruments only, so
   // don't even ask for the list.

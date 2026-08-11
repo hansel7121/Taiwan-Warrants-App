@@ -1,23 +1,11 @@
 """Live market inputs for booking a trade's realized P&L at close.
 
-Which leg "survives" a close (the long-dated one), and whether its value came
-from a real quote or from the model, is a pricing decision, not request/response
-glue — so it lives here rather than inline in the route.
-
-The failure boundary is deliberate, because "no live quote" and "a bug in this
-code" used to be indistinguishable (two bare `except Exception: pass`):
-
-- yfinance-backed calls (`adr_premium_scenario`, `us_option_last`) reach the
-  public internet and raise on transient upstream faults. That is an *expected*
-  outcome for a quote lookup, so it is caught — but logged at WARN, never
-  silently swallowed — and the leg falls back to source="model".
-- `warrant_logic.get_cmoney_prices` already absorbs its own per-code network
-  errors internally (it logs them and returns whatever it got, `{}` in the worst
-  case). Anything escaping it is therefore genuinely unexpected, so it is NOT
-  caught here and propagates to the caller.
-- Only the outbound call sits inside each `try`. Our own parsing of the result
-  runs outside it, so a typo'd key raises instead of masquerading as "the market
-  had no quote".
+Decides which leg "survives" a close and whether its value comes from a real
+quote or the model — a pricing decision, so it lives here rather than inline in
+the route. yfinance calls are wrapped in `try` (expected to fail sometimes,
+logged at WARN, falls back to source="model"); `warrant_logic.get_cmoney_prices`
+already absorbs its own errors, so anything escaping it is a genuine bug and
+propagates uncaught.
 """
 from services import applog
 
@@ -49,9 +37,7 @@ def resolve_survivor(mode, survivor, *, warrant_code=None, us_code=None,
         try:
             scenario = us_options_logic.adr_premium_scenario(us_code, 30)
         except Exception as e:
-            # Expected failure mode: the premium series is fetched from
-            # yfinance, which is down/rate-limited often enough that it must not
-            # fail the close. Logged so it is visible instead of vanishing.
+            # yfinance is down/rate-limited often enough that it must not fail the close.
             applog.log("CLOSE", f"adr premium unavailable for {us_code}: {e}",
                        level="WARN")
         if scenario is not None:
@@ -60,9 +46,7 @@ def resolve_survivor(mode, survivor, *, warrant_code=None, us_code=None,
             out["adr_ratio"] = (us_options_logic._adr_map().get(us_code) or {}).get("adr_ratio")
 
     if survivor == "warrant" and mode in ("direct", "us"):
-        # A real warrant (not a TW option): CMoney has a live bid. No try here —
-        # get_cmoney_prices handles its own fetch errors, so an exception out of
-        # it is a bug and should surface, not degrade to a silent "model".
+        # No try here — get_cmoney_prices handles its own fetch errors.
         res = warrant_logic.get_cmoney_prices([warrant_code]) if warrant_code else {}
         w = (res.get(warrant_code) or {}).get("Warrant") if res else None
         if w:
@@ -80,9 +64,7 @@ def resolve_survivor(mode, survivor, *, warrant_code=None, us_code=None,
                 opt_expiry_iso, out["current_fx"], out["adr_ratio"],
             )
         except Exception as e:
-            # Same as above: the option chain comes from yfinance. Missing data
-            # returns None on its own; only an upstream fault raises, and that
-            # degrades to the model price rather than failing the close.
+            # Same as above: yfinance fault degrades to model price, not a failed close.
             applog.log("CLOSE", f"us option quote unavailable for {us_code}: {e}",
                        level="WARN")
         if last:

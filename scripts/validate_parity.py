@@ -1,11 +1,7 @@
-"""Parity gate for Phase 2 Step 4a (readers read Supabase behind a flag).
-
-Deterministic, in-process, function-level parity. Stronger and less flaky than a
-dual-boot HTTP diff because it removes network/market drift: we refresh ONCE
-(which both writes fresh Supabase snapshots AND warms the in-proc live caches
-from the SAME instant), then read the same functions twice — once with
-MARKET_SOURCE unset (live cache) and once with MARKET_SOURCE=supabase (snapshot)
-— and prove the results are row-for-row identical.
+"""Proves the Supabase-snapshot read path (MARKET_SOURCE=supabase) is row-for-row
+identical to the live in-process cache path. Refreshes once (writing snapshots
+and warming live caches from the same instant), then reads the same functions
+twice under each MARKET_SOURCE setting and diffs the results.
 
 Run:
   TZ=Asia/Taipei OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES \

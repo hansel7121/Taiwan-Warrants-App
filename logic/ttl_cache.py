@@ -1,24 +1,8 @@
-"""One TTL cache for every in-process market-data cache in logic/.
-
-Eight hand-rolled `{key: (timestamp, value)}` dicts used to live across
-warrant_logic / options_logic / us_options_logic, five of them unlocked. Under
-gunicorn's 8 threads that made every read a race and every cold key a stampede
-— N threads fetching the same TAIFEX file or option chain, each materialising
-its own DataFrame, on a host that OOM-kills at 512 MB. Locking was a convention
-applied by hand, so it diverged (the TW product map was locked, its US twin was
-not). Here it is a property of the type: nothing reaches the dict except
-through the instance lock.
-
-Two locks per instance, deliberately:
-  * `_lock` guards the dict itself and is never held across a loader call.
-  * one lock per key single-flights the loader, so a stampede on one key
-    collapses to one fetch while other keys still load in parallel.
-
-Every instance registers itself, so `stats()` / `format_stats()` can report
-what the process is holding in one line — the aggregate visibility that was
-missing when the OOM restarts had to be diagnosed.
-
-Pure in-memory logic: no Flask, no Supabase, no I/O of its own.
+"""One thread-safe TTL cache class, shared by every in-process market-data
+cache in logic/ (warrant/options/us_options). Two locks per instance: `_lock`
+guards the dict, and a per-key lock single-flights concurrent loads of the same
+key so a stampede collapses to one fetch. Every instance self-registers so
+`stats()` / `format_stats()` can report total memory held across caches.
 """
 import sys
 import threading

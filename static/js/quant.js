@@ -3,33 +3,21 @@
 // which loads first in every mode.
 
 let _premEvNt = 0;   // premium EV (FX-stripped) — set by loadAdrScenario, read by renderFxSection for the total
-//
-// Both legs are the SAME underlying, so the pair is delta-matched and the
-// dominant residual risk is the ADR *basis* (premium). We hold the
-// underlying at current spot S0 (direction is hedged) and let only the
-// ADR premium vary. The warrant settles on the local price S0; the option
-// settles on the ADR-implied local price S0·(1 + (p − p0)), where p is the
-// exit premium and p0 the premium at entry (today's).
-//
-//   PnL(p) = dir · [ (Wintrinsic(S0,Kw) − Wentry)
-//                    + (Oentry − Ointrinsic(S0·(1+(p−p0)),Ko)) ] · shares
-//
-//   EV = Σ_regime  P(regime) · PnL( conditional-mean premium of regime )
-//
-// Regimes (spike / around-0 / drop) and their probabilities + conditional
-// mean premia come from the historical premium series (backend).
-// Strip the FX-driven part out of a premium reading, leaving the FX-flat
-// "basis" premium. Identity: 1+prem = (1+p0)·fxRatio·exp(Δb), so the
-// FX-stripped effective premium is (1+prem)/fxRatio − 1. The P&L engines
-// price option moneyness off this basis premium and translate FX
-// separately (fxRatio), so FX is never counted twice.
 
+// The pair is delta-matched (same underlying), so the dominant residual risk
+// is the ADR basis (premium). Underlying is held at spot S0; warrant settles
+// on S0, option on the ADR-implied S0·(1+(p−p0)).
+//   PnL(p) = dir · [(Wintrinsic(S0,Kw) − Wentry) + (Oentry − Ointrinsic(S0·(1+(p−p0)),Ko))] · shares
+//   EV = Σ_regime P(regime) · PnL(conditional-mean premium of regime)
+// Regime probabilities + conditional mean premia come from the backend's
+// historical premium series.
+
+// Strip FX out of a premium reading: 1+prem = (1+p0)·fxRatio·exp(Δb), so the
+// FX-stripped basis premium is (1+prem)/fxRatio − 1.
 const _stripFx = (prem, fxRatio) => (1 + prem) / (fxRatio || 1) - 1;
 
-// `p` is the FX-STRIPPED (basis) premium: option moneyness = S0·(1+(p−p0))
-// reflects only the ADR-vs-local divergence, and `fxRatio` translates the
-// USD option leg to TWD. Callers holding an actual (FX-laden) premium must
-// pass _stripFx(premium, fxRatio) here.
+// `p` here is the FX-stripped (basis) premium; callers holding an actual
+// (FX-laden) premium must pass _stripFx(premium, fxRatio).
 
 function _evPnlAtPremium(row, p, p0, fxRatio, opts) {
   const fx = (fxRatio == null) ? 1 : fxRatio;   // F_exit / F_today on the US leg
