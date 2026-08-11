@@ -114,7 +114,7 @@ scripts/               one-off maintenance/seeding scripts
 
 ## Deploy (Render)
 
-The repo ships a `render.yaml` blueprint — create a Render **Blueprint** from the repo; it provisions a native Python web service running gunicorn with a single worker on the **starter** plan (free-tier 512 MB is tight for pandas/numpy/scipy). Set these secrets in the dashboard (marked `sync: false`, never committed): `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`. Post-deploy, add the live Render URL to Supabase **Auth → URL Configuration → Redirect URLs** or magic-link sign-in fails.
+The repo ships a `render.yaml` blueprint — create a Render **Blueprint** from the repo; it provisions a native Python web service running gunicorn with a single worker on the **standard** plan (1 vCPU / 2 GB — the starter tier's 512 MB proved too tight for pandas/numpy/scipy, see issue #57). Set these secrets in the dashboard (marked `sync: false`, never committed): `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`. Post-deploy, add the live Render URL to Supabase **Auth → URL Configuration → Redirect URLs** or magic-link sign-in fails.
 
 ## Taiwan warrant & option mechanics
 

@@ -2,14 +2,19 @@ services:
   - type: web
     name: warrant-scanner
     runtime: python
-    # The free tier's 512 MB is tight for the pandas/numpy/scipy working set.
-    plan: starter
+    # Upgraded from starter (512 MB) after repeated OOM restarts: a forced
+    # full warrant re-fetch following a universe change has been observed
+    # peaking at 640 MB RSS, over the starter cap (issue #57). standard gives
+    # 1 vCPU / 2 GB. Keep this in sync with the dashboard — a stale `starter`
+    # here would silently downgrade the service on the next blueprint sync
+    # even though the dashboard is actually running standard.
+    plan: standard
     buildCommand: pip install -r requirements.txt
     # Exactly 1 worker: market-data caches live in process memory + APScheduler.
     # timeout 240 (was 180): heavy sync work (universe scrape, arb match) can
-    # peg the starter plan's 0.5 vCPU cap long enough that gunicorn's arbiter
-    # can't service its heartbeat and kills the worker mid-request (502s +
-    # worker restarts observed in production). More headroom, paired with
+    # peg the CPU cap long enough that gunicorn's arbiter can't service its
+    # heartbeat and kills the worker mid-request (502s + worker restarts
+    # observed in production on the starter plan). More headroom, paired with
     # services/scheduler.py's sync lock and fewer arb_logic threads, which cut
     # the actual CPU contention causing the stalls.
     startCommand: gunicorn -w 1 --threads 8 --timeout 240 -b 0.0.0.0:$PORT wsgi:app
@@ -25,8 +30,8 @@ services:
       # Supabase market snapshots AND run the Direct-Arb suggestions scan, on a
       # wall-clock 15-min cron grid gated to each market's trading hours. ON:
       # the server fetches and populates the Suggestions tab on its own, without
-      # depending on a local run. Single-worker executor keeps it under the
-      # starter instance's 512 MB.
+      # depending on a local run. Single-worker executor keeps peak memory
+      # bounded regardless of instance size.
       - key: ENABLE_SCHEDULER
         value: "1"
       # Step 5b: readers now serve the Supabase snapshots (falling back to a
