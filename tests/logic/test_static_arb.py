@@ -200,6 +200,61 @@ def test_min_edge_filters_thin_structures():
     assert solve(warrants, options, dte, min_edge=200_000)[0] is None
 
 
+# ── containment of the Direct Match model ────────────────────────────────────
+# arb_logic's executable same_type row is long warrant + short same-type option
+# with a favorable strike and the option expiring no later than the warrant. That
+# is a 2-leg static portfolio, so the LP must accept it — its floor for the long
+# leg, (S - K*d)+, is strictly above the intrinsic that Direct Match assumes.
+
+def test_direct_match_shaped_vertical_is_accepted():
+    """Call warrant at 2080 vs a richer 2100 call option expiring sooner."""
+    warrants = [warrant("W2080", "Call", 2080.0, 100, ask=2.0, ratio=0.005, ask_qty=400,
+                        spot=2050.0)]
+    options = [option("C2100", "Call", 2100.0, 36, bid=548.0, bid_size=1, spot=2050.0)]
+
+    row, _ = solve(warrants, options, 36)
+
+    assert row is not None
+    assert row["n_long"] == 1 and row["n_short"] == 1
+    # Credit per underlying share matches Direct Match's price_diff:
+    # option bid − warrant ask/ratio = 548 − (2.0 / 0.005) = 148.
+    assert row["net_credit"] / M == pytest.approx(148.0)
+    assert row["min_payoff"] >= 0
+
+
+def test_direct_match_row_is_rejected_when_warrant_depth_cannot_cover_a_contract():
+    """The one place the LP is deliberately stricter than Direct Match.
+
+    With ratio 0.005 a single 2,000-share option contract needs 400 張 of
+    warrant. Direct Match still emits the row and flags fillable=False; the LP
+    treats depth as a hard constraint and emits nothing, because a hedge it
+    cannot actually buy is not an arb.
+    """
+    warrants = [warrant("W2080", "Call", 2080.0, 100, ask=2.0, ratio=0.005, ask_qty=8,
+                        spot=2050.0)]
+    options = [option("C2100", "Call", 2100.0, 36, bid=548.0, bid_size=1, spot=2050.0)]
+
+    row, _ = solve(warrants, options, 36)
+    assert row is None
+
+
+def test_pcp_is_not_expressible_without_stock_and_bond_columns():
+    """PCP prices a warrant against a synthetic built from the OPPOSITE-type
+    option plus the underlying and a bond. The LP's variable set holds only
+    warrants and options, so no PCP structure can appear — a known coverage gap,
+    pinned here so adding stock/bond columns is a deliberate change."""
+    warrants = [warrant("W2080", "Call", 2080.0, 49, ask=2.0, ratio=0.005, spot=2050.0)]
+    options = [option("P2500", "Put", 2500.0, 36, bid=658.0, ask=660.0, spot=2050.0)]
+
+    longs, shorts, _ = static_arb._build_legs(
+        pd.DataFrame(warrants), pd.DataFrame(options), 36, M, R)
+    assert {l["kind"] for l in longs} <= {"warrant", "option"}
+    assert {s["kind"] for s in shorts} <= {"option"}
+    # A long call warrant against a short put cannot hedge: both gain as spot
+    # falls on one side, so the pair has no payoff floor and the LP declines.
+    assert static_arb._solve_horizon(longs, shorts, 36, 0.0) is None
+
+
 # ── depth gating ─────────────────────────────────────────────────────────────
 
 def test_short_leg_without_resting_size_is_excluded_and_counted():
