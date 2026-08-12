@@ -173,10 +173,13 @@ def sync_universe():
 
 
 def sync_warrant():
-    """Fetch the full warrant superset (IV computed, non-converged kept) + write."""
+    """Fetch the full warrant superset (IV computed, non-converged and unquoted kept) + write."""
+    # allow_no_quote: the snapshot is the superset every reader filters down
+    # from, so one-sided / empty-book warrants must be stored. Readers that
+    # can't use them (arb, suggestions) drop them again on read.
     df, err, meta = warrant_logic.scrape_cmoney_warrant(
         warrant_universe(), "All", 0, 365, 0.0, 1e9, 0,
-        compute_iv=True, keep_noniv=True,
+        compute_iv=True, keep_noniv=True, allow_no_quote=True,
     )
     if df is None or df.empty:
         print(f"SCHED: warrants empty ({err}), skipping write", flush=True)

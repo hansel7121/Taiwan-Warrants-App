@@ -229,29 +229,62 @@ async function syncUniverse() {
   }
 }
 
+function escHtml(s) {
+  return String(s).replace(/[&<>"]/g,
+    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+// Header text for columns whose key doesn't read well raw (th is uppercased by
+// CSS, so an underscored key would show as BID_TIME_VALUE_PCT).
+const WARRANT_COL_LABELS = {
+  bid_time_value_pct: "BID TIME VALUE PCT",
+  ask_time_value_pct: "ASK TIME VALUE PCT",
+};
+
+// Warrant-code search: the hit is floated to the top of whatever order the
+// current sort produced and highlighted, so a code you're watching stays
+// visible without narrowing the scan. Matches within the loaded results only.
+function warrantSearchQuery() {
+  const el = document.getElementById("warrantSearch");
+  return el ? el.value.trim().toUpperCase() : "";
+}
+
+function applyWarrantSearch() {
+  if (!currentData.length) return;
+  renderTable(currentData);
+}
+
 function renderTable(rows) {
   if (!rows.length) {
     document.getElementById("tableContainer").innerHTML = "<p style='padding:16px;color:var(--muted)'>No results.</p>";
     return;
   }
+  const query = warrantSearchQuery();
+  const isHit = r => !!query && String(r.warrant_code || "").toUpperCase().includes(query);
+  const ordered = query ? [...rows.filter(isHit), ...rows.filter(r => !isHit(r))] : rows;
   const cols = Object.keys(rows[0]);
   const star = can("watchlist");
-  let html = "<table><thead><tr>";
+  let html = "";
+  if (query && !ordered.some(isHit)) {
+    html += `<p style="padding:10px 16px;color:var(--muted)">No warrant code matching "${escHtml(query)}" in the current results.</p>`;
+  }
+  html += "<table><thead><tr>";
   if (star) html += `<th title="Watchlist">☆</th>`;
   cols.forEach((c, i) => {
     const arrow = sortCol === i ? (sortAsc ? " ▲" : " ▼") : "";
-    html += `<th onclick="sortBy(${i})">${c}${arrow}</th>`;
+    html += `<th onclick="sortBy(${i})">${WARRANT_COL_LABELS[c] || c}${arrow}</th>`;
   });
   html += "</tr></thead><tbody>";
-  rows.forEach(row => {
+  ordered.forEach(row => {
     const cls = row.type === "Call" ? "call" : "put";
-    html += "<tr>";
+    html += `<tr${isHit(row) ? ' class="row-pinned"' : ""}>`;
     if (star) html += starCell("warrant", row.warrant_code, row.underlying_code,
       row.warrant_name || row.warrant_code,
       { type: row.type, strike: row.strike, days_to_expiry: row.days_to_expiry,
         exercise_ratio: row.exercise_ratio });
     cols.forEach(c => {
-      const val = row[c];
+      // null = no quote on that side, so the derived metric doesn't exist.
+      const val = row[c] === null || row[c] === undefined ? "—" : row[c];
       html += `<td>${c === "type" ? `<span class="${cls}">${val}</span>` : val}</td>`;
     });
     html += "</tr>";
@@ -260,21 +293,30 @@ function renderTable(rows) {
   document.getElementById("tableContainer").innerHTML = html;
 }
 
+// Missing cells (no quote on that side, so no derived metric) sort last in both
+// directions — never as 0, never as the string "null".
+function compareRows(key, asc) {
+  return (a, b) => {
+    const av = a[key], bv = b[key];
+    const aGone = av === null || av === undefined;
+    const bGone = bv === null || bv === undefined;
+    if (aGone || bGone) return aGone === bGone ? 0 : (aGone ? 1 : -1);
+    if (typeof av === "number" && typeof bv === "number") return asc ? av - bv : bv - av;
+    return asc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+  };
+}
+
 function sortBy(colIndex) {
   const key = Object.keys(currentData[0])[colIndex];
   if (sortCol === colIndex) sortAsc = !sortAsc;
   else { sortCol = colIndex; sortAsc = true; }
-  currentData.sort((a, b) => {
-    const av = a[key], bv = b[key];
-    if (typeof av === "number") return sortAsc ? av - bv : bv - av;
-    return sortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
-  });
+  currentData.sort(compareRows(key, sortAsc));
   renderTable(currentData);
 }
 
 function sortByColumn(key, asc) {
   if (!currentData.length) return;
-  currentData.sort((a, b) => asc ? a[key] - b[key] : b[key] - a[key]);
+  currentData.sort(compareRows(key, asc));
   renderTable(currentData);
 }
 

@@ -556,6 +556,8 @@ def read_warrant():
             min_leverage,
             max_tv_pct,
             min_volume,
+            # The scanner shows every book state — one-sided and empty included.
+            allow_no_quote=True,
         )
     except Exception as e:
         applog.log("WARR", f"read_warrant failed: {e}\n{traceback.format_exc()}", level="ERROR")
@@ -569,7 +571,10 @@ def read_warrant():
         return jsonify({"rows": [], "count": 0,
                         "error": error if hard_error else None, **meta})
     applog.set_rows(len(df))
-    return jsonify({"rows": df.to_dict(orient="records"), "count": len(df), **meta})
+    # to_json, not to_dict: unquoted warrants carry NaN in every ask-derived
+    # column, and jsonify would emit a bare NaN literal that JSON.parse rejects.
+    rows = json.loads(df.to_json(orient="records"))
+    return jsonify({"rows": rows, "count": len(df), **meta})
 
 
 @app.route("/read_warrant_csv", methods=["POST"])
@@ -592,6 +597,7 @@ def read_warrant_csv():
         min_leverage,
         max_tv_pct,
         min_volume,
+        allow_no_quote=True,
     )
     output = io.StringIO()
     df.to_csv(output, index=False)

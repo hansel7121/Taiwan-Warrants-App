@@ -22,8 +22,9 @@ from services import db_market   # noqa: E402
 _COLS = [
     "warrant_code", "warrant_name", "underlying_code", "type",
     "underlying_price", "ask", "bid", "ask_qty", "bid_qty", "days_to_expiry",
-    "strike", "exercise_ratio", "volume", "time_value", "time_value_pct",
-    "time_value_am", "iv_ask", "iv_bid", "delta_calc", "leverage_calc",
+    "strike", "exercise_ratio", "volume", "time_value",
+    "bid_time_value_pct", "ask_time_value_pct", "time_value_am",
+    "iv_ask", "iv_bid", "delta_calc", "leverage_calc",
 ]
 
 
@@ -47,7 +48,8 @@ def _make_df(marker, n, underlying):
             "exercise_ratio": 0.1,
             "volume": float(i * 3),
             "time_value": 0.5 + i * 0.0005,
-            "time_value_pct": 0.5,
+            "bid_time_value_pct": 0.45,
+            "ask_time_value_pct": 0.5,
             "time_value_am": 0.4,
             "iv_ask": np.nan if i % 7 == 0 else round(0.25 + (i % 30) * 0.001, 4),
             "iv_bid": round(0.24 + (i % 30) * 0.001, 4),

@@ -322,6 +322,11 @@ tbody tr:hover { background: var(--surface); }
 tbody tr[onclick]:hover { background: #1e2535; }
 tbody tr:last-child td { border-bottom: none; }
 
+/* Warrant-code search hit, floated to the top of the scanner table. */
+tbody tr.row-pinned td { background: rgba(79, 142, 247, 0.16); }
+tbody tr.row-pinned:hover td { background: rgba(79, 142, 247, 0.26); }
+tbody tr.row-pinned td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+
 .call { color: var(--call); font-weight: 600; }
 .put  { color: var(--put);  font-weight: 600; }
 

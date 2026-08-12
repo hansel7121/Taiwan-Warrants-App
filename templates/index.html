@@ -311,6 +311,11 @@
           <label>Min Volume
             <input type="number" id="minVolume" value="0" min="0" />
           </label>
+          <label>Find Warrant Code
+            <input type="text" id="warrantSearch" placeholder="e.g. 073074"
+                   oninput="applyWarrantSearch()"
+                   title="Pins matching warrants to the top of the results below and highlights them. Searches the loaded results only — it does not change the filters." />
+          </label>
 
           <div class="action-group compact">
             <button class="primary" id="readWarrantBtn" onclick="readWarrant()">Read Warrants</button>
@@ -324,7 +329,8 @@
 
         <div class="sort-btns">
           <button onclick="sortByColumn('leverage_calc', false)">Leverage ↓</button>
-          <button onclick="sortByColumn('time_value_pct', true)">Time Value % ↑</button>
+          <button onclick="sortByColumn('ask_time_value_pct', true)">Ask Time Value % ↑</button>
+          <button onclick="sortByColumn('bid_time_value_pct', true)">Bid Time Value % ↑</button>
           <button onclick="sortByColumn('volume', false)">Volume ↓</button>
         </div>
 
