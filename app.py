@@ -1014,6 +1014,8 @@ def _static_arb_params(data):
         min_volume=int(data.get("min_volume", 0) or 0),
         min_edge=float(data.get("min_edge", 0) or 0),
         max_horizon_dte=int(data.get("max_horizon_dte") or 0) or None,
+        # Absent = the original buy-only Experiment sub-tab, unchanged.
+        allow_short_warrants=bool(data.get("allow_short_warrants", False)),
     )
 
 

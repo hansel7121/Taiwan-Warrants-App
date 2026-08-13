@@ -399,6 +399,7 @@
           <button id="arb-mode-twus" class="pfsub-btn" onclick="setArbMode('twus')">TW Opt / US Opt</button>
           <button id="arb-mode-straddle" class="pfsub-btn" onclick="setArbMode('straddle')">Straddle Vol Arb</button>
           <button id="arb-mode-experiment" class="pfsub-btn" onclick="setArbMode('experiment')">Experiment</button>
+          <button id="arb-mode-shortw" class="pfsub-btn" onclick="setArbMode('shortw')">Short Warrant LP</button>
         </div>
 
         <!-- ── Direct Match sub-tab ── -->
@@ -637,7 +638,7 @@
           <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
             <div style="display:flex;align-items:center;gap:10px">
               <span style="font-size:14px;font-weight:600;color:var(--text)">Experiment — static-arbitrage LP over the whole TW chain</span>
-              <button onclick="openStaticArbInfo()" title="How does the static-arbitrage LP work?" style="background:none;border:1.5px solid var(--border);border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);font-family:inherit;padding:0;flex-shrink:0">ⓘ</button>
+              <button onclick="openStaticArbInfo('experiment')" title="How does the static-arbitrage LP work?" style="background:none;border:1.5px solid var(--border);border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);font-family:inherit;padding:0;flex-shrink:0">ⓘ</button>
             </div>
             <div style="font-size:11px;color:var(--call);line-height:1.5;max-width:760px">
               ⚠ No dividend model anywhere in this app. A cash dividend between the horizon and a long leg's expiry lowers that leg's floor,
@@ -663,22 +664,76 @@
                 <input type="number" id="expMaxLegs" value="0" min="0" title="0 = no filter. Hides structures with more legs than this (display filter only — the LP is unrestricted)."/>
               </label>
               <div class="action-group compact">
-                <button class="primary" id="expFindBtn" onclick="runStaticArb()">Run LP</button>
-                <button class="success" id="expDownloadBtn" onclick="downloadStaticArbCSV()" style="display:none">Download CSV</button>
+                <button class="primary" id="expFindBtn" onclick="runStaticArb('experiment')">Run LP</button>
+                <button class="success" id="expDownloadBtn" onclick="downloadStaticArbCSV('experiment')" style="display:none">Download CSV</button>
               </div>
             </div>
           </div>
 
           <div id="arb-sort-experiment" class="sort-btns">
-            <button onclick="sortStaticArbBy('guaranteed_profit', false)">Guaranteed ↓</button>
-            <button onclick="sortStaticArbBy('return_pct', false)">Return % ↓</button>
-            <button onclick="sortStaticArbBy('net_credit', false)">Net Credit ↓</button>
-            <button onclick="sortStaticArbBy('n_legs', true)">Legs ↑</button>
-            <button onclick="sortStaticArbBy('horizon_dte', true)">Horizon ↑</button>
+            <button onclick="sortStaticArbBy('experiment', 'guaranteed_profit', false)">Guaranteed ↓</button>
+            <button onclick="sortStaticArbBy('experiment', 'return_pct', false)">Return % ↓</button>
+            <button onclick="sortStaticArbBy('experiment', 'net_credit', false)">Net Credit ↓</button>
+            <button onclick="sortStaticArbBy('experiment', 'n_legs', true)">Legs ↑</button>
+            <button onclick="sortStaticArbBy('experiment', 'horizon_dte', true)">Horizon ↑</button>
           </div>
 
           <div id="exp-status"></div>
           <div id="exp-tableContainer"></div>
+        </div>
+
+        <!-- ── Short Warrant LP sub-tab ── -->
+        <!-- Same LP as Experiment, plus a sell variable per warrant. Kept as a
+             separate tab rather than a toggle so the two models can be run
+             against each other, and against Direct Match, on one chain. -->
+        <div id="arb-sub-shortw" style="display:none">
+          <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-size:14px;font-weight:600;color:var(--text)">Short Warrant LP — static-arbitrage LP, warrants sellable (TW warrants vs TW options)</span>
+              <button onclick="openStaticArbInfo('shortw')" title="How does the short-warrant LP work?" style="background:none;border:1.5px solid var(--border);border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);font-family:inherit;padding:0;flex-shrink:0">ⓘ</button>
+            </div>
+            <div style="font-size:11px;color:var(--call);line-height:1.5;max-width:760px">
+              ⚠ Structures here can require SELLING a warrant. Taiwan retail generally cannot short a warrant it does not already hold — check borrow before treating a row as executable.
+              Short legs are calls only: a short put warrant is an American claim whose early exercise this one-period model cannot bound.
+              <br/>⚠ Rows shown are sound, but rows are missing — each horizon emits only its best structure, and lot rounding can suppress a whole horizon. Keep Direct Match running alongside.
+              <br/>⚠ No dividend model anywhere in this app. A structure spanning an ex-div date (Taiwan's season runs Jun–Sep) is unverified.
+            </div>
+
+            <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
+              <div class="stock-select">
+                <span>Stock (multi-select)</span>
+                <select id="swStockSelect" multiple size="6">
+                </select>
+              </div>
+              <label>Min Option Volume
+                <input type="number" id="swMinVolume" value="0" min="0" title="Drop options with volume below this before the LP sees them"/>
+              </label>
+              <label>Min Edge (NT$)
+                <input type="number" id="swMinEdge" value="0" min="0" step="100" title="Only emit structures whose guaranteed profit exceeds this. Fees and tax are NOT modelled — raise this to cover them."/>
+              </label>
+              <label>Max Horizon DTE
+                <input type="number" id="swMaxHorizon" value="0" min="0" title="0 = every option AND warrant expiry is tried as a horizon. Set a cap to skip far-dated horizons — this tab has many more horizons than Experiment, so a cap speeds it up a lot."/>
+              </label>
+              <label>Max Legs
+                <input type="number" id="swMaxLegs" value="0" min="0" title="0 = no filter. Hides structures with more legs than this (display filter only — the LP is unrestricted). Short-warrant structures run large; try 6 to find executable ones."/>
+              </label>
+              <div class="action-group compact">
+                <button class="primary" id="swFindBtn" onclick="runStaticArb('shortw')">Run LP</button>
+                <button class="success" id="swDownloadBtn" onclick="downloadStaticArbCSV('shortw')" style="display:none">Download CSV</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="arb-sort-shortw" class="sort-btns">
+            <button onclick="sortStaticArbBy('shortw', 'guaranteed_profit', false)">Guaranteed ↓</button>
+            <button onclick="sortStaticArbBy('shortw', 'return_pct', false)">Return % ↓</button>
+            <button onclick="sortStaticArbBy('shortw', 'net_credit', false)">Net Credit ↓</button>
+            <button onclick="sortStaticArbBy('shortw', 'n_legs', true)">Legs ↑</button>
+            <button onclick="sortStaticArbBy('shortw', 'horizon_dte', true)">Horizon ↑</button>
+          </div>
+
+          <div id="sw-status"></div>
+          <div id="sw-tableContainer"></div>
         </div>
       </main>
     </div>

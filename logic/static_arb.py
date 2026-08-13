@@ -7,7 +7,11 @@ the portfolio's payoff being >= 0 at every spot. Within the class of static
 buy-and-hold portfolios of quoted instruments sharing one horizon it is
 complete — every such arb is found, and an empty result is a proof that none
 exists. arb_logic's three models all fall out as weight-restricted special
-cases. Drives the Arb Finder's Experiment sub-tab via app.py::match_static_arb.
+cases. Drives two Arb Finder sub-tabs via app.py::match_static_arb — Experiment
+(warrants buy-only, the original model) and Short Warrant LP
+(allow_short_warrants=True, which also lets the LP SELL a warrant into its
+resting bid and so reaches arb_logic's "Buy Option / Sell Warrant" direction).
+Scoped to Taiwan warrants vs Taiwan options.
 """
 import numpy as np
 import pandas as pd
@@ -26,6 +30,17 @@ from logic import warrant_logic
 # instantaneous spot, so the European bound is the only unconditionally provable
 # floor. Flip only if you accept that settlement caveat.
 AMERICAN_PUT_INTRINSIC_FLOOR = False
+
+# Short warrant legs are CALL-ONLY, and this is a soundness bound, not a filter.
+#
+# Selling a warrant is shorting an AMERICAN-exercisable claim: the holder may
+# exercise before T_star, at which point the one-period payoff model stops being
+# a proof. For a short CALL on a non-dividend-paying underlying early exercise is
+# never optimal, so the horizon payoff is still the binding case and the proof
+# survives. For a short PUT it is not — early exercise can be optimal, and this
+# app models no dividends at all, so a short-put structure would be presented as
+# riskless without being provable. Widen only alongside a dividend model.
+SHORT_WARRANTS_CALL_ONLY = True
 
 # LP weights below this fraction of the largest weight are numerical dust.
 DUST_FRAC = 1e-3
@@ -68,13 +83,17 @@ def _net_payoff(longs, shorts, xl, xs, S):
             - sum(w * _leg_payoff(s, S) for s, w in zip(shorts, xs)))
 
 
-def _build_legs(warrant_df, opt_df, T_star, M, r):
+def _build_legs(warrant_df, opt_df, T_star, M, r, allow_short_warrants=False):
     """Normalise both chains to per-underlying-share legs at horizon T_star.
 
     Shorts must expire at EXACTLY T_star — one that settled earlier settled
     against the spot at its own expiry, a different random variable that a
     one-period LP cannot represent. Longs may expire at or beyond T_star and are
     replaced by their lower bound there.
+
+    ``allow_short_warrants`` adds the warrant sell side (see
+    SHORT_WARRANTS_CALL_ONLY). Off by default so the original buy-only model is
+    unchanged for callers that do not opt in.
     """
     longs, shorts, dropped_no_depth = [], [], 0
 
@@ -83,23 +102,42 @@ def _build_legs(warrant_df, opt_df, T_star, M, r):
         if dte < T_star:
             continue
         ratio = float(w.get("exercise_ratio") or 0)
-        ask = float(w["ask"]) if pd.notna(w.get("ask")) else 0.0
-        qty = _int_or(w.get("ask_qty"))
-        if ratio <= 0 or ask <= 0:
-            continue
-        if qty <= 0:
-            dropped_no_depth += 1
+        if ratio <= 0:
             continue
         lot_shares = 1000.0 * ratio   # one 張 = 1,000 units, each delivering `ratio` shares
-        longs.append({
+        base = {
             "kind": "warrant", "code": str(w["warrant_code"]),
             "name": str(w["warrant_name"]), "type": w["type"],
             "is_call": w["type"] == "Call", "strike": float(w["strike"]),
-            "dte": dte, "quote": round(ask, 4),
-            "price_ps": round(ask / ratio, 6), "ratio": ratio,
-            "lot_shares": lot_shares, "depth_lots": qty,
-            "depth_shares": qty * lot_shares,
-        })
+            "dte": dte, "ratio": ratio, "lot_shares": lot_shares,
+        }
+
+        ask = float(w["ask"]) if pd.notna(w.get("ask")) else 0.0
+        qty = _int_or(w.get("ask_qty"))
+        if ask > 0:
+            if qty <= 0:
+                dropped_no_depth += 1
+            else:
+                longs.append({**base, "quote": round(ask, 4),
+                              "price_ps": round(ask / ratio, 6), "depth_lots": qty,
+                              "depth_shares": qty * lot_shares})
+
+        # Short warrants, same horizon rule as short options: sold into the
+        # resting bid, and only at EXACTLY T_star. One outliving the horizon
+        # would have to be bought back at an unknown price, which a one-period
+        # model cannot bound; one expiring earlier settled against a different
+        # spot. Calls only — see SHORT_WARRANTS_CALL_ONLY.
+        if (allow_short_warrants and dte == T_star
+                and not (SHORT_WARRANTS_CALL_ONLY and base["is_call"] is False)):
+            bid = float(w["bid"]) if pd.notna(w.get("bid")) else 0.0
+            bqty = _int_or(w.get("bid_qty"))
+            if bid > 0:
+                if bqty <= 0:
+                    dropped_no_depth += 1
+                else:
+                    shorts.append({**base, "quote": round(bid, 4),
+                                   "price_ps": round(bid / ratio, 6), "depth_lots": bqty,
+                                   "depth_shares": bqty * lot_shares})
 
     for _, o in opt_df.iterrows():
         dte = int(o["days_to_expiry"])
@@ -287,8 +325,12 @@ def _solve_horizon(longs, shorts, T_star, min_edge):
 
 
 def match_static_arb(stock_codes, min_volume=0, min_edge=0.0,
-                     max_horizon_dte=None, r=None):
-    """Scan every selected underlying for static arbs; returns a DataFrame."""
+                     max_horizon_dte=None, r=None, allow_short_warrants=False):
+    """Scan every selected underlying for static arbs; returns a DataFrame.
+
+    ``allow_short_warrants`` drives the "Short Warrant LP" sub-tab; the original
+    Experiment sub-tab leaves it off and gets the identical buy-only model.
+    """
     stock_codes = list(stock_codes)
     r = options_logic.R if r is None else float(r)
 
@@ -335,13 +377,21 @@ def match_static_arb(stock_codes, min_volume=0, min_edge=0.0,
             continue
 
         spot = float(warrant_df.iloc[0]["underlying_price"])
-        horizons = sorted(int(d) for d in opt_df["days_to_expiry"].unique())
+        # Horizons are the dates a SHORT leg can settle on. With warrants
+        # buy-only that was exactly the option expiries; once a warrant can be
+        # sold, its own expiry is a horizon too, and skipping it would hide
+        # every short-warrant structure.
+        horizon_set = set(int(d) for d in opt_df["days_to_expiry"].unique())
+        if allow_short_warrants:
+            horizon_set |= set(int(d) for d in warrant_df["days_to_expiry"].unique())
+        horizons = sorted(horizon_set)
         if max_horizon_dte:
             horizons = [h for h in horizons if h <= int(max_horizon_dte)]
 
         code_rows, code_dropped = [], 0
         for T_star in horizons:
-            longs, shorts, dropped = _build_legs(warrant_df, opt_df, T_star, M, r)
+            longs, shorts, dropped = _build_legs(warrant_df, opt_df, T_star, M, r,
+                                                 allow_short_warrants)
             code_dropped += dropped
             row = _solve_horizon(longs, shorts, T_star, min_edge)
             if row:
@@ -352,7 +402,8 @@ def match_static_arb(stock_codes, min_volume=0, min_edge=0.0,
         total_dropped += code_dropped
         all_rows.extend(code_rows)
         applog.log("ARB", f"{code} {pos} horizons={len(horizons)} "
-                          f"structures={len(code_rows)} dropped_no_depth={code_dropped}")
+                          f"structures={len(code_rows)} dropped_no_depth={code_dropped} "
+                          f"short_warrants={allow_short_warrants}")
 
     if not all_rows:
         if total_dropped:

@@ -307,3 +307,98 @@ def test_longs_may_outlive_the_horizon_but_not_precede_it():
     longs, _, _ = static_arb._build_legs(
         pd.DataFrame(), pd.DataFrame(options), 30, M, R)
     assert sorted(l["code"] for l in longs) == ["C110-30", "C110-60"]
+
+
+# ── short warrant legs (Short Warrant LP sub-tab) ────────────────────────────
+#
+# These pin the sell side that `allow_short_warrants=True` adds. The default is
+# OFF, so the Experiment sub-tab keeps the buy-only model it was proven with —
+# the first test here is what guarantees that.
+
+def solve_sw(warrants, options, T_star, min_edge=0.0):
+    """`solve`, with the warrant sell side switched on."""
+    wdf = pd.DataFrame(warrants) if warrants else pd.DataFrame()
+    odf = pd.DataFrame(options) if options else pd.DataFrame()
+    longs, shorts, dropped = static_arb._build_legs(
+        wdf, odf, T_star, M, R, allow_short_warrants=True)
+    return static_arb._solve_horizon(longs, shorts, T_star, min_edge), dropped
+
+
+def test_short_warrants_are_off_by_default():
+    """The Experiment sub-tab must keep the buy-only variable set. A warrant with
+    a live bid at the horizon becomes a short leg ONLY when asked."""
+    w = [warrant("W1", "Call", 100.0, 30, ask=12.5)]      # helper gives bid = ask*0.98
+    _, shorts_off, _ = static_arb._build_legs(pd.DataFrame(w), pd.DataFrame(), 30, M, R)
+    _, shorts_on, _ = static_arb._build_legs(
+        pd.DataFrame(w), pd.DataFrame(), 30, M, R, allow_short_warrants=True)
+    assert shorts_off == []
+    assert [s["code"] for s in shorts_on] == ["W1"]
+
+
+def test_short_warrant_reaches_the_buy_option_sell_warrant_direction():
+    """arb_logic's negative direction: warrant bid far above the option ask at the
+    same strike and expiry. Buy-only cannot express it; the sell side can."""
+    w = [warrant("W2", "Call", 100.0, 30, ask=12.5, ask_qty=10)]
+    o = [option("C100", "Call", 100.0, 30, bid=1.9, ask=2.0)]
+
+    assert solve(w, o, 30)[0] is None            # unreachable buy-only
+    row, _ = solve_sw(w, o, 30)
+    assert row is not None
+    # Sell 10 張 at bid 12.25 (= 12.5 * 0.98), hedge with 5 contracts at ask 2.0.
+    assert row["net_credit"] == pytest.approx(10 * 1000 * 12.25 - 5 * M * 2.0)
+    assert row["min_payoff"] >= -1e-6
+    sold = [l for l in row["legs"] if l["side"] == "short"]
+    assert [l["kind"] for l in sold] == ["warrant"]
+
+
+def test_short_warrant_puts_are_refused_even_when_profitable():
+    """A short PUT warrant is an American claim that can be exercised early, which
+    a one-period model cannot bound. The identical call-side setup is accepted, so
+    the refusal is the put rule and not a thin edge."""
+    put_w = [warrant("WP", "Put", 100.0, 30, ask=12.5, ask_qty=10)]
+    put_o = [option("P100", "Put", 100.0, 30, bid=1.9, ask=2.0)]
+    _, shorts, _ = static_arb._build_legs(
+        pd.DataFrame(put_w), pd.DataFrame(put_o), 30, M, R, allow_short_warrants=True)
+    assert shorts == [] or all(s["kind"] == "option" for s in shorts)
+    assert solve_sw(put_w, put_o, 30)[0] is None
+
+    call_w = [warrant("WC", "Call", 100.0, 30, ask=12.5, ask_qty=10)]
+    call_o = [option("C100", "Call", 100.0, 30, bid=1.9, ask=2.0)]
+    assert solve_sw(call_w, call_o, 30)[0] is not None
+
+
+def test_short_warrant_must_expire_exactly_at_the_horizon():
+    """Same rule as short options. A warrant outliving T* would have to be bought
+    back at an unknown price; one expiring earlier settled against another spot."""
+    w = [warrant("W-20", "Call", 100.0, 20, ask=10.0),
+         warrant("W-30", "Call", 100.0, 30, ask=10.0),
+         warrant("W-60", "Call", 100.0, 60, ask=10.0)]
+    _, shorts, _ = static_arb._build_legs(
+        pd.DataFrame(w), pd.DataFrame(), 30, M, R, allow_short_warrants=True)
+    assert [s["code"] for s in shorts] == ["W-30"]
+
+
+def test_short_warrant_needs_resting_bid_size():
+    """No size at the bid means the sale is not executable, so the leg is dropped
+    and counted — the same treatment short options already get."""
+    w = [warrant("W1", "Call", 100.0, 30, ask=12.5, ask_qty=0)]
+    w[0]["bid_qty"] = 0
+    _, shorts, dropped = static_arb._build_legs(
+        pd.DataFrame(w), pd.DataFrame(), 30, M, R, allow_short_warrants=True)
+    assert shorts == []
+    assert dropped >= 1
+
+
+def test_short_warrants_do_not_break_the_arbitrage_free_chain():
+    """The false-positive guard, rerun with the sell side on: a chain priced at
+    exact Black-Scholes with a two-sided warrant book must still yield nothing."""
+    S, T, sig, dte = 110.0, 30 / 365.0, 0.35, 30
+    warrants, options = [], []
+    for K in (90.0, 100.0, 110.0, 120.0, 130.0):
+        for typ, put in (("Call", False), ("Put", True)):
+            p = bs(S, K, T, R, sig, put)
+            options.append(option(f"{typ[0]}{int(K)}", typ, K, dte, bid=p, ask=p))
+            w = warrant(f"W{typ[0]}{int(K)}", typ, K, dte, ask=p)
+            w["bid"] = p          # zero spread on the warrant book too
+            warrants.append(w)
+    assert solve_sw(warrants, options, dte)[0] is None
