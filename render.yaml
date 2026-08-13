@@ -2,42 +2,21 @@ services:
   - type: web
     name: warrant-scanner
     runtime: python
-    # Upgraded from starter (512 MB) after repeated OOM restarts: a forced
-    # full warrant re-fetch following a universe change has been observed
-    # peaking at 640 MB RSS, over the starter cap (issue #57). standard gives
-    # 1 vCPU / 2 GB. Keep this in sync with the dashboard — a stale `starter`
-    # here would silently downgrade the service on the next blueprint sync
-    # even though the dashboard is actually running standard.
+    # Keep in sync with the Render dashboard plan (1 vCPU / 2 GB min — see issue #57).
     plan: standard
     buildCommand: pip install -r requirements.txt
     # Exactly 1 worker: market-data caches live in process memory + APScheduler.
-    # timeout 240 (was 180): heavy sync work (universe scrape, arb match) can
-    # peg the CPU cap long enough that gunicorn's arbiter can't service its
-    # heartbeat and kills the worker mid-request (502s + worker restarts
-    # observed in production on the starter plan). More headroom, paired with
-    # services/scheduler.py's sync lock and fewer arb_logic threads, which cut
-    # the actual CPU contention causing the stalls.
     startCommand: gunicorn -w 1 --threads 8 --timeout 240 -b 0.0.0.0:$PORT wsgi:app
     healthCheckPath: /healthz
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
-      # Cap glibc per-thread malloc arenas: under gunicorn threads they
-      # balloon RSS. Harmless on non-glibc platforms.
       - key: MALLOC_ARENA_MAX
         value: "2"
-      # ENABLE_SCHEDULER turns on the in-process background jobs that refresh
-      # Supabase market snapshots AND run the Direct-Arb suggestions scan, on a
-      # wall-clock 15-min cron grid gated to each market's trading hours. ON:
-      # the server fetches and populates the Suggestions tab on its own, without
-      # depending on a local run. Single-worker executor keeps peak memory
-      # bounded regardless of instance size.
+      # Enables scheduler.py: Supabase market snapshot refresh + Direct-Arb suggestions scan.
       - key: ENABLE_SCHEDULER
         value: "1"
-      # Step 5b: readers now serve the Supabase snapshots (falling back to a
-      # live fetch on empty/error/unconfigured). With ENABLE_SCHEDULER above,
-      # the scheduler keeps those snapshots fresh during market hours; off-hours
-      # the readers serve the last pre-close snapshot (timestamped in the UI).
+      # Serve market data from Supabase snapshots, falling back to live fetch when empty/unconfigured.
       - key: MARKET_SOURCE
         value: "supabase"
       # Paste these in the Render dashboard — never commit real values.
