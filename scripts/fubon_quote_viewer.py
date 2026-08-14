@@ -54,11 +54,14 @@ MIS_WORKERS = 6
 MIS_HEADERS = {"User-Agent": "Mozilla/5.0",
                "Referer": "https://mis.twse.com.tw/stock/index.jsp"}
 
-# Documented Fugle caps: 200 subscriptions per connection, 5 concurrent
-# connections per account (1000 symbols in total). Only the subscription count
-# is observable — the server reports it; the connection figure is this
-# process's own socket, and says nothing about sessions elsewhere.
-MAX_SUBS_PER_CONN = 200
+# Fugle's docs claim 200 subscriptions per connection, 5 concurrent connections
+# per account (1000 symbols in total). Measured against this account by driving
+# 5 real websocket connections to their limit: each one actually accepts 300
+# before erroring `1001: Subscription limit exceeded`, for 1500 total — the
+# published 200/1000 figures are stale. Only the subscription count is
+# observable — the server reports it; the connection figure is this process's
+# own sockets, and says nothing about sessions elsewhere.
+MAX_SUBS_PER_CONN = 300
 MAX_CONNECTIONS = 5
 SUBS_POLL_S = 15
 
