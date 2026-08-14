@@ -73,8 +73,10 @@ _login_error = None
 _connected = False
 _msg_count = 0
 _ranking = None    # status line while the startup liquidity scan runs
-_sub_ids = {}      # code -> server subscription id, required to unsubscribe
-_sub_count = None  # subscriptions the SERVER reports; None until first reply
+_sub_ids = {}      # code -> server subscription id; the server's own view
+_subs_seen = False # has the server told us anything about subscriptions yet
+_ops = 0           # bumped on every subscribe/unsubscribe confirmation
+_query_ops = None  # _ops when the in-flight subscriptions query was sent
 _last_error = None
 _ws_state = "connecting"
 
@@ -136,26 +138,42 @@ def _handle_control(event, message):
     symbol comes back `1003 id should not be empty` and the subscription stays
     alive against the cap — so the ids from `subscribed` have to be kept.
     """
-    global _last_error, _sub_count
+    global _last_error, _subs_seen, _ops, _query_ops
     data = message.get("data") or {}
 
+    # subscribed/unsubscribed are the server confirming a change, and they
+    # arrive immediately. They — not a follow-up query — are what moves the
+    # count, so the display tracks an add or remove the moment it takes.
     if event == "subscribed":
         with _lock:
             _sub_ids[data.get("symbol")] = data.get("id")
+            _subs_seen = True
+            _ops += 1
 
     elif event == "unsubscribed":
         with _lock:
             _sub_ids.pop(data.get("symbol"), None)
+            _subs_seen = True
+            _ops += 1
 
     elif event == "subscriptions":
-        # Authoritative: the server's own list, so a leaked or dropped
-        # subscription shows up rather than being masked by local bookkeeping.
+        # Periodic reconciliation: replace the whole view, so a subscription
+        # dropped server-side disappears here too. Ignored when a change was
+        # confirmed after the query went out — that reply predates the change
+        # and would put the stale count back.
         rows = data if isinstance(data, list) else []
         with _lock:
-            _sub_count = len(rows)
+            # Accept only a reply we asked for with nothing confirmed since:
+            # anything else predates a change and would restore a stale count.
+            if _query_ops is None or _query_ops != _ops:
+                _query_ops = None
+                return
+            _query_ops = None
+            _sub_ids.clear()
             for row in rows:
                 if row.get("symbol") and row.get("id"):
                     _sub_ids[row["symbol"]] = row["id"]
+            _subs_seen = True
 
     elif event == "error":
         _last_error = f"{message.get('code', '?')}: {data.get('message', message)}"
@@ -163,9 +181,12 @@ def _handle_control(event, message):
 
 
 def _refresh_subs():
-    """Ask the server to restate its subscription list; the reply updates the count."""
+    """Ask the server to restate its subscription list, for periodic reconciliation."""
+    global _query_ops
     try:
         if _stock is not None and _connected:
+            with _lock:
+                _query_ops = _ops
             _stock.subscriptions()
     except Exception as e:
         print(f"WS: subscriptions query failed: {e}", flush=True)
@@ -399,7 +420,7 @@ def data():
     """The cache as JSON — what the page repaints from, so it never reloads."""
     with _lock:
         count = _msg_count
-        subs = _sub_count
+        subs = len(_sub_ids) if _subs_seen else None
     return jsonify({
         "connected": _connected,
         "state": "login failed" if _login_error else _ws_state,
@@ -515,7 +536,6 @@ def _track(code):
     _stock.subscribe({"channel": BOOKS_CHANNEL, "symbol": code})
     print(f"WS: subscribed {code}", flush=True)
     _seed_from_rest(code)
-    _refresh_subs()
 
 
 @app.route("/add", methods=["POST"])
@@ -539,10 +559,10 @@ def remove(code):
                 print(f"WS: no subscription id for {code}, cannot unsubscribe", flush=True)
         except Exception as e:
             print(f"WS: unsubscribe {code} failed: {e}", flush=True)
+        # _sub_ids is left to the server's `unsubscribed` confirmation, so the
+        # count only drops once the subscription is actually gone.
         with _lock:
             _books.pop(code, None)
-            _sub_ids.pop(code, None)
-        _refresh_subs()
     return redirect("/")
 
 
