@@ -14,9 +14,10 @@ cache — is the one the real feature is meant to grow into.
 
 `books` rather than `trades`: trades only emits when a trade actually prints,
 so an illiquid warrant looks dead on it, and it carries a last price rather
-than a book. The one thing books does NOT carry is the instrument's name, so
-that comes from a single REST lookup per code, cached forever (names never
-change, and REST is capped at 300/min).
+than a book. But books is update-only — it pushes on book *change* and sends
+no snapshot on subscribe, so an illiquid warrant is still blank until someone
+requotes. Hence one REST quote per added code (`_seed_from_rest`), which fills
+the first book and supplies the name that books frames don't carry.
 
 NOTE: the book only streams during TWSE hours (09:00-13:30 TPE, weekdays).
 Outside them the socket still connects and subscribes, and the page says so,
@@ -91,6 +92,7 @@ def _handle_message(raw):
             "bids": data.get("bids") or [],
             "asks": data.get("asks") or [],
             "ts": datetime.now(timezone.utc),
+            "src": "ws",
         }
 
 
@@ -155,16 +157,37 @@ def _login():
     _sdk, _stock = sdk, stock
 
 
-def _fetch_name(code):
-    """One REST lookup per code, cached forever — the books channel carries no name."""
-    if code in _names:
-        return _names[code]
+def _seed_from_rest(code):
+    """One REST quote per added code: names the instrument and fills the first book.
+
+    The books channel is update-only — it pushes on book change and sends no
+    snapshot on subscribe. A liquid code repaints instantly, but an illiquid
+    warrant whose book has not moved in half an hour would show nothing until
+    a market maker requotes. This seeds the cache so a code has its book
+    immediately; websocket frames then overwrite it.
+    """
     try:
-        data = _sdk.marketdata.rest_client.stock.intraday.ticker(symbol=code)
-        _names[code] = data.get("name", "-")
+        q = _sdk.marketdata.rest_client.stock.intraday.quote(symbol=code)
     except Exception as e:
-        _names[code] = f"({type(e).__name__})"
-    return _names[code]
+        _names.setdefault(code, f"({type(e).__name__})")
+        return
+
+    _names[code] = q.get("name") or _names.get(code) or "-"
+
+    bids, asks = q.get("bids") or [], q.get("asks") or []
+    if not bids and not asks:
+        return
+
+    # lastUpdated is the exchange's own microsecond stamp, so the age shown is
+    # how stale the book actually is, not how long ago we fetched it.
+    stamp = q.get("lastUpdated")
+    try:
+        ts = datetime.fromtimestamp(stamp / 1_000_000, timezone.utc)
+    except (TypeError, ValueError, OSError):
+        ts = datetime.now(timezone.utc)
+
+    with _lock:
+        _books.setdefault(code, {"bids": bids, "asks": asks, "ts": ts, "src": "rest"})
 
 
 def _ladder(code):
@@ -172,7 +195,8 @@ def _ladder(code):
     with _lock:
         book = _books.get(code)
     if book is None:
-        return {"code": code, "name": _names.get(code, "-"), "rows": [], "age": None}
+        return {"code": code, "name": _names.get(code, "-"), "rows": [],
+                "age": None, "src": None}
 
     rows = []
     for i in range(LEVELS):
@@ -190,6 +214,7 @@ def _ladder(code):
         "name": _names.get(code, "-"),
         "rows": rows,
         "age": round((datetime.now(timezone.utc) - book["ts"]).total_seconds(), 1),
+        "src": book.get("src"),
     }
 
 
@@ -240,6 +265,12 @@ def index():
 <script>
 function cell(v) { return v === null ? "-" : v.toLocaleString(); }
 
+// A REST-seeded book is a snapshot of a stale market, not a live push — say which.
+function age(b) {
+  var t = b.age < 90 ? b.age + "s" : Math.round(b.age / 60) + "m";
+  return b.src === "rest" ? "snapshot, book " + t + " old" : "updated " + t + " ago";
+}
+
 function render(d) {
   document.getElementById("status").innerHTML =
     "Socket: <b class='" + (d.connected ? "up'>open" : "down'>closed") + "</b>"
@@ -260,7 +291,7 @@ function render(d) {
     return "<div class='book'><h3>" + b.code + " &nbsp;" + b.name + "</h3>"
       + "<table><tr><th>Bid Vol</th><th>Bid</th><th></th><th>Ask</th><th>Ask Vol</th></tr>"
       + body + "</table>"
-      + "<div class='meta'>" + (b.age === null ? "no data yet" : "updated " + b.age + "s ago")
+      + "<div class='meta'>" + (b.age === null ? "no data yet" : age(b))
       + " &nbsp;<a href='/remove/" + b.code + "'>remove</a></div></div>";
   }).join("") || "<p>No codes tracked yet.</p>";
 }
@@ -280,9 +311,11 @@ def add():
     code = request.form.get("code", "").strip()
     if code and code not in _tracked:
         _tracked.append(code)
-        _fetch_name(code)
+        # Subscribe first, then seed: a frame arriving during the REST call is
+        # newer than the snapshot, and _seed_from_rest won't overwrite it.
         _stock.subscribe({"channel": BOOKS_CHANNEL, "symbol": code})
         print(f"WS: subscribed {code}", flush=True)
+        _seed_from_rest(code)
     return redirect("/")
 
 
