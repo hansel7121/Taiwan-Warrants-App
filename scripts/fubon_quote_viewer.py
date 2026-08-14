@@ -30,6 +30,7 @@ import json
 import os
 import socket
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
@@ -53,6 +54,14 @@ MIS_WORKERS = 6
 MIS_HEADERS = {"User-Agent": "Mozilla/5.0",
                "Referer": "https://mis.twse.com.tw/stock/index.jsp"}
 
+# Documented Fugle caps: 200 subscriptions per connection, 5 concurrent
+# connections per account (1000 symbols in total). Only the subscription count
+# is observable — the server reports it; the connection figure is this
+# process's own socket, and says nothing about sessions elsewhere.
+MAX_SUBS_PER_CONN = 200
+MAX_CONNECTIONS = 5
+SUBS_POLL_S = 15
+
 _lock = threading.Lock()
 _books = {}    # code -> {"bids": [...], "asks": [...], "ts": datetime}
 _names = {}    # code -> name, fetched once from REST
@@ -63,7 +72,13 @@ _stock = None
 _login_error = None
 _connected = False
 _msg_count = 0
-_ranking = None   # status line while the startup liquidity scan runs
+_ranking = None    # status line while the startup liquidity scan runs
+_sub_ids = {}      # code -> server subscription id; the server's own view
+_subs_seen = False # has the server told us anything about subscriptions yet
+_ops = 0           # bumped on every subscribe/unsubscribe confirmation
+_query_ops = None  # _ops when the in-flight subscriptions query was sent
+_last_error = None
+_ws_state = "connecting"
 
 
 def _load_dotenv():
@@ -97,7 +112,9 @@ def _handle_message(raw):
 
     # One callback receives auth replies, subscribe confirmations and pongs too,
     # so both filters are load-bearing, not defensive.
-    if message.get("event") != "data" or message.get("channel") != BOOKS_CHANNEL:
+    event = message.get("event")
+    if event != "data" or message.get("channel") != BOOKS_CHANNEL:
+        _handle_control(event, message)
         return
 
     data = message.get("data") or {}
@@ -114,19 +131,92 @@ def _handle_message(raw):
         }
 
 
+def _handle_control(event, message):
+    """Track the non-data frames: subscription ids, the server's own count, errors.
+
+    Unsubscribe takes the id the server assigned, not the symbol — sending a
+    symbol comes back `1003 id should not be empty` and the subscription stays
+    alive against the cap — so the ids from `subscribed` have to be kept.
+    """
+    global _last_error, _subs_seen, _ops, _query_ops
+    data = message.get("data") or {}
+
+    # subscribed/unsubscribed are the server confirming a change, and they
+    # arrive immediately. They — not a follow-up query — are what moves the
+    # count, so the display tracks an add or remove the moment it takes.
+    if event == "subscribed":
+        with _lock:
+            _sub_ids[data.get("symbol")] = data.get("id")
+            _subs_seen = True
+            _ops += 1
+
+    elif event == "unsubscribed":
+        with _lock:
+            _sub_ids.pop(data.get("symbol"), None)
+            _subs_seen = True
+            _ops += 1
+
+    elif event == "subscriptions":
+        # Periodic reconciliation: replace the whole view, so a subscription
+        # dropped server-side disappears here too. Ignored when a change was
+        # confirmed after the query went out — that reply predates the change
+        # and would put the stale count back.
+        rows = data if isinstance(data, list) else []
+        with _lock:
+            # Accept only a reply we asked for with nothing confirmed since:
+            # anything else predates a change and would restore a stale count.
+            if _query_ops is None or _query_ops != _ops:
+                _query_ops = None
+                return
+            _query_ops = None
+            _sub_ids.clear()
+            for row in rows:
+                if row.get("symbol") and row.get("id"):
+                    _sub_ids[row["symbol"]] = row["id"]
+            _subs_seen = True
+
+    elif event == "error":
+        _last_error = f"{message.get('code', '?')}: {data.get('message', message)}"
+        print(f"WS: error {_last_error}", flush=True)
+
+
+def _refresh_subs():
+    """Ask the server to restate its subscription list, for periodic reconciliation."""
+    global _query_ops
+    try:
+        if _stock is not None and _connected:
+            with _lock:
+                _query_ops = _ops
+            _stock.subscriptions()
+    except Exception as e:
+        print(f"WS: subscriptions query failed: {e}", flush=True)
+
+
+def _poll_subscriptions():
+    """Keep the count honest on a timer, so a server-side drop shows up on its own."""
+    while True:
+        time.sleep(SUBS_POLL_S)
+        _refresh_subs()
+
+
 def _on_connect(*_a, **_k):
-    global _connected
+    global _connected, _ws_state
     _connected = True
+    _ws_state = "connected"
     print("WS: connected", flush=True)
 
 
 def _on_disconnect(*a, **k):
-    global _connected
+    global _connected, _ws_state
     _connected = False
+    _ws_state = "disconnected"
     print(f"WS: disconnected args={a!r} kwargs={k!r}", flush=True)
 
 
 def _on_error(*a, **k):
+    global _ws_state, _last_error
+    _ws_state = "error"
+    _last_error = "; ".join(str(x) for x in a) or repr(k)
     print(f"WS: error args={a!r} kwargs={k!r}", flush=True)
 
 
@@ -330,10 +420,20 @@ def data():
     """The cache as JSON — what the page repaints from, so it never reloads."""
     with _lock:
         count = _msg_count
+        subs = len(_sub_ids) if _subs_seen else None
     return jsonify({
         "connected": _connected,
+        "state": "login failed" if _login_error else _ws_state,
         "messages": count,
         "ranking": _ranking,
+        "error": _login_error or _last_error,
+        # subs is None until the server's first reply — the page shows the
+        # locally tracked figure then, marked as unconfirmed.
+        "subs": subs if subs is not None else len(_tracked),
+        "subs_confirmed": subs is not None,
+        "max_subs": MAX_SUBS_PER_CONN,
+        "connections": 1 if _connected else 0,
+        "max_connections": MAX_CONNECTIONS,
         "books": [_ladder(code) for code in list(_tracked)],
     })
 
@@ -359,6 +459,12 @@ def index():
   .lv { color: #aaa; font-size: .75rem; text-align: center; }
   .meta { color: #888; font-size: .8rem; margin-top: .3rem; }
   .up { color: #146b52; } .down { color: #c1121f; }
+  .status { padding: .5rem .8rem; background: #f6f6f4; border-radius: 5px;
+            display: inline-block; }
+  .dot { display: inline-block; width: .6rem; height: .6rem; border-radius: 50%;
+         margin-right: .45rem; vertical-align: baseline; }
+  .dot.ok { background: #146b52; } .dot.warn { background: #d9822b; }
+  .dot.bad { background: #c1121f; }
 </style></head>
 <body>
   <h1>Fubon live order book</h1>
@@ -380,10 +486,15 @@ function age(b) {
 }
 
 function render(d) {
+  var dot = d.state === "connected" ? "ok" : (d.state === "connecting" ? "warn" : "bad");
+  var subs = d.subs + "/" + d.max_subs + (d.subs_confirmed ? "" : "?");
   document.getElementById("status").innerHTML =
-    "Socket: <b class='" + (d.connected ? "up'>open" : "down'>closed") + "</b>"
-    + " &nbsp;|&nbsp; messages: <b>" + d.messages.toLocaleString() + "</b>"
-    + (d.ranking ? " &nbsp;|&nbsp; " + d.ranking : "");
+    "<span class='dot " + dot + "'></span><b>" + d.state + "</b>"
+    + " &nbsp;|&nbsp; subscriptions <b>" + subs + "</b>"
+    + " &nbsp;|&nbsp; connections <b>" + d.connections + "/" + d.max_connections + "</b>"
+    + " &nbsp;|&nbsp; messages <b>" + d.messages.toLocaleString() + "</b>"
+    + (d.ranking ? " &nbsp;|&nbsp; " + d.ranking : "")
+    + (d.error ? " &nbsp;|&nbsp; <span class='down'>" + d.error + "</span>" : "");
 
   document.getElementById("books").innerHTML = d.books.map(function (b) {
     var body = b.rows.length === 0
@@ -437,10 +548,19 @@ def add():
 def remove(code):
     if code in _tracked:
         _tracked.remove(code)
+        # By id, not symbol: a symbol gets `1003 id should not be empty` back
+        # and the subscription keeps running against the cap.
+        with _lock:
+            sub_id = _sub_ids.get(code)
         try:
-            _stock.unsubscribe({"channel": BOOKS_CHANNEL, "symbol": code})
+            if sub_id:
+                _stock.unsubscribe({"id": sub_id})
+            else:
+                print(f"WS: no subscription id for {code}, cannot unsubscribe", flush=True)
         except Exception as e:
             print(f"WS: unsubscribe {code} failed: {e}", flush=True)
+        # _sub_ids is left to the server's `unsubscribed` confirmation, so the
+        # count only drops once the subscription is actually gone.
         with _lock:
             _books.pop(code, None)
     return redirect("/")
@@ -481,6 +601,7 @@ if __name__ == "__main__":
         # Threaded: the scan sweeps ~1200 codes over TWSE MIS, so the page
         # should come up and say what it's doing rather than wait for it.
         threading.Thread(target=_subscribe_top_liquid, daemon=True).start()
+        threading.Thread(target=_poll_subscriptions, daemon=True).start()
 
     held.close()  # released immediately before app.run() rebinds it
     try:
