@@ -138,6 +138,64 @@ Exactly **1 gunicorn worker**: market-data caches live in process memory and wou
 
 ---
 
+## Live Order Book Viewer (Fubon)
+
+`scripts/fubon_quote_viewer.py` is a **standalone** script, separate from the Flask
+app above — it shares nothing with it but the repo. It logs into Fubon, opens one
+websocket, and shows the full **five-level bid/ask ladder with volume** for a
+handful of warrants, pushed live rather than polled. It exists as the minimal
+working core for a future live-warrant feature: a socket callback writing an
+in-process cache, and a browser reading that cache.
+
+```bash
+conda activate warrants
+TZ=Asia/Taipei python scripts/fubon_quote_viewer.py     # http://127.0.0.1:5099
+```
+
+Stop it with **`Ctrl+C`** — that runs the clean broker logout. Killing it with
+`pkill` skips that, and the broker may hold the session until it times out
+(Fubon allows 5 concurrent connections).
+
+Add these to `.env` (see `.env.example`). Keep the `.p12` under `local_certs/`,
+which is gitignored:
+
+```
+FUBON_ID, FUBON_PASSWORD, FUBON_CERT_PATH, FUBON_CERT_PASSWORD
+```
+
+**On startup** it ranks one underlying's warrants by traded volume and subscribes
+the busiest five, because a hand-picked warrant is usually one that trades a couple
+of lots a day and whose book never moves. Optional overrides:
+
+| Variable | Default | |
+|---|---|---|
+| `FUBON_VIEWER_UNDERLYING` | `2330` | underlying whose warrants get ranked |
+| `FUBON_VIEWER_TOP_N` | `5` | how many to subscribe |
+| `FUBON_VIEWER_PORT` | `5099` | port |
+
+The header shows connection state, subscriptions used against the 200-per-connection
+cap, connections (this process only — Fugle exposes no account-wide count), messages
+received, and the last error.
+
+**Three things worth knowing before changing it:**
+
+- **`books`, not `trades`.** The `trades` channel only emits on an actual trade
+  print, so an illiquid warrant looks dead on it while the pipeline is fine.
+- **`books` is update-only** — it pushes on book *change* and sends no snapshot on
+  subscribe. Each added code is therefore seeded from one REST quote, stamped with
+  the exchange's `lastUpdated` so the age shown is the book's real staleness
+  (`snapshot, book 37m old`) rather than the time since fetch.
+- **Warrant volume comes from TWSE MIS, not Fugle.** Fugle's snapshot endpoints are
+  equity-only (`type must be one of ALLBUT0999, COMMONSTOCK` — 0999 *is* the warrant
+  category) and there are ~31k listed warrants against a 300/min REST cap. MIS takes
+  100 symbols per call and covers one underlying's ~1,200 warrants in seconds.
+
+Books only stream during TWSE hours (**09:00–13:30 TPE, weekdays**). Outside them the
+socket still connects and subscribes, seeded snapshots still render with their true
+age, and the startup ranking falls back to the previous session's volumes.
+
+---
+
 ## Deploy (Render)
 
 The repo ships a `render.yaml` blueprint. In the Render dashboard, create a new **Blueprint** from this repo — it provisions a native Python web service that runs gunicorn with a single worker.
