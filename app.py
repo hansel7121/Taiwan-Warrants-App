@@ -1,3 +1,5 @@
+# Flask routes only: parse requests, call logic/ and services/, return JSON/CSV.
+# Also owns request logging (before/after/teardown hooks) and the JSON error handler.
 from flask import Flask, render_template, request, jsonify, Response, g
 from werkzeug.exceptions import HTTPException
 from services import applog
@@ -13,6 +15,7 @@ from services import db_user
 from services import roles
 from services import store
 from logic import arb_logic
+from logic import static_arb
 # Aliased: the route functions below are named iv_surface / close_quote.
 from logic import iv_surface as iv_surface_logic
 from logic import close_quote as close_quote_logic
@@ -40,28 +43,20 @@ app = Flask(
 )
 
 app.json.sort_keys = False
-# Re-read templates from disk on every request so index.html edits show up on a
-# plain browser reload — no server restart needed. (Python edits still need one.)
+# Templates re-read on every request so index.html edits show up on reload.
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 app.jinja_env.auto_reload = True
 
-# Data routes return large repeated-key JSON tables (~10:1 compressible) and
-# Render's proxy doesn't gzip, so compress responses here. Optional dep — degrade
-# gracefully if it isn't installed in a dev env (flask-compress skips small
-# responses and honors Accept-Encoding on its own).
+# Render's proxy doesn't gzip; compress here since JSON tables compress well.
 try:
     from flask_compress import Compress
     Compress(app)
 except ImportError:
     print("flask-compress not installed; responses served uncompressed")
 
-# Render pings /healthz constantly; static assets are noise too. Neither says
-# anything about what the app is doing, so they stay out of the log.
+# Health checks and static assets are noise; keep them out of the request log.
 _LOG_SKIP_PATHS = {"/healthz", "/favicon.ico"}
-# Params worth a completion line's worth of context, in the order they read best.
 _LOG_PARAMS = ("stock_codes", "option_type", "strategy", "kind", "period")
-# The paths say what data work is behind them. Only the routes that do real data
-# work are named here; anything else logs its bare path, as before.
 _ROUTE_LABELS = {
     "/read_warrant": "warrants",
     "/read_warrant_csv": "warrants csv",
@@ -79,6 +74,8 @@ _ROUTE_LABELS = {
     "/match_tw_us_option_csv": "tw/us match csv",
     "/match_warrant_tw_option": "arb scan",
     "/match_warrant_tw_option_csv": "arb scan csv",
+    "/match_static_arb": "static arb lp",
+    "/match_static_arb_csv": "static arb lp csv",
 }
 
 
@@ -129,8 +126,7 @@ def _log_request_end(status):
         return
     g.log_done = True
     extra = ""
-    # g.user is set by require_auth inside the view, so the user is only known
-    # by the time the request completes — not at before_request.
+    # g.user is only known once the view runs, not at before_request.
     user = getattr(g, "user", None)
     if user and user.get("email"):
         extra += f" user={user['email']}"
@@ -188,9 +184,7 @@ def login():
 
 @app.route("/check_email", methods=["POST"])
 def check_email():
-    # Public pre-send allowlist check for the login page. Reuses auth._is_allowed
-    # (service-role query + 60s cache). If Supabase is unconfigured, allow so
-    # local no-auth dev isn't blocked.
+    # Unconfigured Supabase means local no-auth dev, so allow.
     if not os.environ.get("SUPABASE_URL"):
         return jsonify({"allowed": True})
     data = request.get_json(silent=True) or {}
@@ -279,8 +273,7 @@ def lookup_warrant_stock():
 
 
 # ── User dashboard: watchlist / alerts / positions ───────────────────
-# Every route below scopes to g.user["id"] — the user_id NEVER comes from the
-# request body. These are the only per-user-owned tables besides `portfolio`.
+# Every route below scopes to g.user["id"]; user_id never comes from the request body.
 
 _WATCH_KINDS = {"warrant", "tw_option"}
 _LEG_KINDS = {"warrant", "tw_option", "underlying"}
@@ -396,8 +389,7 @@ def add_position():
             return jsonify({"error": f"leg needs numeric quantity/entry_price: {code}"}), 400
         if direction not in (-1, 1) or quantity <= 0:
             return jsonify({"error": f"leg direction must be ±1 and quantity > 0: {code}"}), 400
-        # Taiwan warrants are long-only: they cannot be written or shorted, so a
-        # short warrant leg is not a position anyone can actually hold.
+        # Warrants are long-only; a short warrant leg can't actually be held.
         if kind == "warrant" and direction != 1:
             return jsonify({"error": f"warrants are long-only, cannot short {code}"}), 400
         leg = {k: raw.get(k) for k in _LEG_FIELDS}
@@ -567,6 +559,8 @@ def read_warrant():
             min_leverage,
             max_tv_pct,
             min_volume,
+            # The scanner shows every book state — one-sided and empty included.
+            allow_no_quote=True,
         )
     except Exception as e:
         applog.log("WARR", f"read_warrant failed: {e}\n{traceback.format_exc()}", level="ERROR")
@@ -580,7 +574,10 @@ def read_warrant():
         return jsonify({"rows": [], "count": 0,
                         "error": error if hard_error else None, **meta})
     applog.set_rows(len(df))
-    return jsonify({"rows": df.to_dict(orient="records"), "count": len(df), **meta})
+    # to_json, not to_dict: unquoted warrants carry NaN in every ask-derived
+    # column, and jsonify would emit a bare NaN literal that JSON.parse rejects.
+    rows = json.loads(df.to_json(orient="records"))
+    return jsonify({"rows": rows, "count": len(df), **meta})
 
 
 @app.route("/read_warrant_csv", methods=["POST"])
@@ -603,6 +600,7 @@ def read_warrant_csv():
         min_leverage,
         max_tv_pct,
         min_volume,
+        allow_no_quote=True,
     )
     output = io.StringIO()
     df.to_csv(output, index=False)
@@ -793,11 +791,7 @@ def iv_surface():
 
 @app.route("/universe_status")
 def universe_status():
-    # Read-only: reports progress for the "Building Warrant Universe" bar.
-    # Does NOT kick a scrape — that only happens via the scheduler's daily
-    # 07:00 TPE cron or the manual "Sync Universe" button (/sync_universe),
-    # so polling this route on every page load can't itself trigger a live
-    # TWSE re-scrape.
+    # Read-only progress check; never triggers a scrape itself.
     return jsonify(warrant_logic.universe_status())
 
 
@@ -850,8 +844,7 @@ def match_warrant_us_option():
         applog.set_rows(len(rows))
         return jsonify({"rows": rows, "count": len(rows)})
     except arb_logic.NoMatchesError:
-        # Clean scan that matched nothing — a normal outcome, not an error:
-        # render as "no rows", never as a red error banner.
+        # A clean scan that matched nothing renders as "no rows", not an error.
         applog.set_rows(0)
         return jsonify({"rows": [], "count": 0})
     except Exception as e:
@@ -975,7 +968,6 @@ def match_warrant_tw_option():
         as_of_iso = datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None
         return jsonify({"rows": rows, "count": len(rows), "as_of": as_of_iso})
     except arb_logic.NoMatchesError:
-        # Clean scan that matched nothing — a normal outcome, not an error.
         # Same shape as a successful zero-row scan, as_of included.
         as_of = min(
             (t for t in (warrant_logic.cache_as_of(stock_codes),
@@ -1019,6 +1011,85 @@ def match_warrant_tw_option_csv():
         output.getvalue(),
         mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=arb_finder.csv"},
+    )
+
+
+def _static_arb_params(data):
+    return dict(
+        stock_codes=data.get("stock_codes", ["2330"]),
+        min_volume=int(data.get("min_volume", 0) or 0),
+        min_edge=float(data.get("min_edge", 0) or 0),
+        max_horizon_dte=int(data.get("max_horizon_dte") or 0) or None,
+        # Absent = the original buy-only Experiment sub-tab, unchanged.
+        allow_short_warrants=bool(data.get("allow_short_warrants", False)),
+    )
+
+
+def _static_arb_as_of(stock_codes):
+    return min(
+        (t for t in (warrant_logic.cache_as_of(stock_codes),
+                     options_logic.data_as_of(stock_codes)) if t),
+        default=None,
+    )
+
+
+@app.route("/match_static_arb", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def match_static_arb():
+    data = request.json
+    params = _static_arb_params(data)
+    stock_codes = params["stock_codes"]
+    try:
+        df = static_arb.match_static_arb(**params)
+        # to_json would stringify the nested per-leg dicts; to_dict keeps them.
+        rows = df.to_dict(orient="records") if not df.empty else []
+        applog.set_rows(len(rows))
+        as_of = _static_arb_as_of(stock_codes)
+        return jsonify({
+            "rows": rows, "count": len(rows),
+            "dropped_no_depth": int(df.attrs.get("dropped_no_depth", 0)),
+            "as_of": datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None,
+        })
+    except arb_logic.NoMatchesError as e:
+        # Clean scan that found nothing. The message carries why (including any
+        # legs dropped for missing resting size), which is the whole difference
+        # between "chain is arb-free" and "TAIFEX MIS was down".
+        applog.set_rows(0)
+        as_of = _static_arb_as_of(stock_codes)
+        return jsonify({
+            "rows": [], "count": 0, "note": str(e),
+            "as_of": datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None,
+        })
+    except Exception as e:
+        applog.log("ARB", f"match_static_arb failed: {e}\n{traceback.format_exc()}",
+                   level="ERROR")
+        return jsonify({"rows": [], "count": 0, "error": str(e)})
+
+
+@app.route("/match_static_arb_csv", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def match_static_arb_csv():
+    """One CSV row per LEG, keyed by structure_id — a structure has a variable
+    number of legs, so it cannot be flattened into fixed columns."""
+    try:
+        df = static_arb.match_static_arb(**_static_arb_params(request.json))
+    except Exception:
+        df = pd.DataFrame()
+    flat = []
+    for i, r in enumerate(df.to_dict(orient="records") if not df.empty else []):
+        head = {k: v for k, v in r.items() if k != "legs"}
+        for leg in r["legs"]:
+            flat.append({"structure_id": i, **head,
+                         **{f"leg_{k}": v for k, v in leg.items()}})
+    output = io.StringIO()
+    pd.DataFrame(flat).to_csv(output, index=False)
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=static_arb.csv"},
     )
 
 
@@ -1226,9 +1297,7 @@ def _resolve_port(preferred, span=20):
 
 
 if __name__ == "__main__":
-    # Local dev entry point. Production runs via wsgi.py + gunicorn.
-    # Scheduler is opt-in (default OFF); see wsgi.py. With it off the CMoney
-    # key is fetched lazily on the first warrant request instead of prefetched.
+    # Local dev entry point; production runs via wsgi.py + gunicorn.
     if os.environ.get("ENABLE_SCHEDULER") == "1":
         scheduler.start()
     else:

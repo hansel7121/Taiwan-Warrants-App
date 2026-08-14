@@ -1,12 +1,7 @@
-// Home dashboard: the landing screen after login. A summary of everything you
-// need to run a Taiwan direct-match arb book — open positions by expiry, the
-// realized-P&L curve, live risk-free suggestions from the background scanner,
-// a Direct-Match launcher, and a "needs attention" queue.
-//
-// It reuses the real data + helpers already defined in portfolio.js (portfolioData,
-// _shortExpiryMs, _pnlAtExpiryNow, loadPortfolio, suggestionsData, loadSuggestions,
-// renderPnlChart's math) and arb.js (openDirectModal). Nothing here re-fetches
-// or re-computes anything those files already own.
+// Home dashboard: the post-login landing screen — open positions by expiry, the
+// realized-P&L curve, live suggestions from the background scanner, a
+// Direct-Match launcher, and a "needs attention" queue. Reuses the data and
+// helpers already defined in portfolio.js and arb.js rather than re-fetching.
 
 let _homeLoaded = false;
 

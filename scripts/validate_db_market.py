@@ -1,21 +1,10 @@
 #!/usr/bin/env python3
-"""Standalone gate for Phase 2 Step 1: prove services/db_market.py against the
-REAL Supabase tables (env from .env). Idempotent and re-runnable — it cleans up
-every row it writes at the end so the real writers later start from empty.
-
-Proves, end to end:
-  * >500-row insert chunking AND >1000-row read pagination (1200-row batch),
-  * NaN -> None round-trips (not the string 'nan'),
-  * insert -> swap -> delete atomicity: a second batch fully replaces the first
-    (old batch entirely gone, new batch entirely present, never mixed),
-  * codes= filtering,
-  * cmoney_key set_key/get_key.
+"""Standalone integration test for services/db_market.py against the REAL
+Supabase tables (env from .env): insert chunking, read pagination, NaN->None
+round-trips, insert/swap/delete batch atomicity, codes= filtering, and
+cmoney_key get/set. Idempotent — cleans up every row it writes at the end.
 
 Run:  /opt/anaconda3/envs/warrants/bin/python scripts/validate_db_market.py
-
-If the md_* tables do not yet exist in Supabase you will get a clear
-"table ... does not exist" error — the DDL in supabase/schema.sql must be pasted
-into the Supabase SQL editor first (supabase-py cannot run DDL).
 """
 import os
 import sys
@@ -33,8 +22,9 @@ from services import db_market   # noqa: E402
 _COLS = [
     "warrant_code", "warrant_name", "underlying_code", "type",
     "underlying_price", "ask", "bid", "ask_qty", "bid_qty", "days_to_expiry",
-    "strike", "exercise_ratio", "volume", "time_value", "time_value_pct",
-    "time_value_am", "iv_ask", "iv_bid", "delta_calc", "leverage_calc",
+    "strike", "exercise_ratio", "volume", "time_value",
+    "bid_time_value_pct", "ask_time_value_pct", "time_value_am",
+    "iv_ask", "iv_bid", "delta_calc", "leverage_calc",
 ]
 
 
@@ -58,7 +48,8 @@ def _make_df(marker, n, underlying):
             "exercise_ratio": 0.1,
             "volume": float(i * 3),
             "time_value": 0.5 + i * 0.0005,
-            "time_value_pct": 0.5,
+            "bid_time_value_pct": 0.45,
+            "ask_time_value_pct": 0.5,
             "time_value_am": 0.4,
             "iv_ask": np.nan if i % 7 == 0 else round(0.25 + (i % 30) * 0.001, 4),
             "iv_bid": round(0.24 + (i % 30) * 0.001, 4),

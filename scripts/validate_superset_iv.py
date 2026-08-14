@@ -1,13 +1,7 @@
-"""Gate for Phase 2 Step 2 (superset-with-IV build mode).
-
-Proves the new `keep_noniv=True` mode produces a row SET equal to the
-compute_iv=False superset (B), while the notnull-IV subset of it reproduces
-the compute_iv=True scanner set (A) exactly — same rows, same values.
-
-The HARD, market-hours-independent gate is `build_warrant_df`, a pure function
-of its cmoney_results input. TW/US option legs are best-effort: they SKIP (not
-FAIL) when the source returns nothing off-hours, but must pass when data is
-present.
+"""Proves `keep_noniv=True` produces a row set equal to the compute_iv=False
+superset, while its notnull-IV subset reproduces the compute_iv=True scanner
+set exactly. `build_warrant_df` is checked hard (pure, market-hours-independent);
+TW/US option legs are best-effort and skip rather than fail off-hours.
 
 Run:
   TZ=Asia/Taipei OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES \

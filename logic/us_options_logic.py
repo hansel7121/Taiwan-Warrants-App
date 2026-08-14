@@ -1,19 +1,7 @@
-"""US ADR option chain (UMC) normalized into TWD-per-Taiwan-share space.
-
-The Taiwan ordinary (2303) and the US ADR (UMC) are the same underlying. One US
-option contract controls 100 ADR, and 1 ADR = 5 ordinary shares, so a single US
-contract controls 100 * 5 = 500 Taiwan shares.
-
-To let a US option be compared directly against a Taiwan warrant we express its
-prices and strike in **TWD per Taiwan share**:
-
-    twd_per_tw_share = usd_per_ADR / adr_ratio * FX      (FX = TWD per USD)
-
-Implied vol is scale-free (invariant to currency and to the ADR ratio), so it is
-computed once in native USD/ADR space and carried over unchanged.
-
-FX is assumed constant over the holding period (per product decision), so a
-single spot FX snapshot is used for every conversion.
+"""US ADR option chain fetch, normalized into TWD-per-Taiwan-share space so it can
+be compared directly against a Taiwan warrant: `twd_per_tw_share = usd_per_ADR /
+adr_ratio * FX`. Implied vol is scale-free, so it's computed once in native
+USD/ADR space and carried over unchanged; FX is held constant per snapshot.
 """
 
 import time
@@ -166,15 +154,9 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
     ends_p = p[k:]
     fx_ratio = F[k:] / F[: n - k]              # F_exit / F_entry for each window
 
-    # ── Premium move STRIPPED of FX (exact identity, not a regression) ──
-    # By definition 1+prem = (adr_usd/ratio)·FX / tw_local, so over any window
-    #     Δln(1+prem) = Δln(FX) + [ Δln(adr_usd) − Δln(tw_local) ].
-    # The bracket is the residual "basis" move Δb — the ADR moving in USD vs the
-    # local moving in TWD, i.e. the premium change NOT explained by FX (the
-    # US-only basis risk, e.g. semiconductor sentiment). FX enters premium with
-    # coefficient EXACTLY 1, so subtracting the FX log-move isolates the basis.
-    # The option leg's moneyness is driven by this residual only; FX is priced
-    # as its own separate EV line, so neither risk is double-counted.
+    # Premium move stripped of FX (exact identity): Δln(1+prem) = Δln(FX) + Δb,
+    # where Δb is the residual "basis" move not explained by FX. The option leg's
+    # moneyness is driven by Δb only; FX is priced as its own separate EV line.
     lp = np.log1p(p)
     lf = np.log(F)
     db = (lp[k:] - lp[: n - k]) - (lf[k:] - lf[: n - k])   # residual basis log-move / window
@@ -211,12 +193,8 @@ def adr_premium_scenario(stock_code, horizon_days, period="3y"):
     else:
         lo_lbl, mid_lbl, hi_lbl = (f"Falls ≥{thr}%", f"Stays (±{thr}%)", f"Rises ≥{thr}%")
 
-    # ── Premium decomposed into FX + residual basis (exact identity) ──
-    # rp = daily premium log-move, rf = daily FX log-move. rb = rp − rf is the
-    # residual basis move: the premium change NOT explained by FX (Δln(adr_usd)
-    # − Δln(tw_local), the US-only basis). "unexplained fraction" = share of
-    # premium variance carried by this basis. corr(rp, rf) is how tightly the
-    # premium tracks FX (the scatter's coupling), reported for the chart only.
+    # rb = rp − rf isolates the basis move not explained by FX; "unexplained
+    # fraction" = share of premium variance from that basis; corr is FX coupling.
     rp = np.diff(np.log1p(p))
     rf = np.diff(np.log(F))
     rb = rp - rf                               # residual basis daily move (exact)
@@ -577,14 +555,9 @@ def scrape_yfinance_us_option(stock_code, option_type="All", min_days=1, max_day
             continue
         fetchable.append((exp, exp_ts, dte))
 
-    # Fetch the option chains concurrently. tk.option_chain issues an
-    # independent HTTPS GET per expiry (via requests under the hood), which is
-    # the dominant cost; a small pool overlaps those round-trips. yfinance's
-    # per-call HTTP is effectively independent for distinct expiries, and the
-    # shared-Ticker + small-pool pattern is the widely used idiom — a per-call
-    # lock would serialize the fetch and defeat the point. max_workers=5 keeps
-    # us polite to Yahoo. Results are gathered here (unordered) then processed
-    # below strictly in `fetchable` order for deterministic output.
+    # Each expiry is an independent HTTPS GET; a small pool overlaps them.
+    # max_workers=5 stays polite to Yahoo; results are reordered to `fetchable`
+    # order below for deterministic output.
     def _fetch(exp):
         try:
             return tk.option_chain(exp)

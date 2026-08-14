@@ -1,3 +1,7 @@
+"""TAIFEX TW equity/index option fetch and computation: EOD CSV download plus
+MIS intraday quotes, IV/delta/leverage solving, and the risk-free rate used
+across the app's TW-side pricing.
+"""
 import io
 import re
 import time
@@ -249,11 +253,8 @@ def _parse_and_compute(raw_df, underlying_price, exercise_ratio, compute_iv=True
 
     S = underlying_price
 
-    # Vectorized replacement for the old per-row iterrows() loop. Pull the
-    # pricing columns into numpy arrays, apply the same pre-skip mask, run one
-    # IV/delta/leverage solve, then build the output records from array values
-    # (no iterrows / Series-per-row) preserving every skip, fallback, rounding
-    # and None-vs-NaN semantic of the original.
+    # Vectorized: pricing columns -> numpy arrays -> one IV/delta/leverage solve
+    # -> output records, instead of a per-row iterrows() loop.
     K_arr = df["strike"].to_numpy(dtype=float)
     dte_arr = df["days_to_expiry"].to_numpy()
     T_arr = dte_arr / 365.0

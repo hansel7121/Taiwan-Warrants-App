@@ -1,3 +1,7 @@
+"""CMoney warrant fetch and pricing: Black-Scholes IV (Brent's method) with a
+vectorized Newton fast path, delta, real leverage, and the live cmkey/underlying-
+universe scrape that resolves warrant codes to their true underlying stock.
+"""
 import twstock
 from twstock.codes.fetch import (
     make_row_tuple,
@@ -63,7 +67,8 @@ COL_ORDER = [
     "exercise_ratio",
     "volume",
     "time_value",
-    "time_value_pct",
+    "bid_time_value_pct",
+    "ask_time_value_pct",
     "time_value_am",
     "iv_ask",
     "iv_bid",
@@ -205,15 +210,9 @@ def implied_vol_vec(price, S, K, T, r, ratio, is_put):
         norm_vega = np.abs(vega_final) / (rt * s)
 
     # Accept Newton only where it MUST agree with brentq after round(...,4):
-    #   * price residual is tight (< 1e-9), and
-    #   * the root is well-conditioned — norm_vega > 1e-6, so bs_price genuinely
-    #     moves with sigma near the root. In flat/degenerate regions (deep ITM/
-    #     OTM, price≈intrinsic) the residual can hit exactly 0 across a wide
-    #     sigma band, so brentq and Newton settle on different points; those rows
-    #     fall back to the scalar brentq and thus match the scalar solver
-    #     exactly. Empirically this leaves only genuine .00005 rounding-boundary
-    #     ties (|sigma diff| < 1e-6), which round identically in all tested cases.
-    #   * sigma strictly inside the bracket (bound-pinned rows go to brentq too).
+    # tight price residual (< 1e-9), well-conditioned root (norm_vega > 1e-6,
+    # else flat/degenerate regions can settle on a different root), and sigma
+    # strictly inside the bracket. Everything else falls back to scalar brentq.
     accept = (
         (resid < 1e-9)
         & (norm_vega > 1e-6)
@@ -487,7 +486,15 @@ def get_cmoney_prices(codes, errors_out=None):
     return results
 
 
-def build_warrant_df(cmoney_results, compute_iv=True, keep_noniv=False):
+def _pct_of_spot(value, S):
+    """`value` as a % of spot, rounded like the rest of the frame; NaN in, NaN out."""
+    if value is None or not np.isfinite(value):
+        return np.nan
+    return round(value / S * 100, 4)
+
+
+def build_warrant_df(cmoney_results, compute_iv=True, keep_noniv=False,
+                     allow_no_quote=False):
     r_free_default = 0.02
 
     # Pass 1: parse + pre-filter each warrant into a base row WITHOUT the IV
@@ -523,18 +530,33 @@ def build_warrant_df(cmoney_results, compute_iv=True, keep_noniv=False):
 
             is_put = int(w.get("CallorPut") or 1) == 2
 
-            if ask <= 0 or underlying_price <= 0 or days_to_expiry <= 0:
+            if underlying_price <= 0 or days_to_expiry <= 0:
+                continue
+            # Every ask-side metric divides by the ask, so a warrant quoting no
+            # offer has none of them. Dropping those rows is what keeps a
+            # "buy for free" phantom out of the arb paths; the scanner passes
+            # allow_no_quote=True to see one-sided and empty books too.
+            if ask <= 0 and not allow_no_quote:
                 continue
 
             T = days_to_expiry / 365.0
 
             if is_put:
                 intrinsic = max(0, strike - underlying_price) * exercise_ratio
-                time_value = (ask / exercise_ratio) + underlying_price - strike
+                distance_to_strike = underlying_price - strike
             else:
                 intrinsic = max(0, underlying_price - strike) * exercise_ratio
-                time_value = (ask / exercise_ratio) + strike - underlying_price
-            time_value_am = ask - intrinsic
+                distance_to_strike = strike - underlying_price
+            # One formula per quote side: the quote / exercise ratio is the price
+            # per underlying share, plus the distance to strike. An empty side
+            # yields NaN rather than a number derived from a zero quote.
+            time_value = (
+                (ask / exercise_ratio) + distance_to_strike if ask > 0 else np.nan
+            )
+            bid_time_value = (
+                (bid / exercise_ratio) + distance_to_strike if bid > 0 else np.nan
+            )
+            time_value_am = ask - intrinsic if ask > 0 else np.nan
 
             rows.append(
                 {
@@ -552,9 +574,8 @@ def build_warrant_df(cmoney_results, compute_iv=True, keep_noniv=False):
                     "exercise_ratio": exercise_ratio,
                     "volume": volume,
                     "time_value": round(time_value, 4),
-                    "time_value_pct": round(time_value / underlying_price * 100, 4)
-                    if underlying_price > 0
-                    else 0,
+                    "bid_time_value_pct": _pct_of_spot(bid_time_value, underlying_price),
+                    "ask_time_value_pct": _pct_of_spot(time_value, underlying_price),
                     "time_value_am": round(time_value_am, 4),
                     # IV-derived metrics filled in below (positions fixed here so
                     # the column order stays COL_ORDER regardless of solve path).
@@ -599,12 +620,17 @@ def build_warrant_df(cmoney_results, compute_iv=True, keep_noniv=False):
         iv_bid = np.where(converged & np.isnan(iv_bid), iv_ask, iv_bid)
         delta = bs_delta_vec(S_arr, K_arr, T_arr, r_arr, iv_ask, ratio_arr, put_arr)
         with np.errstate(all="ignore"):
-            leverage = S_arr * np.abs(delta) / ask_arr  # ask>0 guaranteed above
+            # ask can be 0 under allow_no_quote; delta is already NaN there
+            # (NaN sigma), so the division stays NaN rather than inf.
+            leverage = S_arr * np.abs(delta) / ask_arr
         # Non-converged rows carry all-NaN IV metrics (drop or keep_noniv).
         iv_bid = np.where(converged, iv_bid, np.nan)
         delta = np.where(converged, delta, np.nan)
         leverage = np.where(converged, leverage, np.nan)
-        keep = converged if not keep_noniv else np.ones(n, dtype=bool)
+        # A no-ask row has no price to solve, so it can never converge — keeping
+        # it explicitly is what stops the IV filter from erasing exactly the
+        # one-sided books allow_no_quote let in. No-op when ask>0 is enforced.
+        keep = np.ones(n, dtype=bool) if keep_noniv else (converged | (ask_arr <= 0))
     else:
         # Arb finder does not use IV/delta/leverage — skip the solve entirely.
         iv_ask = iv_bid = delta = leverage = np.full(n, np.nan)
@@ -691,17 +717,10 @@ def _stream_isin(url, prog_band=None):
     r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"},
                      verify=False, timeout=60, stream=True)
     r.raise_for_status()
-    # The ISIN listing is served as Big5/MS950 (its Content-Type charset) with
-    # no <meta> charset. fetch_data decodes it through requests' r.text, which
-    # honours the header charset (r.encoding). In stream mode r.apparent_encoding
-    # would force-load the whole body (defeating streaming), so take the header
-    # charset and fall back to cp950 (what these pages always are) instead of the
-    # chardet sniff. A pinned "utf-8" mangles the ideographic space in each
-    # "code　name" cell into U+FFFD, so make_row_tuple's split("　") returns
-    # a single field and unpacking raises "not enough values to unpack (expected
-    # 2, got 1)" on the very first data row. libxml2 needs an encoding name it
-    # recognises, so normalise via the Python codec registry (MS950 -> cp950,
-    # which it accepts); anything it can't resolve degrades to cp950.
+    # Page is Big5/MS950 with no <meta> charset; use the header charset (not
+    # apparent_encoding, which would defeat streaming) and normalize it to a
+    # name libxml2 accepts. A pinned "utf-8" would mangle the ideographic space
+    # in each "code　name" cell, breaking make_row_tuple's split.
     enc = r.encoding or "cp950"
     try:
         enc = codecs.lookup(enc).name
@@ -1029,15 +1048,10 @@ def get_warrant_results(stock_codes, force=False, errors_out=None):
             for sc in need:
                 sc_codes = code_map.get(sc, [])
                 sc_results = {c: fetched[c] for c in sc_codes if c in fetched}
-                # A stock that HAS warrant codes but returned none was a
-                # wholesale fetch failure (cmoney unreachable / cmkey fetch
-                # failed), not a stock with no warrants. Caching that empty
-                # result would pin "no warrants found" for WARRANT_CACHE_TTL
-                # and block retries, keeping the app dark long after cmoney
-                # recovers — so skip it and let the next request retry. Any
-                # prior good entry is left in place (its stale timestamp
-                # keeps it "expired", so it still serves last-known-good and
-                # retries). sc_codes empty == genuinely no warrants: cache it.
+                # A stock with codes but no results is a fetch failure, not "no
+                # warrants" — skip caching it so the next request retries instead
+                # of pinning a false empty for WARRANT_CACHE_TTL. Any prior good
+                # entry is left in place, stale but still served as last-known-good.
                 if sc_codes and not sc_results:
                     failed.append(sc)
                     continue
@@ -1072,14 +1086,23 @@ def cache_as_of(stock_codes):
 
 
 def _apply_warrant_filters(df, stock_codes, option_type, min_days, max_days,
-                           min_leverage, max_tv_pct, min_volume):
+                           min_leverage, max_tv_pct, min_volume,
+                           allow_no_quote=False):
     """Downstream warrant filter chain (COL_ORDER select through option_type).
 
     Pure filtering: returns the filtered df (possibly empty). No logging / no
     tuple returns — callers own the empty-case messaging so the live path stays
     byte-identical and the supabase path can reuse the exact same filtering.
     """
-    df = df[COL_ORDER]
+    # reindex, not df[COL_ORDER]: a snapshot written before the bid/ask
+    # time-value split lacks those columns, and NaN there degrades gracefully
+    # (blank cells) instead of raising until the next scheduler write.
+    df = df.reindex(columns=COL_ORDER)
+    # Zero-ask warrants exist only for the scanner. Re-dropping them here is
+    # what protects every other consumer (arb, suggestions) that reads the same
+    # superset snapshot with allow_no_quote=False.
+    if not allow_no_quote:
+        df = df[df["ask"].fillna(0) > 0]
     # Verify the true underlying: the name prefilter is intentionally permissive
     # (so no issuer is ever dropped), and abbreviated warrant names can point at
     # a different stock (e.g. 長榮太 -> 2645, not 長榮/2603). CommKey settles it.
@@ -1092,7 +1115,9 @@ def _apply_warrant_filters(df, stock_codes, option_type, min_days, max_days,
     # threshold is set (NaN >= 0 is False and would wipe the whole frame).
     if float(min_leverage) > 0:
         df = df[df["leverage_calc"] >= float(min_leverage)]
-    df = df[df["time_value_pct"] <= max_tv_pct]
+    # NaN ask TV% means there is no ask to measure; a max-TV cap can't judge it,
+    # so it passes rather than silently dropping every no-ask row.
+    df = df[df["ask_time_value_pct"].isna() | (df["ask_time_value_pct"] <= max_tv_pct)]
     df = df[df["volume"] >= min_volume]
     if option_type != "All":
         df = df[df["type"] == option_type]
@@ -1109,6 +1134,7 @@ def read_warrant(
     min_volume=0,
     compute_iv=True,
     keep_noniv=False,
+    allow_no_quote=False,
 ):
     if isinstance(stock_codes, str):
         stock_codes = [stock_codes]
@@ -1123,7 +1149,12 @@ def read_warrant(
             if snap is not None and not snap.empty:
                 meta = {"as_of": as_of, "cached": True}
                 if compute_iv:
-                    snap = snap[snap["iv_ask"].notna()]
+                    # Mirrors build_warrant_df's `keep`: no-ask rows have no
+                    # price to solve, so a plain notna() drop would erase them.
+                    converged = snap["iv_ask"].notna()
+                    if allow_no_quote:
+                        converged = converged | (snap["ask"].fillna(0) <= 0)
+                    snap = snap[converged]
                 else:
                     # Live compute_iv=False emits NaN IV-derived metrics (no
                     # solve). The superset stored them; blank them so the frame —
@@ -1136,6 +1167,7 @@ def read_warrant(
                 filtered = _apply_warrant_filters(
                     snap, stock_codes, option_type, min_days, max_days,
                     min_leverage, max_tv_pct, min_volume,
+                    allow_no_quote=allow_no_quote,
                 )
                 if filtered.empty:
                     return pd.DataFrame(), "No warrants for requested underlying", meta
@@ -1146,6 +1178,7 @@ def read_warrant(
     return scrape_cmoney_warrant(
         stock_codes, option_type, min_days, max_days,
         min_leverage, max_tv_pct, min_volume, compute_iv, keep_noniv,
+        allow_no_quote,
     )
 
 
@@ -1159,6 +1192,7 @@ def scrape_cmoney_warrant(
     min_volume=0,
     compute_iv=True,
     keep_noniv=False,
+    allow_no_quote=False,
 ):
     """Pure live-scrape reader (no Supabase snapshot branch).
 
@@ -1191,7 +1225,10 @@ def scrape_cmoney_warrant(
         applog.log("WARR", f"{codes_s} -> 0 rows (no warrants found)")
         return pd.DataFrame(), "No warrants found", meta
 
-    df = build_warrant_df(cmoney_results, compute_iv=compute_iv, keep_noniv=keep_noniv)
+    df = build_warrant_df(
+        cmoney_results, compute_iv=compute_iv, keep_noniv=keep_noniv,
+        allow_no_quote=allow_no_quote,
+    )
 
     if df.empty:
         applog.log(
@@ -1205,6 +1242,7 @@ def scrape_cmoney_warrant(
     filtered = _apply_warrant_filters(
         df, stock_codes, option_type, min_days, max_days,
         min_leverage, max_tv_pct, min_volume,
+        allow_no_quote=allow_no_quote,
     )
     # The only distinct intermediate return is "nothing matched the underlying";
     # COL_ORDER never drops rows, so an empty result with no underlying match is

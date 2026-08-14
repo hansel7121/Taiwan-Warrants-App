@@ -1,15 +1,9 @@
 // User Dashboard tab: watchlist stars, threshold alerts, multi-leg positions,
-// the portfolio P&L widget, and the per-position payoff modal.
-//
-// Everything here is per-user — the routes it calls scope to the authenticated
-// user server-side (services/db_user.py), the same isolation the admin
-// Portfolio tab uses. Loaded in both modes: admin can see the feature too,
-// user mode lands on this tab.
-//
+// the portfolio P&L widget, and the per-position payoff modal. Every route it
+// calls scopes to the authenticated user server-side (services/db_user.py).
 // Unit conventions follow Taiwan market mechanics (see CLAUDE.md):
-//   warrant    quantity = board lots (張); 1 lot = 1,000 units; a unit delivers
-//              exercise_ratio underlying shares, so a lot is worth
-//              1,000 x unit_price and delivers 1,000 x ratio shares
+//   warrant    quantity = board lots (張) of 1,000 units; a unit delivers
+//              exercise_ratio underlying shares
 //   tw_option  quantity = contracts; contract_size (2,000) shares each
 //   underlying quantity = shares
 

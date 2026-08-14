@@ -22,6 +22,11 @@ _jwks_client = None
 _allow_cache = {}  # email -> (expiry_epoch, bool)
 _ALLOW_TTL = 60
 
+# PyJWKClient defaults to a 30s network timeout; on a single gthread-worker
+# process a slow/flaky Supabase auth backend could pin a request thread for
+# up to 30s per hit.
+_JWKS_TIMEOUT_SEC = float(os.environ.get("JWKS_TIMEOUT_SEC", "5"))
+
 
 def local_mode():
     """True on a local redundancy instance that acts as a fixed user with no login.
@@ -46,7 +51,7 @@ def _jwks():
     global _jwks_client
     if _jwks_client is None:
         url = os.environ["SUPABASE_URL"].rstrip("/") + "/auth/v1/.well-known/jwks.json"
-        _jwks_client = PyJWKClient(url)
+        _jwks_client = PyJWKClient(url, timeout=_JWKS_TIMEOUT_SEC)
     return _jwks_client
 
 
@@ -75,11 +80,13 @@ def _is_allowed(email):
     if hit and hit[0] > now:
         return hit[1]
     try:
-        r = db.client().table("allowed_users").select("email").eq("email", email).execute()
-        ok = bool(r.data)
+        r = db.run(lambda c: c.table("allowed_users").select("email").eq("email", email).execute())
     except Exception as e:
+        # A transient Supabase hiccup is not proof the user isn't allowed -
+        # don't cache it, or one blip locks a real user out for _ALLOW_TTL.
         print(f"AUTH: allowlist check failed for {email}: {e}", flush=True)
-        ok = False
+        return False
+    ok = bool(r.data)
     _allow_cache[email] = (now + _ALLOW_TTL, ok)
     return ok
 
