@@ -1053,15 +1053,17 @@ def get_warrant_results(stock_codes, force=False, errors_out=None):
                 # of pinning a false empty for WARRANT_CACHE_TTL. Any prior good
                 # entry is left in place, stale but still served as last-known-good.
                 if sc_codes and not sc_results:
-                    failed.append(sc)
+                    failed.append((sc, len(sc_codes)))
                     continue
                 # One shared `ts` across the batch: as_of below takes the min.
                 _warrant_cache.set(sc, sc_results, ts=ts)
             if failed:
+                # Count per stock, not the whole batch: "0/5793" made one
+                # 3-warrant stock look like a total outage.
+                detail = ", ".join(f"{sc} (0/{n} codes ok)" for sc, n in failed)
                 applog.log(
                     "WARR",
-                    f"{','.join(failed)} fetch failed (0/{len(all_codes)} codes ok) "
-                    f"— not caching, will retry next request",
+                    f"{detail} fetch failed — not caching, will retry next request",
                     level="ERROR",
                 )
     merged, as_of = {}, None
