@@ -30,6 +30,7 @@ but no levels arrive.
 """
 import json
 import os
+import re
 import socket
 import sys
 import tempfile
@@ -57,6 +58,13 @@ LEVELS = 5
 UNDERLYING = os.environ.get("FUBON_VIEWER_UNDERLYING", "2330")
 TOP_N = int(os.environ.get("FUBON_VIEWER_TOP_N", "5"))
 
+# "stock" (default) watches warrants via sdk.marketdata.*.stock, same as always.
+# "futopt" watches TAIFEX options via the sibling sdk.marketdata.*.futopt client
+# instead — same books channel, same subscription mechanics, different
+# instrument universe (FUBON_VIEWER_OPTION_PRODUCT, default TXO).
+MARKET = os.environ.get("FUBON_VIEWER_MARKET", "stock")
+OPTION_PRODUCT = os.environ.get("FUBON_VIEWER_OPTION_PRODUCT", "TXO")
+
 # TWSE MIS serves accumulated volume for warrants in bulk. 100 symbols per
 # call is the ceiling — 150 comes back rtcode 9999.
 MIS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
@@ -83,7 +91,7 @@ _names = {}    # code -> name, fetched once from REST
 _tracked = []  # codes, in add order
 
 _sdk = None
-_stock = None
+_ws = None
 _login_error = None
 _connected = False
 _msg_count = 0
@@ -199,10 +207,10 @@ def _refresh_subs():
     """Ask the server to restate its subscription list, for periodic reconciliation."""
     global _query_ops
     try:
-        if _stock is not None and _connected:
+        if _ws is not None and _connected:
             with _lock:
                 _query_ops = _ops
-            _stock.subscriptions()
+            _ws.subscriptions()
     except Exception as e:
         print(f"WS: subscriptions query failed: {e}", flush=True)
 
@@ -244,7 +252,7 @@ def _login():
     file only for the duration of sdk.login(), since the SDK needs a filesystem
     path, then removed.
     """
-    global _sdk, _stock, _login_error
+    global _sdk, _ws, _login_error
 
     try:
         creds = broker_credentials.get_credential(FUBON_CRED_LABEL)
@@ -288,14 +296,15 @@ def _login():
             return
 
         sdk.init_realtime()
-        stock = sdk.marketdata.websocket_client.stock
+        ws = (sdk.marketdata.websocket_client.futopt if MARKET == "futopt"
+              else sdk.marketdata.websocket_client.stock)
         # Before connect(): the socket starts emitting as soon as it authenticates,
         # and anything bound afterwards misses what already arrived.
-        stock.on("message", _handle_message)
-        stock.on("connect", _on_connect)
-        stock.on("disconnect", _on_disconnect)
-        stock.on("error", _on_error)
-        stock.connect()
+        ws.on("message", _handle_message)
+        ws.on("connect", _on_connect)
+        ws.on("disconnect", _on_disconnect)
+        ws.on("error", _on_error)
+        ws.connect()
     except Exception as e:
         _login_error = f"{type(e).__name__}: {e}"
         return
@@ -305,7 +314,7 @@ def _login():
         except OSError:
             pass
 
-    _sdk, _stock = sdk, stock
+    _sdk, _ws = sdk, ws
 
 
 def _seed_from_rest(code):
@@ -316,16 +325,30 @@ def _seed_from_rest(code):
     warrant whose book has not moved in half an hour would show nothing until
     a market maker requotes. This seeds the cache so a code has its book
     immediately; websocket frames then overwrite it.
+
+    Options' quote() has no bids/asks ladder at all (unlike stock's) — only a
+    single lastTrade.bid/ask, so the futopt branch synthesizes a 1-level book
+    from that. The live books push (5 levels) still overwrites it once one
+    arrives.
     """
     try:
-        q = _sdk.marketdata.rest_client.stock.intraday.quote(symbol=code)
+        if MARKET == "futopt":
+            q = _sdk.marketdata.rest_client.futopt.intraday.quote(symbol=code)
+        else:
+            q = _sdk.marketdata.rest_client.stock.intraday.quote(symbol=code)
     except Exception as e:
         _names.setdefault(code, f"({type(e).__name__})")
         return
 
     _names[code] = q.get("name") or _names.get(code) or "-"
 
-    bids, asks = q.get("bids") or [], q.get("asks") or []
+    if MARKET == "futopt":
+        last = q.get("lastTrade") or {}
+        size = last.get("size") or 0
+        bids = [{"price": last["bid"], "size": size}] if last.get("bid") else []
+        asks = [{"price": last["ask"], "size": size}] if last.get("ask") else []
+    else:
+        bids, asks = q.get("bids") or [], q.get("asks") or []
     if not bids and not asks:
         return
 
@@ -434,6 +457,76 @@ def _subscribe_top_liquid():
         print(f"TOP: scan failed: {e}", flush=True)
 
 
+_OPTION_SYMBOL_RE = re.compile(r"^([A-Z0-9]+?)(\d+)([A-Za-z])(\d)$")
+OPTION_TOP_N = int(os.environ.get("FUBON_VIEWER_OPTION_TOP_N", "5"))
+# Lets several futopt instances each claim a disjoint slice of strikes ranked
+# by distance from the money, same idea as STRESS_OFFSET on the warrant side,
+# so a fleet of connections watches different contracts instead of all
+# piling onto the same nearest-the-money handful.
+OPTION_STRIKE_OFFSET = int(os.environ.get("FUBON_VIEWER_OPTION_STRIKE_OFFSET", "0"))
+
+
+def _option_session():
+    """REGULAR during the day session, else AFTERHOURS — whichever one
+    actually has listed contracts right now, checked live rather than by
+    clock, since holidays/early closes make a fixed schedule unreliable."""
+    rest = _sdk.marketdata.rest_client.futopt.intraday
+    for session in ("REGULAR", "AFTERHOURS"):
+        rows = (rest.tickers(type="OPTION", product=OPTION_PRODUCT, session=session) or {}).get("data") or []
+        if rows:
+            return session, rows
+    return None, []
+
+
+def _subscribe_near_money_options():
+    """Watch the OPTION_TOP_N strikes nearest the money on OPTION_PRODUCT (both
+    calls and puts), instead of an arbitrary slice of the ~2,000 listed TXO
+    contracts. "Near the money" is anchored to the front-month TXF future's
+    last price — options don't carry a spot/underlying field of their own, so
+    that's the only live reference point available from this same API.
+    """
+    global _ranking
+    try:
+        rest = _sdk.marketdata.rest_client.futopt.intraday
+
+        _ranking = f"options: finding {OPTION_PRODUCT} session…"
+        session, rows = _option_session()
+        if not rows:
+            _ranking = f"no {OPTION_PRODUCT} contracts listed (checked REGULAR + AFTERHOURS)"
+            return
+
+        _ranking = f"options: pricing the underlying future…"
+        futs = (rest.tickers(type="FUTURE", contractType="I", session=session) or {}).get("data") or []
+        tx_futs = sorted(r["symbol"] for r in futs if r.get("symbol", "").startswith("TXF"))
+        spot = None
+        if tx_futs:
+            q = rest.quote(symbol=tx_futs[0])
+            spot = q.get("lastPrice") or q.get("previousClose")
+        if not spot:
+            _ranking = "options: couldn't price the underlying future, can't rank by moneyness"
+            return
+
+        by_strike = {}
+        for row in rows:
+            m = _OPTION_SYMBOL_RE.match(row.get("symbol") or "")
+            if not m or m.group(1) != OPTION_PRODUCT:
+                continue
+            strike = int(m.group(2))
+            by_strike.setdefault(strike, []).append(row["symbol"])
+            _names[row["symbol"]] = row.get("name") or "-"
+
+        ranked_strikes = sorted(by_strike, key=lambda k: abs(k - spot))
+        nearest_strikes = ranked_strikes[OPTION_STRIKE_OFFSET:OPTION_STRIKE_OFFSET + OPTION_TOP_N]
+        _ranking = None
+        for strike in nearest_strikes:
+            for code in by_strike[strike]:
+                _track(code)
+                print(f"OPTION: {code} (strike {strike}, spot~{spot})", flush=True)
+    except Exception as e:
+        _ranking = f"options scan failed: {type(e).__name__}: {e}"
+        print(f"OPTION: scan failed: {e}", flush=True)
+
+
 STRESS_TARGET = int(os.environ.get("FUBON_VIEWER_STRESS_TARGET", "0"))
 # Lets several instances (one process = one connection) each claim a disjoint
 # slice of the warrant list, so a fleet of them can push the account-wide
@@ -535,7 +628,7 @@ def _stress_subscribe():
             if code in _tracked:
                 continue
             _tracked.append(code)
-            _stock.subscribe({"channel": BOOKS_CHANNEL, "symbol": code})
+            _ws.subscribe({"channel": BOOKS_CHANNEL, "symbol": code})
             time.sleep(0.03)  # let subscribed/error frames land before checking
             with _lock:
                 err = _last_error
@@ -618,11 +711,15 @@ def index():
   body { font-family: sans-serif; padding: 2rem; }
   h1 { margin: 0 0 .3rem; }
   .status { color: #555; margin-bottom: 1rem; }
-  #books { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 1rem 1.5rem; align-items: start; }
-  .book { border: 1px solid #eee; border-radius: 6px; padding: .6rem .8rem; }
-  .book h3 { margin: 0 0 .4rem; font-size: .85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #books { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 1rem 1.5rem; align-items: start; }
+  .book { border: 1px solid #eee; border-radius: 6px; padding: .6rem .8rem; min-height: 15rem;
+           display: flex; flex-direction: column; min-width: 0; box-sizing: border-box;
+           overflow-x: auto; }
+  .book h3 { margin: 0 0 .4rem; font-size: .85rem; line-height: 1.25; min-height: 3.75em;
+             white-space: normal; overflow-wrap: break-word; }
   table { border-collapse: collapse; font-variant-numeric: tabular-nums; width: 100%; }
-  th, td { padding: .25rem .7rem; text-align: right; border-bottom: 1px solid #eee; }
+  th, td { padding: .25rem .5rem; text-align: right; border-bottom: 1px solid #eee;
+           white-space: nowrap; }
   th { font-size: .7rem; text-transform: uppercase; color: #888; font-weight: 500; }
   .bid { color: #146b52; } .ask { color: #a83b2b; }
   tr.best td { font-weight: 700; }
@@ -796,7 +893,7 @@ def _track(code):
     _tracked.append(code)
     # Subscribe first, then seed: a frame arriving during the REST call is
     # newer than the snapshot, and _seed_from_rest won't overwrite it.
-    _stock.subscribe({"channel": BOOKS_CHANNEL, "symbol": code})
+    _ws.subscribe({"channel": BOOKS_CHANNEL, "symbol": code})
     print(f"WS: subscribed {code}", flush=True)
     _seed_from_rest(code)
 
@@ -817,7 +914,7 @@ def remove(code):
             sub_id = _sub_ids.get(code)
         try:
             if sub_id:
-                _stock.unsubscribe({"id": sub_id})
+                _ws.unsubscribe({"id": sub_id})
             else:
                 print(f"WS: no subscription id for {code}, cannot unsubscribe", flush=True)
         except Exception as e:
@@ -863,7 +960,9 @@ if __name__ == "__main__":
     else:
         # Threaded: the scan sweeps ~1200 codes over TWSE MIS, so the page
         # should come up and say what it's doing rather than wait for it.
-        if STRESS_TARGET:
+        if MARKET == "futopt":
+            threading.Thread(target=_subscribe_near_money_options, daemon=True).start()
+        elif STRESS_TARGET:
             threading.Thread(target=_stress_subscribe, daemon=True).start()
         else:
             threading.Thread(target=_subscribe_top_liquid, daemon=True).start()
@@ -875,7 +974,7 @@ if __name__ == "__main__":
     finally:
         if _sdk is not None:
             try:
-                _stock.disconnect()
+                _ws.disconnect()
                 _sdk.logout()
                 print("WS: logged out", flush=True)
             except Exception as e:
