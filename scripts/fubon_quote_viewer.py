@@ -4,8 +4,10 @@ Run it directly (`python scripts/fubon_quote_viewer.py`) and open
 http://127.0.0.1:5099. At startup it ranks one underlying's warrants by
 traded volume and subscribes the busiest TOP_N (`_subscribe_top_liquid`);
 more codes can be added by hand. Each shows its full five-level bid/ask
-ladder with volume. Credentials come from .env (FUBON_ID, FUBON_PASSWORD,
-FUBON_CERT_PATH, FUBON_CERT_PASSWORD); FUBON_VIEWER_UNDERLYING and
+ladder with volume. Credentials come from Supabase (fubon_credentials table,
+Fernet-encrypted — see services/broker/), selected by FUBON_CRED_LABEL
+(defaults to "default"); run scripts/seed_fubon_credentials.py once to
+populate a row from a local .env. FUBON_VIEWER_UNDERLYING and
 FUBON_VIEWER_TOP_N override what gets picked.
 
 Push, not poll: the process logs in once, opens ONE websocket, and subscribes
@@ -29,6 +31,8 @@ but no levels arrive.
 import json
 import os
 import socket
+import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -37,7 +41,14 @@ from datetime import datetime, timezone
 import requests
 from flask import Flask, jsonify, redirect, request
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from services.broker import credentials as broker_credentials
+
 app = Flask(__name__)
+
+# Which fubon_credentials row (see services/broker/credentials.py) to log in
+# with. Lets a second account/login be tested later without a code change.
+FUBON_CRED_LABEL = os.environ.get("FUBON_CRED_LABEL", broker_credentials.DEFAULT_LABEL)
 
 BOOKS_CHANNEL = "books"
 LEVELS = 5
@@ -225,18 +236,36 @@ def _on_error(*a, **k):
 
 
 def _login():
-    """Log in, then open the one websocket this process keeps for its lifetime."""
+    """Log in, then open the one websocket this process keeps for its lifetime.
+
+    Credentials come from Supabase (fubon_credentials table, encrypted at
+    rest — see services/broker/), not .env; run scripts/seed_fubon_credentials.py
+    once to populate a row. The cert is downloaded to a throwaway local temp
+    file only for the duration of sdk.login(), since the SDK needs a filesystem
+    path, then removed.
+    """
     global _sdk, _stock, _login_error
 
-    creds = {
-        "FUBON_ID": os.environ.get("FUBON_ID"),
-        "FUBON_PASSWORD": os.environ.get("FUBON_PASSWORD"),
-        "FUBON_CERT_PATH": os.environ.get("FUBON_CERT_PATH"),
-        "FUBON_CERT_PASSWORD": os.environ.get("FUBON_CERT_PASSWORD"),
-    }
-    missing = [k for k, v in creds.items() if not v]
+    try:
+        creds = broker_credentials.get_credential(FUBON_CRED_LABEL)
+    except Exception as e:
+        _login_error = f"Supabase credential lookup failed: {type(e).__name__}: {e}"
+        return
+    if creds is None:
+        _login_error = f"No fubon_credentials row for label '{FUBON_CRED_LABEL}'"
+        return
+    missing = [k for k in ("fubon_id", "fubon_password", "cert_password") if not creds.get(k)]
     if missing:
-        _login_error = f"Missing .env vars: {', '.join(missing)}"
+        _login_error = f"fubon_credentials row '{FUBON_CRED_LABEL}' missing: {', '.join(missing)}"
+        return
+    if not creds.get("cert_path"):
+        _login_error = f"fubon_credentials row '{FUBON_CRED_LABEL}' has no cert uploaded"
+        return
+
+    try:
+        cert_bytes = broker_credentials.download_cert(FUBON_CRED_LABEL)
+    except Exception as e:
+        _login_error = f"cert download failed: {type(e).__name__}: {e}"
         return
 
     try:
@@ -245,10 +274,15 @@ def _login():
         _login_error = "fubon_neo is not installed"
         return
 
+    cert_ext = creds["cert_path"].rsplit(".", 1)[-1] if "." in creds["cert_path"] else "p12"
+    fd, local_cert_path = tempfile.mkstemp(suffix=f".{cert_ext}")
     try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(cert_bytes)
+
         sdk = FubonSDK()
-        result = sdk.login(creds["FUBON_ID"], creds["FUBON_PASSWORD"],
-                           creds["FUBON_CERT_PATH"], creds["FUBON_CERT_PASSWORD"])
+        result = sdk.login(creds["fubon_id"], creds["fubon_password"],
+                           local_cert_path, creds["cert_password"])
         if not getattr(result, "is_success", False):
             _login_error = f"login failed: {getattr(result, 'message', result)}"
             return
@@ -265,6 +299,11 @@ def _login():
     except Exception as e:
         _login_error = f"{type(e).__name__}: {e}"
         return
+    finally:
+        try:
+            os.unlink(local_cert_path)
+        except OSError:
+            pass
 
     _sdk, _stock = sdk, stock
 
@@ -377,9 +416,13 @@ def _subscribe_top_liquid():
         vols = _mis_volumes(codes)
         ranked = sorted(vols.items(), key=lambda kv: kv[1], reverse=True)[:TOP_N]
         if not ranked or ranked[0][1] == 0:
-            # Before the open, MIS carries the previous session's totals; all
-            # zero means neither today nor a prior session has traded.
-            _ranking = f"no {name} warrant has traded — nothing to rank"
+            # MIS down or nothing traded yet — fall back to raw listing order
+            # so the page still has something to show.
+            _ranking = f"MIS ranking unavailable — subscribing {name} warrants in listing order…"
+            for code in codes[:TOP_N]:
+                _track(code)
+                print(f"ORDER: {code}", flush=True)
+            _ranking = None
             return
 
         for code, vol in ranked:
@@ -392,6 +435,69 @@ def _subscribe_top_liquid():
 
 
 STRESS_TARGET = int(os.environ.get("FUBON_VIEWER_STRESS_TARGET", "0"))
+# Lets several instances (one process = one connection) each claim a disjoint
+# slice of the warrant list, so a fleet of them can push the account-wide
+# total rather than all fighting over the same first 300 codes.
+STRESS_OFFSET = int(os.environ.get("FUBON_VIEWER_STRESS_OFFSET", "0"))
+# When several instances run at once (one process = one connection), each
+# independently ranking warrants against TWSE MIS overloads the public
+# endpoint (observed: a full ~31k-code market scan run twice at once got
+# every batch connection-reset). One instance computes the ranking and
+# writes it here; the rest just read it.
+STRESS_RANK_CACHE = os.environ.get("FUBON_VIEWER_STRESS_RANK_CACHE", "")
+
+# Large-cap names with the deepest warrant chains — enough to comfortably
+# clear STRESS_TARGET=2100 (2330/TSMC alone runs ~1200) while keeping the
+# MIS scan a fraction of the size of a full-market pass over all ~31k codes.
+STRESS_UNDERLYINGS = ["2330", "2317", "2454", "2881", "2882", "2891",
+                      "2603", "3008", "2412", "1301", "2308", "2382"]
+
+
+def _stress_ranked_codes():
+    """Warrant codes across STRESS_UNDERLYINGS, ranked by traded volume, with
+    names — from cache if another instance already computed it, else scanned
+    fresh (via the same _warrant_codes_for + _mis_volumes pair
+    _subscribe_top_liquid uses for one underlying) and cached."""
+    if STRESS_RANK_CACHE and os.path.exists(STRESS_RANK_CACHE):
+        with open(STRESS_RANK_CACHE) as f:
+            rows = json.load(f)
+        for code, name in rows:
+            _names[code] = name
+        return [code for code, _ in rows]
+
+    global _ranking
+    rest = _sdk.marketdata.rest_client.stock
+    all_warrants = (rest.intraday.tickers(type="WARRANT", market="TSE") or {}).get("data") or []
+    name_by_code = {r["symbol"]: r["name"] for r in all_warrants if r.get("symbol") and r.get("name")}
+
+    pool = set()
+    for stock in STRESS_UNDERLYINGS:
+        _ranking = f"stress test: finding warrants for {stock}…"
+        _, codes = _warrant_codes_for(stock)
+        pool.update(codes)
+    for code in pool:
+        if code in name_by_code:
+            _names[code] = name_by_code[code]
+
+    # Sorted (not set-order) so that, absent a shared cache file, independent
+    # instances still agree on one ordering to slice by STRESS_OFFSET.
+    pool = sorted(pool)
+    _ranking = f"stress test: ranking {len(pool)} warrants by volume…"
+    vols = _mis_volumes(pool)
+    if any(vols.values()):
+        ranked = sorted(pool, key=lambda c: vols.get(c, 0), reverse=True)
+    else:
+        # MIS unavailable — fall back to the deterministic sorted order so
+        # every instance still slices the same underlying list consistently.
+        ranked = pool
+
+    if STRESS_RANK_CACHE:
+        tmp = STRESS_RANK_CACHE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump([[c, _names.get(c, "-")] for c in ranked], f)
+        os.replace(tmp, STRESS_RANK_CACHE)
+
+    return ranked
 
 
 def _stress_subscribe():
@@ -399,17 +505,20 @@ def _stress_subscribe():
     server's real per-connection cap (or STRESS_TARGET), to check the cap
     against the newly-published 7-connections x 300-subs figure.
 
-    Only runs when FUBON_VIEWER_STRESS_TARGET is set. Skips the per-code REST
-    seed (_track normally calls it) since at this volume the REST quota, not
-    the subscription cap, would be what's actually getting tested.
+    Only runs when FUBON_VIEWER_STRESS_TARGET is set. Ranked by traded volume
+    (same MIS source as _subscribe_top_liquid) rather than raw listing order,
+    so each slice actually has live books instead of dead warrants nobody has
+    quoted today — and names come free from the same bulk tickers() call, so
+    this skips the per-code REST seed (_track normally calls it) since at
+    this volume the REST quota, not the subscription cap, is what's on test.
     """
     global _ranking
     try:
-        _ranking = f"stress test: listing warrants for target {STRESS_TARGET}…"
-        rest = _sdk.marketdata.rest_client.stock
-        rows = (rest.intraday.tickers(type="WARRANT", market="TSE") or {}).get("data") or []
-        codes = [r["symbol"] for r in rows if r.get("symbol")][:STRESS_TARGET]
-        print(f"STRESS: pool of {len(codes)} warrant codes, target {STRESS_TARGET}", flush=True)
+        _ranking = "stress test: listing all warrants…"
+        ranked = _stress_ranked_codes()
+        codes = ranked[STRESS_OFFSET:STRESS_OFFSET + STRESS_TARGET]
+        print(f"STRESS: pool of {len(codes)} warrant codes (by volume), "
+              f"offset {STRESS_OFFSET}, target {STRESS_TARGET}", flush=True)
 
         for i, code in enumerate(codes, 1):
             if code in _tracked:
@@ -497,9 +606,10 @@ def index():
   body { font-family: sans-serif; padding: 2rem; }
   h1 { margin: 0 0 .3rem; }
   .status { color: #555; margin-bottom: 1rem; }
-  .book { display: inline-block; vertical-align: top; margin: 0 1.5rem 1.5rem 0; }
-  .book h3 { margin: 0 0 .4rem; font-size: 1rem; }
-  table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  #books { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 1rem 1.5rem; align-items: start; }
+  .book { border: 1px solid #eee; border-radius: 6px; padding: .6rem .8rem; }
+  .book h3 { margin: 0 0 .4rem; font-size: .85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  table { border-collapse: collapse; font-variant-numeric: tabular-nums; width: 100%; }
   th, td { padding: .25rem .7rem; text-align: right; border-bottom: 1px solid #eee; }
   th { font-size: .7rem; text-transform: uppercase; color: #888; font-weight: 500; }
   .bid { color: #146b52; } .ask { color: #a83b2b; }
@@ -557,9 +667,6 @@ function buildBook(b) {
 
   var table = document.createElement("table");
   table.innerHTML = "<tr><th>Bid Vol</th><th>Bid</th><th></th><th>Ask</th><th>Ask Vol</th></tr>";
-  var waiting = document.createElement("tr");
-  waiting.innerHTML = "<td colspan=5 style='color:#888;text-align:center'>waiting for book…</td>";
-  table.appendChild(waiting);
 
   var rows = [];
   for (var i = 0; i < 5; i++) {
@@ -570,6 +677,7 @@ function buildBook(b) {
     var ap = document.createElement("td"); ap.className = "ask";
     var as = document.createElement("td"); as.className = "ask";
     tr.appendChild(bs); tr.appendChild(bp); tr.appendChild(lv); tr.appendChild(ap); tr.appendChild(as);
+    table.appendChild(tr);
     rows.push({ tr: tr, bs: bs, bp: bp, ap: ap, as: as });
   }
   root.appendChild(table);
@@ -585,25 +693,22 @@ function buildBook(b) {
   meta.appendChild(removeLink);
   root.appendChild(meta);
 
-  return { root: root, h3: h3, table: table, waiting: waiting, rows: rows, meta: metaText, name: null };
+  return { root: root, h3: h3, table: table, rows: rows, meta: metaText, name: null };
 }
 
-function patchBook(el, b) {
-  var title = b.code + "  " + b.name;
+// Every book always renders all 5 rows (dashes if no data yet) so books
+// stay a uniform height and line up cleanly across the grid.
+function patchBook(el, b, idx) {
+  var title = (idx + 1) + ". " + b.code + "  " + b.name;
   if (el.name !== title) { el.h3.textContent = title; el.name = title; }
 
-  var showWaiting = b.rows.length === 0;
-  el.waiting.style.display = showWaiting ? "" : "none";
   for (var i = 0; i < el.rows.length; i++) {
     var r = b.rows[i], slot = el.rows[i];
-    slot.tr.style.display = showWaiting ? "none" : "";
-    if (showWaiting) continue;
-    slot.tr.className = r.level === 1 ? "best" : "";
-    setText(slot.bs, cell(r.bid_size));
-    setText(slot.bp, cell(r.bid));
-    setText(slot.ap, cell(r.ask));
-    setText(slot.as, cell(r.ask_size));
-    if (slot.tr.parentNode !== el.table) el.table.appendChild(slot.tr);
+    slot.tr.className = (r && r.level === 1) ? "best" : "";
+    setText(slot.bs, cell(r ? r.bid_size : null));
+    setText(slot.bp, cell(r ? r.bid : null));
+    setText(slot.ap, cell(r ? r.ask : null));
+    setText(slot.as, cell(r ? r.ask_size : null));
   }
 
   var metaStr = b.age === null ? "no data yet" : age(b);
@@ -624,14 +729,14 @@ function render(d) {
 
   var container = document.getElementById("books");
   var seen = {};
-  d.books.forEach(function (b) {
+  d.books.forEach(function (b, idx) {
     seen[b.code] = true;
     var el = bookEls[b.code];
     if (!el) {
       el = bookEls[b.code] = buildBook(b);
       container.appendChild(el.root);
     }
-    patchBook(el, b);
+    patchBook(el, b, idx);
   });
 
   // Drop books no longer tracked (removed via /remove) so the DOM doesn't
