@@ -446,6 +446,12 @@ STRESS_OFFSET = int(os.environ.get("FUBON_VIEWER_STRESS_OFFSET", "0"))
 # writes it here; the rest just read it.
 STRESS_RANK_CACHE = os.environ.get("FUBON_VIEWER_STRESS_RANK_CACHE", "")
 
+# "liquid" (default): rank the pool by traded volume via TWSE MIS, falling
+# back to sorted code order if MIS is unreachable. "code": skip MIS entirely
+# and always use sorted code order — for comparing against the liquidity-
+# ranked run, or when MIS is known to be blocked (e.g. from a non-TW IP).
+STRESS_MODE = os.environ.get("FUBON_VIEWER_STRESS_MODE", "liquid")
+
 # Large-cap names with the deepest warrant chains — enough to comfortably
 # clear STRESS_TARGET=2100 (2330/TSMC alone runs ~1200) while keeping the
 # MIS scan a fraction of the size of a full-market pass over all ~31k codes.
@@ -454,10 +460,11 @@ STRESS_UNDERLYINGS = ["2330", "2317", "2454", "2881", "2882", "2891",
 
 
 def _stress_ranked_codes():
-    """Warrant codes across STRESS_UNDERLYINGS, ranked by traded volume, with
-    names — from cache if another instance already computed it, else scanned
-    fresh (via the same _warrant_codes_for + _mis_volumes pair
-    _subscribe_top_liquid uses for one underlying) and cached."""
+    """Warrant codes across STRESS_UNDERLYINGS, with names — from cache if
+    another instance already computed it, else scanned fresh (via the same
+    _warrant_codes_for + _mis_volumes pair _subscribe_top_liquid uses for one
+    underlying) and cached. Order depends on STRESS_MODE: "liquid" ranks by
+    traded volume (MIS), "code" always uses sorted code order."""
     if STRESS_RANK_CACHE and os.path.exists(STRESS_RANK_CACHE):
         with open(STRESS_RANK_CACHE) as f:
             rows = json.load(f)
@@ -482,14 +489,18 @@ def _stress_ranked_codes():
     # Sorted (not set-order) so that, absent a shared cache file, independent
     # instances still agree on one ordering to slice by STRESS_OFFSET.
     pool = sorted(pool)
-    _ranking = f"stress test: ranking {len(pool)} warrants by volume…"
-    vols = _mis_volumes(pool)
-    if any(vols.values()):
-        ranked = sorted(pool, key=lambda c: vols.get(c, 0), reverse=True)
-    else:
-        # MIS unavailable — fall back to the deterministic sorted order so
-        # every instance still slices the same underlying list consistently.
+
+    if STRESS_MODE == "code":
         ranked = pool
+    else:
+        _ranking = f"stress test: ranking {len(pool)} warrants by volume…"
+        vols = _mis_volumes(pool)
+        if any(vols.values()):
+            ranked = sorted(pool, key=lambda c: vols.get(c, 0), reverse=True)
+        else:
+            # MIS unavailable — fall back to the deterministic sorted order so
+            # every instance still slices the same underlying list consistently.
+            ranked = pool
 
     if STRESS_RANK_CACHE:
         tmp = STRESS_RANK_CACHE + ".tmp"
@@ -508,9 +519,9 @@ def _stress_subscribe():
     Only runs when FUBON_VIEWER_STRESS_TARGET is set. Ranked by traded volume
     (same MIS source as _subscribe_top_liquid) rather than raw listing order,
     so each slice actually has live books instead of dead warrants nobody has
-    quoted today — and names come free from the same bulk tickers() call, so
-    this skips the per-code REST seed (_track normally calls it) since at
-    this volume the REST quota, not the subscription cap, is what's on test.
+    quoted today. Also REST-seeds each code (same _seed_from_rest _track
+    normally calls) so a book shows its current snapshot immediately instead
+    of sitting blank until the books channel happens to push a change.
     """
     global _ranking
     try:
@@ -533,6 +544,7 @@ def _stress_subscribe():
                       flush=True)
                 _ranking = f"stress test: hit cap at {i} attempts — {err}"
                 return
+            _seed_from_rest(code)
             if i % 50 == 0:
                 print(f"STRESS: {i}/{len(codes)} attempted, {len(_sub_ids)} confirmed", flush=True)
                 _ranking = f"stress test: {i}/{len(codes)} attempted, {len(_sub_ids)} confirmed"
