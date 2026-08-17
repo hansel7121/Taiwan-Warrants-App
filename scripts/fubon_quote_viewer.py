@@ -54,15 +54,16 @@ MIS_WORKERS = 6
 MIS_HEADERS = {"User-Agent": "Mozilla/5.0",
                "Referer": "https://mis.twse.com.tw/stock/index.jsp"}
 
-# Fugle's docs claim 200 subscriptions per connection, 5 concurrent connections
-# per account (1000 symbols in total). Measured against this account by driving
-# 5 real websocket connections to their limit: each one actually accepts 300
-# before erroring `1001: Subscription limit exceeded`, for 1500 total — the
-# published 200/1000 figures are stale. Only the subscription count is
-# observable — the server reports it; the connection figure is this process's
-# own sockets, and says nothing about sessions elsewhere.
+# Fugle's docs now claim 300 subscriptions per connection, 7 concurrent
+# connections per account (2100 symbols in total) — up from an older
+# 200/5/1000 figure. Re-measured against this account by driving one
+# websocket to its limit with FUBON_VIEWER_STRESS_TARGET=2100: it accepted
+# exactly 300 before erroring `1001: Subscription limit exceeded`, confirming
+# the per-connection figure. The 7-connection total wasn't (and can't be)
+# checked from here — this process only ever opens one socket — so the 2100
+# total is taken on faith from the docs, not independently verified.
 MAX_SUBS_PER_CONN = 300
-MAX_CONNECTIONS = 5
+MAX_CONNECTIONS = 7
 SUBS_POLL_S = 15
 
 _lock = threading.Lock()
@@ -390,6 +391,50 @@ def _subscribe_top_liquid():
         print(f"TOP: scan failed: {e}", flush=True)
 
 
+STRESS_TARGET = int(os.environ.get("FUBON_VIEWER_STRESS_TARGET", "0"))
+
+
+def _stress_subscribe():
+    """One-off probe: subscribe as many warrant codes as it takes to hit the
+    server's real per-connection cap (or STRESS_TARGET), to check the cap
+    against the newly-published 7-connections x 300-subs figure.
+
+    Only runs when FUBON_VIEWER_STRESS_TARGET is set. Skips the per-code REST
+    seed (_track normally calls it) since at this volume the REST quota, not
+    the subscription cap, would be what's actually getting tested.
+    """
+    global _ranking
+    try:
+        _ranking = f"stress test: listing warrants for target {STRESS_TARGET}…"
+        rest = _sdk.marketdata.rest_client.stock
+        rows = (rest.intraday.tickers(type="WARRANT", market="TSE") or {}).get("data") or []
+        codes = [r["symbol"] for r in rows if r.get("symbol")][:STRESS_TARGET]
+        print(f"STRESS: pool of {len(codes)} warrant codes, target {STRESS_TARGET}", flush=True)
+
+        for i, code in enumerate(codes, 1):
+            if code in _tracked:
+                continue
+            _tracked.append(code)
+            _stock.subscribe({"channel": BOOKS_CHANNEL, "symbol": code})
+            time.sleep(0.03)  # let subscribed/error frames land before checking
+            with _lock:
+                err = _last_error
+            if err and "1001" in err:
+                print(f"STRESS: capped at {i} attempts ({len(_sub_ids)} confirmed): {err}",
+                      flush=True)
+                _ranking = f"stress test: hit cap at {i} attempts — {err}"
+                return
+            if i % 50 == 0:
+                print(f"STRESS: {i}/{len(codes)} attempted, {len(_sub_ids)} confirmed", flush=True)
+                _ranking = f"stress test: {i}/{len(codes)} attempted, {len(_sub_ids)} confirmed"
+
+        print(f"STRESS: reached target, {len(_sub_ids)} confirmed, no error", flush=True)
+        _ranking = f"stress test: reached target ({len(_sub_ids)}), no cap hit"
+    except Exception as e:
+        print(f"STRESS: failed: {type(e).__name__}: {e}", flush=True)
+        _ranking = f"stress test failed: {e}"
+
+
 def _ladder(code):
     """One code's five levels a side, padded so the table always has LEVELS rows."""
     with _lock:
@@ -488,40 +533,138 @@ function age(b) {
   return b.src === "rest" ? "snapshot, book " + t + " old" : "updated " + t + " ago";
 }
 
+// At a couple hundred tracked warrants, a full innerHTML rebuild of every
+// book (5 rows x 5 cells each) on every poll thrashes the DOM badly enough
+// to freeze the tab. Instead each book div is created once and kept; polls
+// only touch the specific <td>/text nodes whose value actually changed, so
+// idle books (most of them, most polls) cost nothing to redraw.
+var bookEls = {};             // code -> {root, rows: [{bs,bp,ap,as}...], meta, waiting}
+var lastText = new WeakMap(); // element -> last string written, to skip no-op writes
+
+function setText(el, s) {
+  if (lastText.get(el) !== s) {
+    el.textContent = s;
+    lastText.set(el, s);
+  }
+}
+
+function buildBook(b) {
+  var root = document.createElement("div");
+  root.className = "book";
+
+  var h3 = document.createElement("h3");
+  root.appendChild(h3);
+
+  var table = document.createElement("table");
+  table.innerHTML = "<tr><th>Bid Vol</th><th>Bid</th><th></th><th>Ask</th><th>Ask Vol</th></tr>";
+  var waiting = document.createElement("tr");
+  waiting.innerHTML = "<td colspan=5 style='color:#888;text-align:center'>waiting for book…</td>";
+  table.appendChild(waiting);
+
+  var rows = [];
+  for (var i = 0; i < 5; i++) {
+    var tr = document.createElement("tr");
+    var bs = document.createElement("td"); bs.className = "bid";
+    var bp = document.createElement("td"); bp.className = "bid";
+    var lv = document.createElement("td"); lv.className = "lv"; lv.textContent = i + 1;
+    var ap = document.createElement("td"); ap.className = "ask";
+    var as = document.createElement("td"); as.className = "ask";
+    tr.appendChild(bs); tr.appendChild(bp); tr.appendChild(lv); tr.appendChild(ap); tr.appendChild(as);
+    rows.push({ tr: tr, bs: bs, bp: bp, ap: ap, as: as });
+  }
+  root.appendChild(table);
+
+  var meta = document.createElement("div");
+  meta.className = "meta";
+  var metaText = document.createTextNode("");
+  var removeLink = document.createElement("a");
+  removeLink.textContent = "remove";
+  removeLink.href = "/remove/" + b.code;
+  meta.appendChild(metaText);
+  meta.appendChild(document.createTextNode("  "));
+  meta.appendChild(removeLink);
+  root.appendChild(meta);
+
+  return { root: root, h3: h3, table: table, waiting: waiting, rows: rows, meta: metaText, name: null };
+}
+
+function patchBook(el, b) {
+  var title = b.code + "  " + b.name;
+  if (el.name !== title) { el.h3.textContent = title; el.name = title; }
+
+  var showWaiting = b.rows.length === 0;
+  el.waiting.style.display = showWaiting ? "" : "none";
+  for (var i = 0; i < el.rows.length; i++) {
+    var r = b.rows[i], slot = el.rows[i];
+    slot.tr.style.display = showWaiting ? "none" : "";
+    if (showWaiting) continue;
+    slot.tr.className = r.level === 1 ? "best" : "";
+    setText(slot.bs, cell(r.bid_size));
+    setText(slot.bp, cell(r.bid));
+    setText(slot.ap, cell(r.ask));
+    setText(slot.as, cell(r.ask_size));
+    if (slot.tr.parentNode !== el.table) el.table.appendChild(slot.tr);
+  }
+
+  var metaStr = b.age === null ? "no data yet" : age(b);
+  if (el.meta.data !== metaStr) el.meta.data = metaStr;
+}
+
 function render(d) {
   var dot = d.state === "connected" ? "ok" : (d.state === "connecting" ? "warn" : "bad");
   var subs = d.subs + "/" + d.max_subs + (d.subs_confirmed ? "" : "?");
-  document.getElementById("status").innerHTML =
-    "<span class='dot " + dot + "'></span><b>" + d.state + "</b>"
+  var statusHtml = "<span class='dot " + dot + "'></span><b>" + d.state + "</b>"
     + " &nbsp;|&nbsp; subscriptions <b>" + subs + "</b>"
     + " &nbsp;|&nbsp; connections <b>" + d.connections + "/" + d.max_connections + "</b>"
     + " &nbsp;|&nbsp; messages <b>" + d.messages.toLocaleString() + "</b>"
     + (d.ranking ? " &nbsp;|&nbsp; " + d.ranking : "")
     + (d.error ? " &nbsp;|&nbsp; <span class='down'>" + d.error + "</span>" : "");
+  var statusEl = document.getElementById("status");
+  if (statusEl._last !== statusHtml) { statusEl.innerHTML = statusHtml; statusEl._last = statusHtml; }
 
-  document.getElementById("books").innerHTML = d.books.map(function (b) {
-    var body = b.rows.length === 0
-      ? "<tr><td colspan=5 style='color:#888;text-align:center'>waiting for book…</td></tr>"
-      : b.rows.map(function (r) {
-          return "<tr class='" + (r.level === 1 ? "best" : "") + "'>"
-            + "<td class='bid'>" + cell(r.bid_size) + "</td>"
-            + "<td class='bid'>" + cell(r.bid) + "</td>"
-            + "<td class='lv'>" + r.level + "</td>"
-            + "<td class='ask'>" + cell(r.ask) + "</td>"
-            + "<td class='ask'>" + cell(r.ask_size) + "</td></tr>";
-        }).join("");
+  var container = document.getElementById("books");
+  var seen = {};
+  d.books.forEach(function (b) {
+    seen[b.code] = true;
+    var el = bookEls[b.code];
+    if (!el) {
+      el = bookEls[b.code] = buildBook(b);
+      container.appendChild(el.root);
+    }
+    patchBook(el, b);
+  });
 
-    return "<div class='book'><h3>" + b.code + " &nbsp;" + b.name + "</h3>"
-      + "<table><tr><th>Bid Vol</th><th>Bid</th><th></th><th>Ask</th><th>Ask Vol</th></tr>"
-      + body + "</table>"
-      + "<div class='meta'>" + (b.age === null ? "no data yet" : age(b))
-      + " &nbsp;<a href='/remove/" + b.code + "'>remove</a></div></div>";
-  }).join("") || "<p>No codes tracked yet.</p>";
+  // Drop books no longer tracked (removed via /remove) so the DOM doesn't
+  // accumulate stale nodes as codes are added/removed over a session.
+  Object.keys(bookEls).forEach(function (code) {
+    if (!seen[code]) {
+      container.removeChild(bookEls[code].root);
+      delete bookEls[code];
+    }
+  });
+
+  if (d.books.length === 0 && !container.querySelector("p")) {
+    container.innerHTML = "<p>No codes tracked yet.</p>";
+  } else if (d.books.length > 0) {
+    var stray = container.querySelector("p");
+    if (stray) container.removeChild(stray);
+  }
 }
 
+// Guard against overlapping requests: at high subscription counts the /data
+// payload is large enough that a slow fetch could still be in flight when
+// the next timer fires, and stacking fetches only makes things worse.
+var inFlight = false;
 function poll() {
-  fetch("/data").then(function (r) { return r.json(); }).then(render)
-    .catch(function () { document.getElementById("status").textContent = "server unreachable"; });
+  if (inFlight) return;
+  inFlight = true;
+  fetch("/data").then(function (r) { return r.json(); }).then(function (d) {
+    inFlight = false;
+    render(d);
+  }).catch(function () {
+    inFlight = false;
+    document.getElementById("status").textContent = "server unreachable";
+  });
 }
 poll();
 setInterval(poll, 500);
@@ -603,7 +746,10 @@ if __name__ == "__main__":
     else:
         # Threaded: the scan sweeps ~1200 codes over TWSE MIS, so the page
         # should come up and say what it's doing rather than wait for it.
-        threading.Thread(target=_subscribe_top_liquid, daemon=True).start()
+        if STRESS_TARGET:
+            threading.Thread(target=_stress_subscribe, daemon=True).start()
+        else:
+            threading.Thread(target=_subscribe_top_liquid, daemon=True).start()
         threading.Thread(target=_poll_subscriptions, daemon=True).start()
 
     held.close()  # released immediately before app.run() rebinds it

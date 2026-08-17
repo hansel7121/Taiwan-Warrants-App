@@ -17,3 +17,6 @@ portfolio.json.backup
 
 # Broker certificates (.p12) — never commit these
 local_certs/
+
+# fubon_neo SDK log output
+log/
