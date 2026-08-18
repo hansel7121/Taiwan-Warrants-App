@@ -4,8 +4,10 @@ Run it directly (`python scripts/fubon_quote_viewer.py`) and open
 http://127.0.0.1:5099. At startup it ranks one underlying's warrants by
 traded volume and subscribes the busiest TOP_N (`_subscribe_top_liquid`);
 more codes can be added by hand. Each shows its full five-level bid/ask
-ladder with volume. Credentials come from .env (FUBON_ID, FUBON_PASSWORD,
-FUBON_CERT_PATH, FUBON_CERT_PASSWORD); FUBON_VIEWER_UNDERLYING and
+ladder with volume. Credentials come from Supabase (fubon_credentials table,
+Fernet-encrypted — see services/broker/), selected by FUBON_CRED_LABEL
+(defaults to "default"); run scripts/seed_fubon_credentials.py once to
+populate a row from a local .env. FUBON_VIEWER_UNDERLYING and
 FUBON_VIEWER_TOP_N override what gets picked.
 
 Push, not poll: the process logs in once, opens ONE websocket, and subscribes
@@ -28,7 +30,10 @@ but no levels arrive.
 """
 import json
 import os
+import re
 import socket
+import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -37,7 +42,14 @@ from datetime import datetime, timezone
 import requests
 from flask import Flask, jsonify, redirect, request
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from services.broker import credentials as broker_credentials
+
 app = Flask(__name__)
+
+# Which fubon_credentials row (see services/broker/credentials.py) to log in
+# with. Lets a second account/login be tested later without a code change.
+FUBON_CRED_LABEL = os.environ.get("FUBON_CRED_LABEL", broker_credentials.DEFAULT_LABEL)
 
 BOOKS_CHANNEL = "books"
 LEVELS = 5
@@ -45,6 +57,13 @@ LEVELS = 5
 # Which underlying's warrants to rank at startup, and how many to subscribe.
 UNDERLYING = os.environ.get("FUBON_VIEWER_UNDERLYING", "2330")
 TOP_N = int(os.environ.get("FUBON_VIEWER_TOP_N", "5"))
+
+# "stock" (default) watches warrants via sdk.marketdata.*.stock, same as always.
+# "futopt" watches TAIFEX options via the sibling sdk.marketdata.*.futopt client
+# instead — same books channel, same subscription mechanics, different
+# instrument universe (FUBON_VIEWER_OPTION_PRODUCT, default TXO).
+MARKET = os.environ.get("FUBON_VIEWER_MARKET", "stock")
+OPTION_PRODUCT = os.environ.get("FUBON_VIEWER_OPTION_PRODUCT", "TXO")
 
 # TWSE MIS serves accumulated volume for warrants in bulk. 100 symbols per
 # call is the ceiling — 150 comes back rtcode 9999.
@@ -54,15 +73,16 @@ MIS_WORKERS = 6
 MIS_HEADERS = {"User-Agent": "Mozilla/5.0",
                "Referer": "https://mis.twse.com.tw/stock/index.jsp"}
 
-# Fugle's docs claim 200 subscriptions per connection, 5 concurrent connections
-# per account (1000 symbols in total). Measured against this account by driving
-# 5 real websocket connections to their limit: each one actually accepts 300
-# before erroring `1001: Subscription limit exceeded`, for 1500 total — the
-# published 200/1000 figures are stale. Only the subscription count is
-# observable — the server reports it; the connection figure is this process's
-# own sockets, and says nothing about sessions elsewhere.
+# Fugle's docs now claim 300 subscriptions per connection, 7 concurrent
+# connections per account (2100 symbols in total) — up from an older
+# 200/5/1000 figure. Re-measured against this account by driving one
+# websocket to its limit with FUBON_VIEWER_STRESS_TARGET=2100: it accepted
+# exactly 300 before erroring `1001: Subscription limit exceeded`, confirming
+# the per-connection figure. The 7-connection total wasn't (and can't be)
+# checked from here — this process only ever opens one socket — so the 2100
+# total is taken on faith from the docs, not independently verified.
 MAX_SUBS_PER_CONN = 300
-MAX_CONNECTIONS = 5
+MAX_CONNECTIONS = 7
 SUBS_POLL_S = 15
 
 _lock = threading.Lock()
@@ -71,7 +91,7 @@ _names = {}    # code -> name, fetched once from REST
 _tracked = []  # codes, in add order
 
 _sdk = None
-_stock = None
+_ws = None
 _login_error = None
 _connected = False
 _msg_count = 0
@@ -187,10 +207,10 @@ def _refresh_subs():
     """Ask the server to restate its subscription list, for periodic reconciliation."""
     global _query_ops
     try:
-        if _stock is not None and _connected:
+        if _ws is not None and _connected:
             with _lock:
                 _query_ops = _ops
-            _stock.subscriptions()
+            _ws.subscriptions()
     except Exception as e:
         print(f"WS: subscriptions query failed: {e}", flush=True)
 
@@ -224,18 +244,36 @@ def _on_error(*a, **k):
 
 
 def _login():
-    """Log in, then open the one websocket this process keeps for its lifetime."""
-    global _sdk, _stock, _login_error
+    """Log in, then open the one websocket this process keeps for its lifetime.
 
-    creds = {
-        "FUBON_ID": os.environ.get("FUBON_ID"),
-        "FUBON_PASSWORD": os.environ.get("FUBON_PASSWORD"),
-        "FUBON_CERT_PATH": os.environ.get("FUBON_CERT_PATH"),
-        "FUBON_CERT_PASSWORD": os.environ.get("FUBON_CERT_PASSWORD"),
-    }
-    missing = [k for k, v in creds.items() if not v]
+    Credentials come from Supabase (fubon_credentials table, encrypted at
+    rest — see services/broker/), not .env; run scripts/seed_fubon_credentials.py
+    once to populate a row. The cert is downloaded to a throwaway local temp
+    file only for the duration of sdk.login(), since the SDK needs a filesystem
+    path, then removed.
+    """
+    global _sdk, _ws, _login_error
+
+    try:
+        creds = broker_credentials.get_credential(FUBON_CRED_LABEL)
+    except Exception as e:
+        _login_error = f"Supabase credential lookup failed: {type(e).__name__}: {e}"
+        return
+    if creds is None:
+        _login_error = f"No fubon_credentials row for label '{FUBON_CRED_LABEL}'"
+        return
+    missing = [k for k in ("fubon_id", "fubon_password", "cert_password") if not creds.get(k)]
     if missing:
-        _login_error = f"Missing .env vars: {', '.join(missing)}"
+        _login_error = f"fubon_credentials row '{FUBON_CRED_LABEL}' missing: {', '.join(missing)}"
+        return
+    if not creds.get("cert_path"):
+        _login_error = f"fubon_credentials row '{FUBON_CRED_LABEL}' has no cert uploaded"
+        return
+
+    try:
+        cert_bytes = broker_credentials.download_cert(FUBON_CRED_LABEL)
+    except Exception as e:
+        _login_error = f"cert download failed: {type(e).__name__}: {e}"
         return
 
     try:
@@ -244,28 +282,39 @@ def _login():
         _login_error = "fubon_neo is not installed"
         return
 
+    cert_ext = creds["cert_path"].rsplit(".", 1)[-1] if "." in creds["cert_path"] else "p12"
+    fd, local_cert_path = tempfile.mkstemp(suffix=f".{cert_ext}")
     try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(cert_bytes)
+
         sdk = FubonSDK()
-        result = sdk.login(creds["FUBON_ID"], creds["FUBON_PASSWORD"],
-                           creds["FUBON_CERT_PATH"], creds["FUBON_CERT_PASSWORD"])
+        result = sdk.login(creds["fubon_id"], creds["fubon_password"],
+                           local_cert_path, creds["cert_password"])
         if not getattr(result, "is_success", False):
             _login_error = f"login failed: {getattr(result, 'message', result)}"
             return
 
         sdk.init_realtime()
-        stock = sdk.marketdata.websocket_client.stock
+        ws = (sdk.marketdata.websocket_client.futopt if MARKET == "futopt"
+              else sdk.marketdata.websocket_client.stock)
         # Before connect(): the socket starts emitting as soon as it authenticates,
         # and anything bound afterwards misses what already arrived.
-        stock.on("message", _handle_message)
-        stock.on("connect", _on_connect)
-        stock.on("disconnect", _on_disconnect)
-        stock.on("error", _on_error)
-        stock.connect()
+        ws.on("message", _handle_message)
+        ws.on("connect", _on_connect)
+        ws.on("disconnect", _on_disconnect)
+        ws.on("error", _on_error)
+        ws.connect()
     except Exception as e:
         _login_error = f"{type(e).__name__}: {e}"
         return
+    finally:
+        try:
+            os.unlink(local_cert_path)
+        except OSError:
+            pass
 
-    _sdk, _stock = sdk, stock
+    _sdk, _ws = sdk, ws
 
 
 def _seed_from_rest(code):
@@ -276,16 +325,30 @@ def _seed_from_rest(code):
     warrant whose book has not moved in half an hour would show nothing until
     a market maker requotes. This seeds the cache so a code has its book
     immediately; websocket frames then overwrite it.
+
+    Options' quote() has no bids/asks ladder at all (unlike stock's) — only a
+    single lastTrade.bid/ask, so the futopt branch synthesizes a 1-level book
+    from that. The live books push (5 levels) still overwrites it once one
+    arrives.
     """
     try:
-        q = _sdk.marketdata.rest_client.stock.intraday.quote(symbol=code)
+        if MARKET == "futopt":
+            q = _sdk.marketdata.rest_client.futopt.intraday.quote(symbol=code)
+        else:
+            q = _sdk.marketdata.rest_client.stock.intraday.quote(symbol=code)
     except Exception as e:
         _names.setdefault(code, f"({type(e).__name__})")
         return
 
     _names[code] = q.get("name") or _names.get(code) or "-"
 
-    bids, asks = q.get("bids") or [], q.get("asks") or []
+    if MARKET == "futopt":
+        last = q.get("lastTrade") or {}
+        size = last.get("size") or 0
+        bids = [{"price": last["bid"], "size": size}] if last.get("bid") else []
+        asks = [{"price": last["ask"], "size": size}] if last.get("ask") else []
+    else:
+        bids, asks = q.get("bids") or [], q.get("asks") or []
     if not bids and not asks:
         return
 
@@ -376,9 +439,13 @@ def _subscribe_top_liquid():
         vols = _mis_volumes(codes)
         ranked = sorted(vols.items(), key=lambda kv: kv[1], reverse=True)[:TOP_N]
         if not ranked or ranked[0][1] == 0:
-            # Before the open, MIS carries the previous session's totals; all
-            # zero means neither today nor a prior session has traded.
-            _ranking = f"no {name} warrant has traded — nothing to rank"
+            # MIS down or nothing traded yet — fall back to raw listing order
+            # so the page still has something to show.
+            _ranking = f"MIS ranking unavailable — subscribing {name} warrants in listing order…"
+            for code in codes[:TOP_N]:
+                _track(code)
+                print(f"ORDER: {code}", flush=True)
+            _ranking = None
             return
 
         for code, vol in ranked:
@@ -388,6 +455,198 @@ def _subscribe_top_liquid():
     except Exception as e:
         _ranking = f"liquidity scan failed: {type(e).__name__}: {e}"
         print(f"TOP: scan failed: {e}", flush=True)
+
+
+_OPTION_SYMBOL_RE = re.compile(r"^([A-Z0-9]+?)(\d+)([A-Za-z])(\d)$")
+OPTION_TOP_N = int(os.environ.get("FUBON_VIEWER_OPTION_TOP_N", "5"))
+# Lets several futopt instances each claim a disjoint slice of strikes ranked
+# by distance from the money, same idea as STRESS_OFFSET on the warrant side,
+# so a fleet of connections watches different contracts instead of all
+# piling onto the same nearest-the-money handful.
+OPTION_STRIKE_OFFSET = int(os.environ.get("FUBON_VIEWER_OPTION_STRIKE_OFFSET", "0"))
+
+
+def _option_session():
+    """REGULAR during the day session, else AFTERHOURS — whichever one
+    actually has listed contracts right now, checked live rather than by
+    clock, since holidays/early closes make a fixed schedule unreliable."""
+    rest = _sdk.marketdata.rest_client.futopt.intraday
+    for session in ("REGULAR", "AFTERHOURS"):
+        rows = (rest.tickers(type="OPTION", product=OPTION_PRODUCT, session=session) or {}).get("data") or []
+        if rows:
+            return session, rows
+    return None, []
+
+
+def _subscribe_near_money_options():
+    """Watch the OPTION_TOP_N strikes nearest the money on OPTION_PRODUCT (both
+    calls and puts), instead of an arbitrary slice of the ~2,000 listed TXO
+    contracts. "Near the money" is anchored to the front-month TXF future's
+    last price — options don't carry a spot/underlying field of their own, so
+    that's the only live reference point available from this same API.
+    """
+    global _ranking
+    try:
+        rest = _sdk.marketdata.rest_client.futopt.intraday
+
+        _ranking = f"options: finding {OPTION_PRODUCT} session…"
+        session, rows = _option_session()
+        if not rows:
+            _ranking = f"no {OPTION_PRODUCT} contracts listed (checked REGULAR + AFTERHOURS)"
+            return
+
+        _ranking = f"options: pricing the underlying future…"
+        futs = (rest.tickers(type="FUTURE", contractType="I", session=session) or {}).get("data") or []
+        tx_futs = sorted(r["symbol"] for r in futs if r.get("symbol", "").startswith("TXF"))
+        spot = None
+        if tx_futs:
+            q = rest.quote(symbol=tx_futs[0])
+            spot = q.get("lastPrice") or q.get("previousClose")
+        if not spot:
+            _ranking = "options: couldn't price the underlying future, can't rank by moneyness"
+            return
+
+        by_strike = {}
+        for row in rows:
+            m = _OPTION_SYMBOL_RE.match(row.get("symbol") or "")
+            if not m or m.group(1) != OPTION_PRODUCT:
+                continue
+            strike = int(m.group(2))
+            by_strike.setdefault(strike, []).append(row["symbol"])
+            _names[row["symbol"]] = row.get("name") or "-"
+
+        ranked_strikes = sorted(by_strike, key=lambda k: abs(k - spot))
+        nearest_strikes = ranked_strikes[OPTION_STRIKE_OFFSET:OPTION_STRIKE_OFFSET + OPTION_TOP_N]
+        _ranking = None
+        for strike in nearest_strikes:
+            for code in by_strike[strike]:
+                _track(code)
+                print(f"OPTION: {code} (strike {strike}, spot~{spot})", flush=True)
+    except Exception as e:
+        _ranking = f"options scan failed: {type(e).__name__}: {e}"
+        print(f"OPTION: scan failed: {e}", flush=True)
+
+
+STRESS_TARGET = int(os.environ.get("FUBON_VIEWER_STRESS_TARGET", "0"))
+# Lets several instances (one process = one connection) each claim a disjoint
+# slice of the warrant list, so a fleet of them can push the account-wide
+# total rather than all fighting over the same first 300 codes.
+STRESS_OFFSET = int(os.environ.get("FUBON_VIEWER_STRESS_OFFSET", "0"))
+# When several instances run at once (one process = one connection), each
+# independently ranking warrants against TWSE MIS overloads the public
+# endpoint (observed: a full ~31k-code market scan run twice at once got
+# every batch connection-reset). One instance computes the ranking and
+# writes it here; the rest just read it.
+STRESS_RANK_CACHE = os.environ.get("FUBON_VIEWER_STRESS_RANK_CACHE", "")
+
+# "liquid" (default): rank the pool by traded volume via TWSE MIS, falling
+# back to sorted code order if MIS is unreachable. "code": skip MIS entirely
+# and always use sorted code order — for comparing against the liquidity-
+# ranked run, or when MIS is known to be blocked (e.g. from a non-TW IP).
+STRESS_MODE = os.environ.get("FUBON_VIEWER_STRESS_MODE", "liquid")
+
+# Large-cap names with the deepest warrant chains — enough to comfortably
+# clear STRESS_TARGET=2100 (2330/TSMC alone runs ~1200) while keeping the
+# MIS scan a fraction of the size of a full-market pass over all ~31k codes.
+STRESS_UNDERLYINGS = ["2330", "2317", "2454", "2881", "2882", "2891",
+                      "2603", "3008", "2412", "1301", "2308", "2382"]
+
+
+def _stress_ranked_codes():
+    """Warrant codes across STRESS_UNDERLYINGS, with names — from cache if
+    another instance already computed it, else scanned fresh (via the same
+    _warrant_codes_for + _mis_volumes pair _subscribe_top_liquid uses for one
+    underlying) and cached. Order depends on STRESS_MODE: "liquid" ranks by
+    traded volume (MIS), "code" always uses sorted code order."""
+    if STRESS_RANK_CACHE and os.path.exists(STRESS_RANK_CACHE):
+        with open(STRESS_RANK_CACHE) as f:
+            rows = json.load(f)
+        for code, name in rows:
+            _names[code] = name
+        return [code for code, _ in rows]
+
+    global _ranking
+    rest = _sdk.marketdata.rest_client.stock
+    all_warrants = (rest.intraday.tickers(type="WARRANT", market="TSE") or {}).get("data") or []
+    name_by_code = {r["symbol"]: r["name"] for r in all_warrants if r.get("symbol") and r.get("name")}
+
+    pool = set()
+    for stock in STRESS_UNDERLYINGS:
+        _ranking = f"stress test: finding warrants for {stock}…"
+        _, codes = _warrant_codes_for(stock)
+        pool.update(codes)
+    for code in pool:
+        if code in name_by_code:
+            _names[code] = name_by_code[code]
+
+    # Sorted (not set-order) so that, absent a shared cache file, independent
+    # instances still agree on one ordering to slice by STRESS_OFFSET.
+    pool = sorted(pool)
+
+    if STRESS_MODE == "code":
+        ranked = pool
+    else:
+        _ranking = f"stress test: ranking {len(pool)} warrants by volume…"
+        vols = _mis_volumes(pool)
+        if any(vols.values()):
+            ranked = sorted(pool, key=lambda c: vols.get(c, 0), reverse=True)
+        else:
+            # MIS unavailable — fall back to the deterministic sorted order so
+            # every instance still slices the same underlying list consistently.
+            ranked = pool
+
+    if STRESS_RANK_CACHE:
+        tmp = STRESS_RANK_CACHE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump([[c, _names.get(c, "-")] for c in ranked], f)
+        os.replace(tmp, STRESS_RANK_CACHE)
+
+    return ranked
+
+
+def _stress_subscribe():
+    """One-off probe: subscribe as many warrant codes as it takes to hit the
+    server's real per-connection cap (or STRESS_TARGET), to check the cap
+    against the newly-published 7-connections x 300-subs figure.
+
+    Only runs when FUBON_VIEWER_STRESS_TARGET is set. Ranked by traded volume
+    (same MIS source as _subscribe_top_liquid) rather than raw listing order,
+    so each slice actually has live books instead of dead warrants nobody has
+    quoted today. Also REST-seeds each code (same _seed_from_rest _track
+    normally calls) so a book shows its current snapshot immediately instead
+    of sitting blank until the books channel happens to push a change.
+    """
+    global _ranking
+    try:
+        _ranking = "stress test: listing all warrants…"
+        ranked = _stress_ranked_codes()
+        codes = ranked[STRESS_OFFSET:STRESS_OFFSET + STRESS_TARGET]
+        print(f"STRESS: pool of {len(codes)} warrant codes (by volume), "
+              f"offset {STRESS_OFFSET}, target {STRESS_TARGET}", flush=True)
+
+        for i, code in enumerate(codes, 1):
+            if code in _tracked:
+                continue
+            _tracked.append(code)
+            _ws.subscribe({"channel": BOOKS_CHANNEL, "symbol": code})
+            time.sleep(0.03)  # let subscribed/error frames land before checking
+            with _lock:
+                err = _last_error
+            if err and "1001" in err:
+                print(f"STRESS: capped at {i} attempts ({len(_sub_ids)} confirmed): {err}",
+                      flush=True)
+                _ranking = f"stress test: hit cap at {i} attempts — {err}"
+                return
+            _seed_from_rest(code)
+            if i % 50 == 0:
+                print(f"STRESS: {i}/{len(codes)} attempted, {len(_sub_ids)} confirmed", flush=True)
+                _ranking = f"stress test: {i}/{len(codes)} attempted, {len(_sub_ids)} confirmed"
+
+        print(f"STRESS: reached target, {len(_sub_ids)} confirmed, no error", flush=True)
+        _ranking = f"stress test: reached target ({len(_sub_ids)}), no cap hit"
+    except Exception as e:
+        print(f"STRESS: failed: {type(e).__name__}: {e}", flush=True)
+        _ranking = f"stress test failed: {e}"
 
 
 def _ladder(code):
@@ -452,10 +711,15 @@ def index():
   body { font-family: sans-serif; padding: 2rem; }
   h1 { margin: 0 0 .3rem; }
   .status { color: #555; margin-bottom: 1rem; }
-  .book { display: inline-block; vertical-align: top; margin: 0 1.5rem 1.5rem 0; }
-  .book h3 { margin: 0 0 .4rem; font-size: 1rem; }
-  table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
-  th, td { padding: .25rem .7rem; text-align: right; border-bottom: 1px solid #eee; }
+  #books { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 1rem 1.5rem; align-items: start; }
+  .book { border: 1px solid #eee; border-radius: 6px; padding: .6rem .8rem; min-height: 15rem;
+           display: flex; flex-direction: column; min-width: 0; box-sizing: border-box;
+           overflow-x: auto; }
+  .book h3 { margin: 0 0 .4rem; font-size: .85rem; line-height: 1.25; min-height: 3.75em;
+             white-space: normal; overflow-wrap: break-word; }
+  table { border-collapse: collapse; font-variant-numeric: tabular-nums; width: 100%; }
+  th, td { padding: .25rem .5rem; text-align: right; border-bottom: 1px solid #eee;
+           white-space: nowrap; }
   th { font-size: .7rem; text-transform: uppercase; color: #888; font-weight: 500; }
   .bid { color: #146b52; } .ask { color: #a83b2b; }
   tr.best td { font-weight: 700; }
@@ -488,40 +752,133 @@ function age(b) {
   return b.src === "rest" ? "snapshot, book " + t + " old" : "updated " + t + " ago";
 }
 
+// At a couple hundred tracked warrants, a full innerHTML rebuild of every
+// book (5 rows x 5 cells each) on every poll thrashes the DOM badly enough
+// to freeze the tab. Instead each book div is created once and kept; polls
+// only touch the specific <td>/text nodes whose value actually changed, so
+// idle books (most of them, most polls) cost nothing to redraw.
+var bookEls = {};             // code -> {root, rows: [{bs,bp,ap,as}...], meta, waiting}
+var lastText = new WeakMap(); // element -> last string written, to skip no-op writes
+
+function setText(el, s) {
+  if (lastText.get(el) !== s) {
+    el.textContent = s;
+    lastText.set(el, s);
+  }
+}
+
+function buildBook(b) {
+  var root = document.createElement("div");
+  root.className = "book";
+
+  var h3 = document.createElement("h3");
+  root.appendChild(h3);
+
+  var table = document.createElement("table");
+  table.innerHTML = "<tr><th>Bid Vol</th><th>Bid</th><th></th><th>Ask</th><th>Ask Vol</th></tr>";
+
+  var rows = [];
+  for (var i = 0; i < 5; i++) {
+    var tr = document.createElement("tr");
+    var bs = document.createElement("td"); bs.className = "bid";
+    var bp = document.createElement("td"); bp.className = "bid";
+    var lv = document.createElement("td"); lv.className = "lv"; lv.textContent = i + 1;
+    var ap = document.createElement("td"); ap.className = "ask";
+    var as = document.createElement("td"); as.className = "ask";
+    tr.appendChild(bs); tr.appendChild(bp); tr.appendChild(lv); tr.appendChild(ap); tr.appendChild(as);
+    table.appendChild(tr);
+    rows.push({ tr: tr, bs: bs, bp: bp, ap: ap, as: as });
+  }
+  root.appendChild(table);
+
+  var meta = document.createElement("div");
+  meta.className = "meta";
+  var metaText = document.createTextNode("");
+  var removeLink = document.createElement("a");
+  removeLink.textContent = "remove";
+  removeLink.href = "/remove/" + b.code;
+  meta.appendChild(metaText);
+  meta.appendChild(document.createTextNode("  "));
+  meta.appendChild(removeLink);
+  root.appendChild(meta);
+
+  return { root: root, h3: h3, table: table, rows: rows, meta: metaText, name: null };
+}
+
+// Every book always renders all 5 rows (dashes if no data yet) so books
+// stay a uniform height and line up cleanly across the grid.
+function patchBook(el, b, idx) {
+  var title = (idx + 1) + ". " + b.code + "  " + b.name;
+  if (el.name !== title) { el.h3.textContent = title; el.name = title; }
+
+  for (var i = 0; i < el.rows.length; i++) {
+    var r = b.rows[i], slot = el.rows[i];
+    slot.tr.className = (r && r.level === 1) ? "best" : "";
+    setText(slot.bs, cell(r ? r.bid_size : null));
+    setText(slot.bp, cell(r ? r.bid : null));
+    setText(slot.ap, cell(r ? r.ask : null));
+    setText(slot.as, cell(r ? r.ask_size : null));
+  }
+
+  var metaStr = b.age === null ? "no data yet" : age(b);
+  if (el.meta.data !== metaStr) el.meta.data = metaStr;
+}
+
 function render(d) {
   var dot = d.state === "connected" ? "ok" : (d.state === "connecting" ? "warn" : "bad");
   var subs = d.subs + "/" + d.max_subs + (d.subs_confirmed ? "" : "?");
-  document.getElementById("status").innerHTML =
-    "<span class='dot " + dot + "'></span><b>" + d.state + "</b>"
+  var statusHtml = "<span class='dot " + dot + "'></span><b>" + d.state + "</b>"
     + " &nbsp;|&nbsp; subscriptions <b>" + subs + "</b>"
     + " &nbsp;|&nbsp; connections <b>" + d.connections + "/" + d.max_connections + "</b>"
     + " &nbsp;|&nbsp; messages <b>" + d.messages.toLocaleString() + "</b>"
     + (d.ranking ? " &nbsp;|&nbsp; " + d.ranking : "")
     + (d.error ? " &nbsp;|&nbsp; <span class='down'>" + d.error + "</span>" : "");
+  var statusEl = document.getElementById("status");
+  if (statusEl._last !== statusHtml) { statusEl.innerHTML = statusHtml; statusEl._last = statusHtml; }
 
-  document.getElementById("books").innerHTML = d.books.map(function (b) {
-    var body = b.rows.length === 0
-      ? "<tr><td colspan=5 style='color:#888;text-align:center'>waiting for book…</td></tr>"
-      : b.rows.map(function (r) {
-          return "<tr class='" + (r.level === 1 ? "best" : "") + "'>"
-            + "<td class='bid'>" + cell(r.bid_size) + "</td>"
-            + "<td class='bid'>" + cell(r.bid) + "</td>"
-            + "<td class='lv'>" + r.level + "</td>"
-            + "<td class='ask'>" + cell(r.ask) + "</td>"
-            + "<td class='ask'>" + cell(r.ask_size) + "</td></tr>";
-        }).join("");
+  var container = document.getElementById("books");
+  var seen = {};
+  d.books.forEach(function (b, idx) {
+    seen[b.code] = true;
+    var el = bookEls[b.code];
+    if (!el) {
+      el = bookEls[b.code] = buildBook(b);
+      container.appendChild(el.root);
+    }
+    patchBook(el, b, idx);
+  });
 
-    return "<div class='book'><h3>" + b.code + " &nbsp;" + b.name + "</h3>"
-      + "<table><tr><th>Bid Vol</th><th>Bid</th><th></th><th>Ask</th><th>Ask Vol</th></tr>"
-      + body + "</table>"
-      + "<div class='meta'>" + (b.age === null ? "no data yet" : age(b))
-      + " &nbsp;<a href='/remove/" + b.code + "'>remove</a></div></div>";
-  }).join("") || "<p>No codes tracked yet.</p>";
+  // Drop books no longer tracked (removed via /remove) so the DOM doesn't
+  // accumulate stale nodes as codes are added/removed over a session.
+  Object.keys(bookEls).forEach(function (code) {
+    if (!seen[code]) {
+      container.removeChild(bookEls[code].root);
+      delete bookEls[code];
+    }
+  });
+
+  if (d.books.length === 0 && !container.querySelector("p")) {
+    container.innerHTML = "<p>No codes tracked yet.</p>";
+  } else if (d.books.length > 0) {
+    var stray = container.querySelector("p");
+    if (stray) container.removeChild(stray);
+  }
 }
 
+// Guard against overlapping requests: at high subscription counts the /data
+// payload is large enough that a slow fetch could still be in flight when
+// the next timer fires, and stacking fetches only makes things worse.
+var inFlight = false;
 function poll() {
-  fetch("/data").then(function (r) { return r.json(); }).then(render)
-    .catch(function () { document.getElementById("status").textContent = "server unreachable"; });
+  if (inFlight) return;
+  inFlight = true;
+  fetch("/data").then(function (r) { return r.json(); }).then(function (d) {
+    inFlight = false;
+    render(d);
+  }).catch(function () {
+    inFlight = false;
+    document.getElementById("status").textContent = "server unreachable";
+  });
 }
 poll();
 setInterval(poll, 500);
@@ -536,7 +893,7 @@ def _track(code):
     _tracked.append(code)
     # Subscribe first, then seed: a frame arriving during the REST call is
     # newer than the snapshot, and _seed_from_rest won't overwrite it.
-    _stock.subscribe({"channel": BOOKS_CHANNEL, "symbol": code})
+    _ws.subscribe({"channel": BOOKS_CHANNEL, "symbol": code})
     print(f"WS: subscribed {code}", flush=True)
     _seed_from_rest(code)
 
@@ -557,7 +914,7 @@ def remove(code):
             sub_id = _sub_ids.get(code)
         try:
             if sub_id:
-                _stock.unsubscribe({"id": sub_id})
+                _ws.unsubscribe({"id": sub_id})
             else:
                 print(f"WS: no subscription id for {code}, cannot unsubscribe", flush=True)
         except Exception as e:
@@ -603,7 +960,12 @@ if __name__ == "__main__":
     else:
         # Threaded: the scan sweeps ~1200 codes over TWSE MIS, so the page
         # should come up and say what it's doing rather than wait for it.
-        threading.Thread(target=_subscribe_top_liquid, daemon=True).start()
+        if MARKET == "futopt":
+            threading.Thread(target=_subscribe_near_money_options, daemon=True).start()
+        elif STRESS_TARGET:
+            threading.Thread(target=_stress_subscribe, daemon=True).start()
+        else:
+            threading.Thread(target=_subscribe_top_liquid, daemon=True).start()
         threading.Thread(target=_poll_subscriptions, daemon=True).start()
 
     held.close()  # released immediately before app.run() rebinds it
@@ -612,7 +974,7 @@ if __name__ == "__main__":
     finally:
         if _sdk is not None:
             try:
-                _stock.disconnect()
+                _ws.disconnect()
                 _sdk.logout()
                 print("WS: logged out", flush=True)
             except Exception as e:

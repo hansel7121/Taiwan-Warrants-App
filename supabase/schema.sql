@@ -221,6 +221,23 @@ alter table cmoney_key enable row level security;
 -- explicitly (only to service_role — anon/authenticated stay blocked by RLS).
 grant all on md_batches, md_warrants, md_tw_options, md_us_options, md_warrant_universe, cmoney_key to service_role;
 
+-- Encrypted Fubon login storage (scripts/fubon_quote_viewer.py), keyed by
+-- label so more than one account can be stored without a schema change.
+-- encrypted_fields is a Fernet token over {fubon_id, fubon_password,
+-- cert_password}, keyed by the BROKER_CRED_KEY env var — see migration 022.
+-- Same server-only RLS pattern as md_* / cmoney_key above. The .p12 cert
+-- itself lives in the private "broker-certs" Storage bucket at
+-- fubon/{label}/cert.p12 (bucket created by hand in the dashboard).
+create table if not exists fubon_credentials (
+  label text primary key,
+  encrypted_fields text not null,
+  cert_path text,
+  created_at timestamptz default now(),
+  updated_at timestamptz not null default now()
+);
+alter table fubon_credentials enable row level security;
+grant all on fubon_credentials to service_role;
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- USER-MODE dashboard tables (migration 005_user_dashboard.sql).
 -- Per-user and RLS-scoped like `portfolio`, NOT shared like the product tables.
