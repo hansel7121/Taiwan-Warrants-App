@@ -29,13 +29,8 @@ _JWKS_TIMEOUT_SEC = float(os.environ.get("JWKS_TIMEOUT_SEC", "5"))
 
 
 def local_mode():
-    """True on a local redundancy instance that acts as a fixed user with no login.
-
-    Enabled only when LOCAL_USER_ID is set AND we are not on Render. Computed at
-    call time (not import) so tests can toggle env. On Render, RENDER is set so
-    this is always False and production auth is untouched.
-    """
-    return bool(os.environ.get("LOCAL_USER_ID")) and not os.environ.get("RENDER")
+    """True only when APP_ENV=local and LOCAL_USER_ID is set; computed at call time so tests can toggle env."""
+    return os.environ.get("APP_ENV") == "local" and bool(os.environ.get("LOCAL_USER_ID"))
 
 
 def public_config():
@@ -96,7 +91,7 @@ def require_auth(fn):
     def wrapper(*args, **kwargs):
         if local_mode():
             # Local redundancy instance: act as the fixed LOCAL_USER_ID, skipping
-            # token verification and the allowlist entirely. Guarded by RENDER so
+            # token verification and the allowlist entirely. Guarded by APP_ENV so
             # this branch is dead on production.
             g.user = {
                 "id": os.environ["LOCAL_USER_ID"],

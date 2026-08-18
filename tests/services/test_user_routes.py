@@ -9,7 +9,7 @@ import os
 import pytest
 
 os.environ.setdefault("LOCAL_USER_ID", "test-user-a")
-os.environ.pop("RENDER", None)
+os.environ["APP_ENV"] = "local"
 
 import app as app_module  # noqa: E402  (env must be set before import)
 from services import db_user  # noqa: E402

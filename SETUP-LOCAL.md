@@ -58,10 +58,13 @@ portfolio if Render is down.
    SUPABASE_SERVICE_ROLE_KEY=...
    SUPABASE_JWT_SECRET=...
 
+   APP_ENV=local
    LOCAL_USER_ID=<your UUID from Part A step 3>
    LOCAL_USER_EMAIL=you@example.com
    ```
-   `LOCAL_USER_ID` set + `RENDER` unset is what enables no-login local mode.
+   `APP_ENV=local` + `LOCAL_USER_ID` set is what enables no-login local mode. Leaving
+   `APP_ENV` unset (or setting it to `production`) always requires real login, even
+   if `LOCAL_USER_ID` is present.
 
 3. **Put your existing `portfolio.json` in the repo root, then back it up:**
    ```bash

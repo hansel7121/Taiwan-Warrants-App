@@ -19,6 +19,10 @@ services:
       # Serve market data from Supabase snapshots, falling back to live fetch when empty/unconfigured.
       - key: MARKET_SOURCE
         value: "supabase"
+      # Positive env check for local_mode()/store.py mirroring (services/auth.py) —
+      # must be "production" here so this deploy stays a no-op.
+      - key: APP_ENV
+        value: "production"
       # Paste these in the Render dashboard — never commit real values.
       - key: SUPABASE_URL
         sync: false

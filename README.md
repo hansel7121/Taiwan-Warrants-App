@@ -127,7 +127,7 @@ batch leaks into the results and counts come out inflated (e.g. ~1580 locally vs
 ~1407 on the UTC deploy). The `TZ` prefix scopes Taiwan time to this process only
 — it does not change your computer's clock.
 
-**No-login local mode.** With `LOCAL_USER_ID` set in `.env` and `RENDER` unset, the
+**No-login local mode.** With `APP_ENV=local` and `LOCAL_USER_ID` set in `.env`, the
 app runs with no login and acts as that fixed user, syncing its portfolio with the
 shared Supabase. `.env` lives at the **repo root** (loaded by `services/db.py`). See
 [`SETUP-LOCAL.md`](SETUP-LOCAL.md) for the full local-redundancy setup and seeding steps.
