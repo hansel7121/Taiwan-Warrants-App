@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 os.environ.setdefault("LOCAL_USER_ID", "user-a")
-os.environ.pop("RENDER", None)
+os.environ["APP_ENV"] = "local"
 
 import app as app_module  # noqa: E402
 from logic import options_logic  # noqa: E402

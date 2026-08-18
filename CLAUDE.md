@@ -49,7 +49,7 @@ Stop the dev server with `Ctrl+C` (or `pkill -f "python app.py"`).
 
 - **Always set `TZ=Asia/Taipei`.** Days-to-expiry is computed against the machine's local "today". West of Taiwan (e.g. US Pacific), the local date lags Taiwan for part of the day, so an already-expired batch leaks into results and counts inflate (~1580 locally vs ~1407 on the UTC deploy). The `TZ` prefix scopes Taiwan time to this process only.
 - **Exactly 1 gunicorn worker.** Market-data caches live in process memory and would diverge across workers; the APScheduler jobs share those caches too. Use threads for concurrency, never extra workers.
-- **No-login local mode.** With `LOCAL_USER_ID` set in `.env` and `RENDER` unset, the app runs with no login and acts as that fixed user, syncing its portfolio with the shared Supabase (`services/auth.py::local_mode`). `.env` lives at the repo root (loaded by `services/db.py`). See `SETUP-LOCAL.md`.
+- **No-login local mode.** With `APP_ENV=local` and `LOCAL_USER_ID` set in `.env`, the app runs with no login and acts as that fixed user, syncing its portfolio with the shared Supabase (`services/auth.py::local_mode`). `.env` lives at the repo root (loaded by `services/db.py`). See `SETUP-LOCAL.md`.
 - **macOS:** if gunicorn workers die with `objc ... fork()` errors on yfinance routes, prefix with `OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES`. Linux is unaffected.
 
 ## Architecture

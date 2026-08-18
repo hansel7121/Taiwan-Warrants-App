@@ -1157,9 +1157,10 @@ def straddle_arbitrage_csv():
     )
 
 
-# RENDER_GIT_* are injected by Render into the running service; absent locally.
-_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "dev")[:7]
-_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "dev"
+# SOURCE_COMMIT is Coolify's build-time equivalent of Render's RENDER_GIT_COMMIT;
+# absent locally and until the Hetzner/Coolify deploy passes it through.
+_COMMIT = (os.environ.get("SOURCE_COMMIT") or "dev")[:7]
+_BRANCH = os.environ.get("SOURCE_BRANCH") or "dev"
 
 
 def _asset_version():
@@ -1305,7 +1306,7 @@ if __name__ == "__main__":
     print("Step 1: resolving port", flush=True)
     port = _resolve_port(int(os.environ.get("PORT", 5001)))
     print(f"Step 2: starting browser timer (port {port})", flush=True)
-    if not os.environ.get("RENDER"):
+    if os.environ.get("APP_ENV") != "production":
         threading.Timer(1.5, lambda: open_browser(port)).start()
     print("Step 3: starting cmoney key prefetch", flush=True)
     warrant_logic.prefetch_cmoney_key()
