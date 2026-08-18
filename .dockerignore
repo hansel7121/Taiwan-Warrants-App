@@ -1,0 +1,15 @@
+.git/
+.claude/
+.venv/
+.env
+.DS_Store
+__pycache__/
+*.pyc
+portfolio.json
+portfolio.json.backup
+custom_stocks.json
+local_certs/
+log/
+notebooks/
+tests/
+arb_finder_report.pdf
