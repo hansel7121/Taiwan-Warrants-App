@@ -170,6 +170,7 @@ function restoreView() {
     if (btn && document.getElementById("tab-" + tab)) {
       switchTab(tab, btn);
       if (tab === "portfolio" && typeof loadPortfolioOnce === "function") loadPortfolioOnce();
+      if (tab === "live" && typeof loadLiveWarrantOnce === "function") loadLiveWarrantOnce();
       if (tab === "dashboard") loadDashboardOnce();
     }
   }

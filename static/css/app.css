@@ -330,6 +330,19 @@ tbody tr.row-pinned td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .call { color: var(--call); font-weight: 600; }
 .put  { color: var(--put);  font-weight: 600; }
 
+/* ── Live Warrant tab ── */
+#tab-live .bid { color: var(--put); }
+#tab-live .ask { color: var(--call); }
+#tab-live .dot { display: inline-block; width: .6rem; height: .6rem; border-radius: 50%;
+                 margin-right: .45rem; vertical-align: baseline; }
+#tab-live .dot.ok { background: var(--put); }
+#tab-live .dot.warn { background: #d9822b; }
+#tab-live .down { color: var(--call); }
+#tab-live .live-toggle { width: 1.2em; text-align: center; color: var(--muted); }
+#tab-live .live-ladder-row td { background: var(--surface); padding: 6px 10px 10px 28px; }
+#tab-live table.live-ladder { width: auto; margin: 0; }
+#tab-live table.live-ladder th, #tab-live table.live-ladder td { padding: 3px 10px; font-size: 11.5px; }
+
 /* ── IV plot ── */
 #iv-plot {
   width: 100%;
