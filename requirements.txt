@@ -17,4 +17,4 @@ supabase==2.31.0
 PyJWT[crypto]==2.13.0
 cryptography==49.0.0
 pytest==8.4.2
-fubon-neo==2.2.8
+./vendor/fubon_neo-2.2.8-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
