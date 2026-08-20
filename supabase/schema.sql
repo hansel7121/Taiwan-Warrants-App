@@ -238,6 +238,25 @@ create table if not exists fubon_credentials (
 alter table fubon_credentials enable row level security;
 grant all on fubon_credentials to service_role;
 
+-- Live Warrant tab's shared tracked-code list (migration 023). Same
+-- server-only RLS pattern as warrant_stocks/arb_suggestions. source
+-- distinguishes a Liquidity Scan row (replaced on the next scan of the same
+-- underlying) from a manually-added row (never touched by any scan); see
+-- logic/live_warrant_logic.py::scan_replace.
+create table if not exists live_warrant_tracked (
+  code text primary key,
+  name text,
+  source text not null check (source in ('scan', 'manual')),
+  underlying text,
+  created_at timestamptz not null default now(),
+  constraint live_warrant_tracked_underlying_only_for_scan
+    check (source = 'scan' or underlying is null)
+);
+create index if not exists live_warrant_tracked_underlying_idx
+  on live_warrant_tracked (underlying) where source = 'scan';
+alter table live_warrant_tracked enable row level security;
+grant all on live_warrant_tracked to service_role;
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- USER-MODE dashboard tables (migration 005_user_dashboard.sql).
 -- Per-user and RLS-scoped like `portfolio`, NOT shared like the product tables.

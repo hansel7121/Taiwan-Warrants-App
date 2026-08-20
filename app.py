@@ -14,7 +14,9 @@ from services import db_suggestions
 from services import db_user
 from services import roles
 from services import store
+from services import live_warrant
 from logic import arb_logic
+from logic import live_warrant_logic
 from logic import static_arb
 # Aliased: the route functions below are named iv_surface / close_quote.
 from logic import iv_surface as iv_surface_logic
@@ -535,6 +537,66 @@ def remove_us_option_product():
         return jsonify({"error": "code required"}), 400
     db_products.remove_us_option_product(code)
     us_options_logic.invalidate_adr_map_cache()
+    return jsonify({"ok": True})
+
+
+@app.route("/live_warrant_data")
+@require_auth
+@require_role(ADMIN)
+def live_warrant_data():
+    return jsonify(live_warrant.get_data())
+
+
+@app.route("/add_live_warrant", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def add_live_warrant():
+    data = request.json or {}
+    code = (data.get("code") or "").strip()
+    if not code:
+        return jsonify({"error": "code required"}), 400
+    try:
+        live_warrant.add_code(code)
+    except live_warrant_logic.CapacityExceededError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True})
+
+
+@app.route("/remove_live_warrant", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def remove_live_warrant():
+    data = request.json or {}
+    code = (data.get("code") or "").strip()
+    if not code:
+        return jsonify({"error": "code required"}), 400
+    live_warrant.remove_code(code)
+    return jsonify({"ok": True})
+
+
+@app.route("/scan_live_warrant", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def scan_live_warrant():
+    data = request.json or {}
+    underlying = (data.get("underlying") or "").strip()
+    top_n = data.get("top_n")
+    if not underlying or not top_n:
+        return jsonify({"error": "underlying, top_n required"}), 400
+    try:
+        result = live_warrant.scan_underlying(underlying, int(top_n))
+    except live_warrant_logic.CapacityExceededError as e:
+        return jsonify({"error": str(e)}), 400
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, **result})
+
+
+@app.route("/reconnect_live_warrant", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def reconnect_live_warrant():
+    live_warrant.reconnect()
     return jsonify({"ok": True})
 
 
