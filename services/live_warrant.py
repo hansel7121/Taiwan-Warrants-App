@@ -50,8 +50,16 @@ _session_error = None  # set when the session can't even start (e.g. no credenti
 # ─────────────────────────────────────────────────────────────────────────────
 # Login / connection lifecycle
 # ─────────────────────────────────────────────────────────────────────────────
-def _login_new_connection(idx):
-    """Log in fresh and open one websocket connection bound to pool index `idx`. Raises on any failure."""
+def _login_new_connection():
+    """Log in fresh and open one websocket connection. Raises on any failure.
+
+    Callbacks close over the `conn` dict directly, not a list index: the
+    "authenticated" control message arrives during ws.connect()'s blocking
+    handshake, before this connection exists in `_connections`, so indexing
+    into the list from the callback would IndexError inside the SDK's own
+    callback thread — which silently starves connect()'s wait loop into an
+    "authentication timeout" instead of surfacing the real error.
+    """
     creds = broker_credentials.get_credential(FUBON_CRED_LABEL)
     if creds is None:
         raise RuntimeError(f"no fubon_credentials row for label '{FUBON_CRED_LABEL}'")
@@ -79,11 +87,12 @@ def _login_new_connection(idx):
 
         sdk.init_realtime()
         ws = sdk.marketdata.websocket_client.stock
+        conn = {"sdk": sdk, "ws": ws, "codes": set(), "sub_ids": {}, "state": "connecting", "last_error": None}
         # Before connect(): the socket starts emitting as soon as it authenticates.
-        ws.on("message", lambda raw, i=idx: _handle_message(i, raw))
-        ws.on("connect", lambda *a, i=idx, **k: _on_connect(i))
-        ws.on("disconnect", lambda *a, i=idx, **k: _on_disconnect(i))
-        ws.on("error", lambda *a, i=idx, **k: _on_error(i, a, k))
+        ws.on("message", lambda raw: _handle_message(conn, raw))
+        ws.on("connect", lambda *a, **k: _on_connect(conn))
+        ws.on("disconnect", lambda *a, **k: _on_disconnect(conn))
+        ws.on("error", lambda *a, **k: _on_error(conn, a, k))
         ws.connect()
     finally:
         try:
@@ -91,7 +100,7 @@ def _login_new_connection(idx):
         except OSError:
             pass
 
-    return {"sdk": sdk, "ws": ws, "codes": set(), "sub_ids": {}, "state": "connecting", "last_error": None}
+    return conn
 
 
 def _ensure_connection(idx):
@@ -99,13 +108,14 @@ def _ensure_connection(idx):
     with _lock:
         if idx < len(_connections):
             return _connections[idx]
-    conn = _login_new_connection(idx)
+    conn = _login_new_connection()
     with _lock:
+        conn["index"] = len(_connections)
         _connections.append(conn)
     return conn
 
 
-def _handle_message(idx, raw):
+def _handle_message(conn, raw):
     """Fold one books message into the shared cache; the SDK hands us the raw frame."""
     import json
     try:
@@ -115,7 +125,7 @@ def _handle_message(idx, raw):
 
     event = message.get("event")
     if event != "data" or message.get("channel") != BOOKS_CHANNEL:
-        _handle_control(idx, event, message)
+        _handle_control(conn, event, message)
         return
 
     data = message.get("data") or {}
@@ -131,43 +141,42 @@ def _handle_message(idx, raw):
         }
 
 
-def _handle_control(idx, event, message):
+def _handle_control(conn, event, message):
     """Track this connection's own subscription ids and errors — unsubscribe needs the id, not the symbol."""
     data = message.get("data") or {}
     with _lock:
-        conn = _connections[idx]
         if event == "subscribed":
             conn["sub_ids"][data.get("symbol")] = data.get("id")
         elif event == "unsubscribed":
             conn["sub_ids"].pop(data.get("symbol"), None)
         elif event == "error":
             conn["last_error"] = f"{message.get('code', '?')}: {data.get('message', message)}"
-            print(f"LIVEWARRANT: conn {idx} error {conn['last_error']}", flush=True)
+            print(f"LIVEWARRANT: conn {conn.get('index', '?')} error {conn['last_error']}", flush=True)
 
 
-def _on_connect(idx):
+def _on_connect(conn):
     with _lock:
-        _connections[idx]["state"] = "connected"
-    print(f"LIVEWARRANT: conn {idx} connected", flush=True)
+        conn["state"] = "connected"
+    print(f"LIVEWARRANT: conn {conn.get('index', '?')} connected", flush=True)
 
 
-def _on_disconnect(idx):
+def _on_disconnect(conn):
     with _lock:
-        was_connected = _connections[idx]["state"] == "connected"
-        _connections[idx]["state"] = "disconnected"
-    print(f"LIVEWARRANT: conn {idx} disconnected", flush=True)
+        was_connected = conn["state"] == "connected"
+        conn["state"] = "disconnected"
+    print(f"LIVEWARRANT: conn {conn.get('index', '?')} disconnected", flush=True)
     if was_connected:
-        threading.Thread(target=_reconnect_connection, args=(idx,), daemon=True).start()
+        threading.Thread(target=_reconnect_connection, args=(conn,), daemon=True).start()
 
 
-def _on_error(idx, args, kwargs):
+def _on_error(conn, args, kwargs):
     with _lock:
-        _connections[idx]["state"] = "error"
-        _connections[idx]["last_error"] = "; ".join(str(x) for x in args) or repr(kwargs)
-    print(f"LIVEWARRANT: conn {idx} error {args!r} {kwargs!r}", flush=True)
+        conn["state"] = "error"
+        conn["last_error"] = "; ".join(str(x) for x in args) or repr(kwargs)
+    print(f"LIVEWARRANT: conn {conn.get('index', '?')} error {args!r} {kwargs!r}", flush=True)
 
 
-def _reconnect_connection(idx):
+def _reconnect_connection(conn):
     """A single connection's own auto-heal: re-login and resubscribe its own codes.
 
     Other connections are untouched — a transient blip on one socket must not
@@ -175,13 +184,17 @@ def _reconnect_connection(idx):
     the connection in "error" state for the manual Reconnect (whole-session
     restart) to recover.
     """
+    idx = conn.get("index", "?")
     for attempt in range(1, RECONNECT_RETRIES + 1):
         with _lock:
-            codes = set(_connections[idx]["codes"])
+            codes = set(conn["codes"])
         try:
-            new_conn = _login_new_connection(idx)
+            new_conn = _login_new_connection()
             with _lock:
-                _connections[idx] = new_conn
+                if conn not in _connections:
+                    return  # torn down or already replaced while we were reconnecting
+                new_conn["index"] = idx
+                _connections[_connections.index(conn)] = new_conn
             for code in codes:
                 new_conn["ws"].subscribe({"channel": BOOKS_CHANNEL, "symbol": code})
                 with _lock:
@@ -193,8 +206,8 @@ def _reconnect_connection(idx):
             time.sleep(RECONNECT_BACKOFF_S * attempt)
 
     with _lock:
-        _connections[idx]["state"] = "error"
-        _connections[idx]["last_error"] = "auto-reconnect exhausted retries"
+        conn["state"] = "error"
+        conn["last_error"] = "auto-reconnect exhausted retries"
     print(f"LIVEWARRANT: conn {idx} auto-reconnect exhausted retries", flush=True)
 
 
@@ -370,10 +383,10 @@ def scan_underlying(underlying, top_n):
 # Liquidity ranking (adapted from scripts/fubon_quote_viewer.py)
 # ─────────────────────────────────────────────────────────────────────────────
 def _rest_client():
-    with _lock:
-        if not _connections:
-            raise RuntimeError("live session not connected")
-        return _connections[0]["sdk"].marketdata.rest_client.stock
+    """REST client for liquidity-scan queries — lazily opens connection 0 if the
+    pool is still empty (e.g. the very first scan, before anything is tracked)."""
+    conn = _ensure_connection(0)
+    return conn["sdk"].marketdata.rest_client.stock
 
 
 def _warrant_codes_for(stock_code):
