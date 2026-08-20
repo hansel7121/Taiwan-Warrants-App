@@ -20,7 +20,7 @@ FEATURES = {
     "scanner": USER,
     "options": USER,
     "ivsurface": USER,
-    "live": USER,
+    "live": ADMIN,
     "dashboard": USER,
     "watchlist": USER,
     "alerts": USER,

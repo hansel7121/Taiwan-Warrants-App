@@ -8,7 +8,7 @@ const FEATURES = {
   scanner: "user",
   options: "user",
   ivsurface: "user",
-  live: "user",
+  live: "admin",
   dashboard: "user",
   watchlist: "user",
   alerts: "user",
