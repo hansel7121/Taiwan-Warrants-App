@@ -159,7 +159,7 @@ function renderHomePnl() {
   });
   const css = getComputedStyle(document.documentElement);
   const pos = css.getPropertyValue("--put").trim() || "#4ade80";
-  const muted = css.getPropertyValue("--muted").trim() || "#8b90a0";
+  const muted = css.getPropertyValue("--muted").trim() || "#7b8794";
   Plotly.react(chart, [{
     x, y, text, mode: "lines+markers", type: "scatter", fill: "tozeroy",
     fillcolor: "rgba(74,222,128,0.10)",

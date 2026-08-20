@@ -718,7 +718,7 @@ function renderPayoff() {
 
   Plotly.newPlot("payoff-chart", [{
     x: xs, y: ys, type: "scatter", mode: "lines",
-    line: { color: "#4f8ef7", width: 2 }, hovertemplate: "S %{x:.2f}<br>P&L %{y:,.0f}<extra></extra>",
+    line: { color: "#e0a137", width: 2 }, hovertemplate: "S %{x:.2f}<br>P&L %{y:,.0f}<extra></extra>",
   }], {
     margin: { l: 60, r: 20, t: 10, b: 40 },
     xaxis: { title: "Underlying price", gridcolor: "rgba(255,255,255,0.06)" },

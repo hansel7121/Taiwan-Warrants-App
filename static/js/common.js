@@ -38,10 +38,10 @@ async function api(url, opts) {
   if (res.status === 401) { location.replace("/login"); throw new Error("unauthorized"); }
   if (res.status === 403) {
     document.body.innerHTML =
-      '<div style="max-width:420px;margin:15vh auto;text-align:center;font-family:inherit;color:#e2e8f0">' +
+      '<div style="max-width:420px;margin:15vh auto;text-align:center;font-family:inherit;color:#d8dee4">' +
       '<h2 style="font-size:18px;margin-bottom:10px">Your account is not approved yet</h2>' +
-      '<p style="color:#8b90a0;font-size:13px">Ask the administrator to add your email to the allow-list.</p>' +
-      '<p style="margin-top:16px"><a href="#" onclick="_logout();return false" style="color:#4f8ef7">Sign out</a></p></div>';
+      '<p style="color:#7b8794;font-size:13px">Ask the administrator to add your email to the allow-list.</p>' +
+      '<p style="margin-top:16px"><a href="#" onclick="_logout();return false" style="color:#e0a137">Sign out</a></p></div>';
     throw new Error("not_allowed");
   }
   return res;
@@ -396,9 +396,9 @@ async function _boot() {
   if (!LOCAL_MODE && SUPABASE_URL && !_sb) {
     // Auth is configured but supabase-js never loaded (CDN blocked).
     document.body.innerHTML =
-      '<div style="max-width:420px;margin:15vh auto;text-align:center;font-family:inherit;color:#e2e8f0">' +
+      '<div style="max-width:420px;margin:15vh auto;text-align:center;font-family:inherit;color:#d8dee4">' +
       '<h2 style="font-size:18px;margin-bottom:10px">Could not load the sign-in library</h2>' +
-      '<p style="color:#8b90a0;font-size:13px">The script from cdn.jsdelivr.net was blocked. Disable ad-blockers for this site and reload.</p></div>';
+      '<p style="color:#7b8794;font-size:13px">The script from cdn.jsdelivr.net was blocked. Disable ad-blockers for this site and reload.</p></div>';
     return;
   }
   if (_sb) {

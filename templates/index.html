@@ -8,37 +8,36 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>Warrant Scanner</title>
+    <title>Withermount</title>
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v=ASSET_VERSION) }}" />
   </head>
   <body>
-    <button id="logoutBtn" onclick="_logout()" style="display:none;position:fixed;top:8px;right:12px;z-index:9999;padding:5px 10px;font-size:11px;font-family:inherit;background:var(--surface,#1a1d2a);color:var(--muted,#8b90a0);border:1px solid var(--border,#252836);border-radius:6px;cursor:pointer">Logout</button>
+    <button id="logoutBtn" onclick="_logout()" style="display:none;position:fixed;top:8px;right:12px;z-index:9999;padding:5px 10px;font-size:11px;font-family:inherit;background:var(--surface,#1b2127);color:var(--muted,#7b8794);border:1px solid var(--border,#222a31);border-radius:0;cursor:pointer">Logout</button>
     <!-- Dev-only mode switch: writes the app_mode cookie and reloads, so the
          SERVER re-renders without the admin markup/scripts. Not a security
          gate — see services/roles.py. -->
     <button id="modeBtn" onclick="toggleMode()"
             title="Switch between admin (all features) and user (scanner product) mode"
-            style="position:fixed;top:36px;right:12px;z-index:9999;padding:5px 10px;font-size:11px;font-family:inherit;background:var(--surface,#1a1d2a);color:{% if show_admin %}#fbbf24{% else %}#4f8ef7{% endif %};border:1px solid var(--border,#252836);border-radius:6px;cursor:pointer">{% if show_admin %}Admin mode{% else %}User mode{% endif %}</button>
+            style="position:fixed;top:36px;right:12px;z-index:9999;padding:5px 10px;font-size:11px;font-family:inherit;background:var(--surface,#1b2127);color:{% if show_admin %}var(--accent){% else %}var(--muted){% endif %};border:1px solid var(--border,#222a31);border-radius:0;cursor:pointer">{% if show_admin %}Admin mode{% else %}User mode{% endif %}</button>
     <header>
-      <h1>Warrant Scanner</h1>
+      <!-- Wordmark matches the marketing site: second half carries the accent. -->
+      <h1>Wither<span>mount</span></h1>
       <span class="badge">TW</span>
     </header>
 
     {% if show_admin %}
     <style>
-      #market-clock{position:fixed;right:14px;bottom:14px;z-index:900;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 11px;font-size:11px;color:var(--muted);box-shadow:0 4px 16px rgba(0,0,0,.35);min-width:150px;user-select:none}
+      #market-clock{position:fixed;right:14px;bottom:14px;z-index:900;background:var(--surface);border:1px solid var(--border);border-radius:0;padding:9px 11px;font-size:11px;color:var(--muted);box-shadow:0 4px 16px rgba(0,0,0,.35);min-width:150px;user-select:none}
       #market-clock .mc-clocks{display:flex;justify-content:space-between;gap:10px;margin-bottom:7px;padding-bottom:6px;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums}
       #market-clock .mc-clocks b{color:var(--text);font-size:12px;font-weight:700}
       #market-clock .mc-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:2px 0}
       #market-clock .mc-lbl{color:var(--muted)}
-      #market-clock .mc-badge{font-weight:700;font-size:10px;letter-spacing:.3px;text-transform:uppercase;padding:2px 7px;border-radius:10px;white-space:nowrap}
+      #market-clock .mc-badge{font-weight:700;font-size:10px;letter-spacing:.3px;text-transform:uppercase;padding:2px 7px;border-radius:0;white-space:nowrap}
       .mc-open{color:var(--put);background:rgba(74,222,128,.15)}
-      .mc-after{color:#fbbf24;background:rgba(251,191,36,.15)}
-      .mc-closed{color:var(--muted);background:rgba(139,144,160,.13)}
+      .mc-after{color:var(--accent);background:var(--accent-soft)}
+      .mc-closed{color:var(--muted);background:rgba(123,135,148,.13)}
     </style>
     <div id="market-clock" title="Local exchange time + current session">
       <div class="mc-clocks">
@@ -835,8 +834,8 @@
 
     <!-- US Option Match Info Modal -->
     <div id="usInfoModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
-      <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;max-width:780px;margin:36px auto 60px;padding:32px 36px;position:relative;line-height:1.65">
-        <button onclick="document.getElementById('usInfoModal').style.display='none'" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:0;max-width:780px;margin:36px auto 60px;padding:32px 36px;position:relative;line-height:1.65">
+        <button onclick="document.getElementById('usInfoModal').style.display='none'" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:0;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
         <h2 style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:24px">US Option Match — How It Works</h2>
         <div style="display:flex;flex-direction:column;gap:22px;font-size:13px;color:var(--text)">
           <section>
@@ -847,7 +846,7 @@
           <section>
             <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:8px">Normalization</h3>
             <p>The US option is quoted in USD per ADR. It is converted to <b>TWD per Taiwan share</b> so it lives in the same price space as the warrant:</p>
-            <div style="background:var(--surface);border-radius:6px;padding:10px 14px;margin:8px 0;font-family:monospace;font-size:13px;color:var(--text)">
+            <div style="background:var(--surface);border-radius:0;padding:10px 14px;margin:8px 0;font-family:monospace;font-size:13px;color:var(--text)">
               twd_per_tw_share = usd_per_ADR / adr_ratio × FX&nbsp;&nbsp;(FX = TWD per USD)
             </div>
             <p style="margin-top:6px">1 ADR = <code>adr_ratio</code> Taiwan shares, so one US contract (100 ADR) controls <b>100 × adr_ratio Taiwan shares</b> (500 for UMC, 1000 for CHT). Warrant units needed = contract_shares / exercise_ratio. Implied vol is scale-free, computed once on the ADR and carried over.</p>
@@ -862,8 +861,8 @@
 
     <!-- Direct Match Info Modal -->
     <div id="directInfoModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
-      <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;max-width:780px;margin:36px auto 60px;padding:32px 36px;position:relative;line-height:1.65">
-        <button onclick="document.getElementById('directInfoModal').style.display='none'" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:0;max-width:780px;margin:36px auto 60px;padding:32px 36px;position:relative;line-height:1.65">
+        <button onclick="document.getElementById('directInfoModal').style.display='none'" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:0;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
         <h2 style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:24px">Direct Match — How It Works</h2>
 
         <div style="display:flex;flex-direction:column;gap:22px;font-size:13px;color:var(--text)">
@@ -884,11 +883,11 @@
           <section>
             <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:8px">The math — why is this arbitrage?</h3>
             <p>Trade: buy warrant at ask (K<sub>w</sub>), sell option at bid (K<sub>o</sub> ≥ K<sub>w</sub>). Net cash at entry:</p>
-            <div style="background:var(--surface);border-radius:6px;padding:10px 14px;margin:8px 0;font-family:monospace;font-size:13px;color:var(--text)">
+            <div style="background:var(--surface);border-radius:0;padding:10px 14px;margin:8px 0;font-family:monospace;font-size:13px;color:var(--text)">
               Entry credit = opt_bid/share − warrant_ask/share = price_diff &gt; 0
             </div>
             <p>At expiry, payoff from the two legs for every possible spot S:</p>
-            <div style="background:var(--surface);border-radius:6px;padding:10px 14px;margin:8px 0;font-family:monospace;font-size:13px;color:var(--text)">
+            <div style="background:var(--surface);border-radius:0;padding:10px 14px;margin:8px 0;font-family:monospace;font-size:13px;color:var(--text)">
               S &lt; K<sub>w</sub>:  both expire worthless → net = price_diff &gt; 0 ✓<br>
               K<sub>w</sub> ≤ S &lt; K<sub>o</sub>: warrant pays (S−K<sub>w</sub>), option expires worthless → net = price_diff + (S−K<sub>w</sub>) &gt; 0 ✓<br>
               S ≥ K<sub>o</sub>:  warrant pays (S−K<sub>w</sub>), option costs (S−K<sub>o</sub>) → net = price_diff + (K<sub>o</sub>−K<sub>w</sub>) &gt; 0 ✓
@@ -899,7 +898,7 @@
           <section>
             <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:8px">How does the P&amp;L at expiry (dotted line) work?</h3>
             <p>The dotted line shows the trade P&L assuming you hold to expiry and both legs settle at intrinsic value (time value = 0):</p>
-            <div style="background:var(--surface);border-radius:6px;padding:10px 14px;margin:8px 0;font-family:monospace;font-size:13px;color:var(--text)">
+            <div style="background:var(--surface);border-radius:0;padding:10px 14px;margin:8px 0;font-family:monospace;font-size:13px;color:var(--text)">
               P&L at expiry = price_diff + max(0, S−K<sub>w</sub>) − max(0, S−K<sub>o</sub>)
             </div>
             <p>As shown in the math above, this is always ≥ 0 for a valid positive-direction pair (K<sub>o</sub> ≥ K<sub>w</sub>, price_diff &gt; 0). The dotted line will never go below zero for a correctly-filtered pair.</p>
@@ -908,7 +907,7 @@
           <section>
             <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:8px">How does the green line (DTE slider) work?</h3>
             <p>The green line shows the mark-to-market P&L if you were to close both positions <em>today</em> at their current Black-Scholes theoretical values, using each instrument's implied volatility:</p>
-            <div style="background:var(--surface);border-radius:6px;padding:10px 14px;margin:8px 0;font-family:monospace;font-size:13px;color:var(--text)">
+            <div style="background:var(--surface);border-radius:0;padding:10px 14px;margin:8px 0;font-family:monospace;font-size:13px;color:var(--text)">
               P&L(S, t) = price_diff + BS(S, K<sub>w</sub>, τ<sub>w</sub>, IV<sub>w</sub>) − BS(S, K<sub>o</sub>, τ<sub>o</sub>, IV<sub>o</sub>)
             </div>
             <p>Moving the slider changes τ<sub>o</sub> (time remaining on the option). The warrant's remaining time τ<sub>w</sub> = τ<sub>o</sub> + (warrant_DTE − option_DTE)/365 adjusts accordingly.</p>
@@ -931,14 +930,14 @@
 
     <!-- PCP Trade Modal -->
     <div id="pcpModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
-      <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;max-width:920px;margin:36px auto 60px;padding:28px;position:relative">
-        <button onclick="closePcpModal()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:0;max-width:920px;margin:36px auto 60px;padding:28px;position:relative">
+        <button onclick="closePcpModal()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:0;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
         <div style="position:absolute;top:16px;right:58px;display:flex;align-items:center;gap:8px">
           <label style="font-size:11px;color:var(--muted);font-weight:600">×
             <input id="pcp-trade-mult" type="number" min="1" step="1" value="1" title="Number of times to place this trade (scales every leg, cash flow and P&L)"
-              style="width:52px;margin-left:4px;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:5px 6px;font-size:13px;font-family:inherit;text-align:right">
+              style="width:52px;margin-left:4px;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:0;padding:5px 6px;font-size:13px;font-family:inherit;text-align:right">
           </label>
-          <button id="pcp-enter-trade" onclick="enterTrade()" style="background:var(--put);border:none;color:#0d0f16;border-radius:4px;padding:6px 14px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Enter Trade</button>
+          <button id="pcp-enter-trade" onclick="enterTrade()" style="background:var(--put);border:none;color:#0d1013;border-radius:0;padding:6px 14px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Enter Trade</button>
         </div>
 
         <h2 id="pcp-modal-title" style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:20px"></h2>
@@ -961,11 +960,11 @@
           </table>
           <!-- Orderbook depth (warrant leg): can the needed board lots actually
                fill at the quoted price? Best-level resting size from CMoney. -->
-          <div id="pcp-depth-panel" style="display:none;margin-top:12px;border-radius:6px;padding:10px 14px;font-size:12.5px;line-height:1.6"></div>
+          <div id="pcp-depth-panel" style="display:none;margin-top:12px;border-radius:0;padding:10px 14px;font-size:12.5px;line-height:1.6"></div>
           <!-- Net residual greeks of the paired position (Delta = directional bet
                left by strike/DTE mismatch + board-lot rounding; Vega = uncovered
                vol exposure). Computed from the per-leg IVs, popup-only. -->
-          <div id="pcp-greeks-panel" style="display:none;margin-top:12px;border-radius:6px;padding:10px 14px;font-size:12.5px;line-height:1.6;background:var(--surface);border:1px solid var(--border)"></div>
+          <div id="pcp-greeks-panel" style="display:none;margin-top:12px;border-radius:0;padding:10px 14px;font-size:12.5px;line-height:1.6;background:var(--surface);border:1px solid var(--border)"></div>
         </div>
 
         <!-- Comparison rows -->
@@ -998,7 +997,7 @@
             <div style="display:flex;align-items:center;gap:10px">
               <span style="font-size:12px;color:var(--muted)">Latest ADR premium:</span>
               <span id="us-latest-prem" style="font-size:18px;font-weight:700;font-variant-numeric:tabular-nums">—</span>
-              <span id="us-prem-flag" style="font-size:11px;padding:2px 8px;border-radius:10px"></span>
+              <span id="us-prem-flag" style="font-size:11px;padding:2px 8px;border-radius:0"></span>
             </div>
           </div>
           <p style="font-size:12px;color:var(--muted);margin:0 0 10px">
@@ -1019,7 +1018,7 @@
               <div style="display:flex;align-items:center;gap:10px">
                 <span style="font-size:12px;color:var(--muted)">Latest FX:</span>
                 <span id="us-fx-rate" style="font-size:18px;font-weight:700;font-variant-numeric:tabular-nums">—</span>
-                <span id="us-fx-badge" style="font-size:11px;padding:2px 8px;border-radius:10px"></span>
+                <span id="us-fx-badge" style="font-size:11px;padding:2px 8px;border-radius:0"></span>
               </div>
             </div>
             <p id="us-fx-caption" style="font-size:12px;color:var(--muted);margin:0 0 10px"></p>
@@ -1029,7 +1028,7 @@
             <p style="font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:18px 0 6px">ADR premium change vs FX change (daily)</p>
             <div id="us-fx-scatter" style="width:100%;height:380px"></div>
             <table id="us-fx-table" style="width:100%;border-collapse:collapse;font-size:13px;margin-top:14px"></table>
-            <div id="us-fx-note" style="background:var(--surface);border-radius:6px;padding:12px 14px;margin-top:12px;font-size:12px;color:var(--muted);line-height:1.6"></div>
+            <div id="us-fx-note" style="background:var(--surface);border-radius:0;padding:12px 14px;margin-top:12px;font-size:12px;color:var(--muted);line-height:1.6"></div>
           </div>
 
           <!-- Conditional scenario EDA (the single EV, both US and TW/US tabs) -->
@@ -1039,7 +1038,7 @@
             <p id="us-scenario-caption" style="font-size:12px;color:var(--muted);margin:0 0 10px"></p>
             <table id="us-scenario-table" style="width:100%;border-collapse:collapse;font-size:13px"></table>
             <div id="us-scenario-breakeven" style="margin-top:10px;font-size:12.5px;font-weight:600"></div>
-            <div id="us-scenario-note" style="background:var(--surface);border-radius:6px;padding:12px 14px;margin-top:12px;font-size:12px;color:var(--muted);line-height:1.6"></div>
+            <div id="us-scenario-note" style="background:var(--surface);border-radius:0;padding:12px 14px;margin-top:12px;font-size:12px;color:var(--muted);line-height:1.6"></div>
           </div>
         </div>
       </div>
@@ -1047,9 +1046,9 @@
 
     <!-- Portfolio Trade Detail Modal -->
     <div id="portfolioModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
-      <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;max-width:820px;margin:36px auto 60px;padding:28px;position:relative">
-        <button onclick="closePortfolioModal()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
-        <button id="pf-delete" style="position:absolute;top:16px;right:58px;background:var(--call);border:none;color:#0d0f16;border-radius:4px;padding:6px 14px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Delete</button>
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:0;max-width:820px;margin:36px auto 60px;padding:28px;position:relative">
+        <button onclick="closePortfolioModal()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:0;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
+        <button id="pf-delete" style="position:absolute;top:16px;right:58px;background:var(--call);border:none;color:#0d1013;border-radius:0;padding:6px 14px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Delete</button>
         <h2 id="pf-title" style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:6px"></h2>
         <p id="pf-sub" style="font-size:12px;color:var(--muted);margin:0 0 20px"></p>
         <div id="pf-payoff-wrap" style="display:none;margin-bottom:22px">
@@ -1062,16 +1061,16 @@
 
     <!-- Straddle Vol Arb detail modal -->
     <div id="straddleModal" onclick="if(event.target===this)closeStraddleModal()" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
-      <div style="max-width:840px;margin:40px auto;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:26px;position:relative">
-        <button onclick="closeStraddleModal()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
+      <div style="max-width:840px;margin:40px auto;background:var(--panel);border:1px solid var(--border);border-radius:0;padding:26px;position:relative">
+        <button onclick="closeStraddleModal()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:0;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
         <div id="straddle-modal-body"></div>
       </div>
     </div>
 
     <!-- Static-arb LP breakdown — variable leg count + payoff-at-horizon curve -->
     <div id="staticArbModal" onclick="if(event.target===this)closeStaticArbModal()" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
-      <div style="max-width:900px;margin:40px auto;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:26px;position:relative">
-        <button onclick="closeStaticArbModal()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
+      <div style="max-width:900px;margin:40px auto;background:var(--panel);border:1px solid var(--border);border-radius:0;padding:26px;position:relative">
+        <button onclick="closeStaticArbModal()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:0;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
         <div id="static-arb-modal-body"></div>
       </div>
     </div>
@@ -1079,8 +1078,8 @@
 
     <!-- New Position modal — any number of legs (warrant / TW option / shares) -->
     <div id="newPositionModal" onclick="if(event.target===this)closeNewPosition()" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
-      <div style="max-width:960px;margin:40px auto;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:26px;position:relative">
-        <button onclick="closeNewPosition()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
+      <div style="max-width:960px;margin:40px auto;background:var(--panel);border:1px solid var(--border);border-radius:0;padding:26px;position:relative">
+        <button onclick="closeNewPosition()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:0;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
         <h2 style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px">New position</h2>
         <p class="dash-hint">Quantity is board lots (張) for warrants, contracts for options, shares for the underlying. Entry price is per warrant unit / per option point / per share. Warrants are long-only.</p>
         <div class="np-meta">
@@ -1098,8 +1097,8 @@
 
     <!-- Alert threshold modal -->
     <div id="alertModal" onclick="if(event.target===this)closeAlertForm()" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
-      <div style="max-width:460px;margin:80px auto;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:26px;position:relative">
-        <button onclick="closeAlertForm()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
+      <div style="max-width:460px;margin:80px auto;background:var(--panel);border:1px solid var(--border);border-radius:0;padding:26px;position:relative">
+        <button onclick="closeAlertForm()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:0;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
         <h2 style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px">New alert</h2>
         <p class="dash-hint">Alerts are checked when the dashboard loads. IV is entered in percent.</p>
         <input type="hidden" id="alert-kind" /><input type="hidden" id="alert-code" /><input type="hidden" id="alert-underlying" />
@@ -1130,8 +1129,8 @@
 
     <!-- Position payoff modal -->
     <div id="payoffModal" onclick="if(event.target===this)closePayoffModal()" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
-      <div style="max-width:900px;margin:40px auto;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:26px;position:relative">
-        <button onclick="closePayoffModal()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
+      <div style="max-width:900px;margin:40px auto;background:var(--panel);border:1px solid var(--border);border-radius:0;padding:26px;position:relative">
+        <button onclick="closePayoffModal()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:0;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
         <h2 id="payoff-title" style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px"></h2>
         <div class="dash-slider">
           <label>Evaluate at <b id="payoff-dte-label"></b></label>

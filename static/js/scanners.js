@@ -376,7 +376,7 @@ async function fetchIVSurfaceOptions() {
       x: data.x, y: data.y, z: data.z,
       colorscale: "Viridis",
       opacity: 0.85,
-      colorbar: { title: "IV (%)", tickfont: { color: "#8b90a0" }, titlefont: { color: "#8b90a0" } },
+      colorbar: { title: "IV (%)", tickfont: { color: "#7b8794" }, titlefont: { color: "#7b8794" } },
       name: "IV Surface",
     },
     {
@@ -390,17 +390,17 @@ async function fetchIVSurfaceOptions() {
     },
   ];
   Plotly.newPlot("iv-plot", traces, {
-    title: { text: `${product} ${callPut} IV Surface`, font: { color: "#e2e8f0", size: 15 } },
-    paper_bgcolor: "#13161f",
-    plot_bgcolor: "#13161f",
+    title: { text: `${product} ${callPut} IV Surface`, font: { color: "#d8dee4", size: 15 } },
+    paper_bgcolor: "#151a1f",
+    plot_bgcolor: "#151a1f",
     scene: {
-      bgcolor: "#0d0f16",
-      xaxis: { title: "Strike", color: "#8b90a0", gridcolor: "#252836", zerolinecolor: "#252836" },
-      yaxis: { title: "Days to Expiry", color: "#8b90a0", gridcolor: "#252836", zerolinecolor: "#252836" },
-      zaxis: { title: "IV (%)", range: [0, 150], color: "#8b90a0", gridcolor: "#252836", zerolinecolor: "#252836" },
+      bgcolor: "#0d1013",
+      xaxis: { title: "Strike", color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
+      yaxis: { title: "Days to Expiry", color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
+      zaxis: { title: "IV (%)", range: [0, 150], color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
       camera: { eye: { x: 1.5, y: -1.5, z: 1.0 } },
     },
-    legend: { font: { color: "#8b90a0" }, bgcolor: "#13161f" },
+    legend: { font: { color: "#7b8794" }, bgcolor: "#151a1f" },
     margin: { l: 0, r: 0, t: 48, b: 0 },
   }, { responsive: true });
 }
@@ -441,7 +441,7 @@ async function fetchIVSurface() {
       x: data.x, y: data.y, z: data.z,
       colorscale: "Viridis",
       opacity: 0.85,
-      colorbar: { title: "IV (%)", tickfont: { color: "#8b90a0" }, titlefont: { color: "#8b90a0" } },
+      colorbar: { title: "IV (%)", tickfont: { color: "#7b8794" }, titlefont: { color: "#7b8794" } },
       name: "IV Surface",
     },
     {
@@ -461,27 +461,27 @@ async function fetchIVSurface() {
       type: "scatter3d",
       x: [h.x], y: [h.y], z: [h.z],
       mode: "markers+text",
-      marker: { size: 6, color: "#fbbf24", symbol: "diamond", opacity: 1.0, line: { color: "#fff", width: 2 } },
+      marker: { size: 6, color: "var(--accent)", symbol: "diamond", opacity: 1.0, line: { color: "#fff", width: 2 } },
       text: [h.code],
       textposition: "top center",
-      textfont: { color: "#fbbf24", size: 12 },
+      textfont: { color: "var(--accent)", size: 12 },
       hovertemplate: `${h.code}<br>Strike: %{x:.0f}<br>DTE: %{y}<br>IV: %{z:.1f}%<extra></extra>`,
       name: "Selected: " + h.code,
     });
   }
 
   Plotly.newPlot("iv-plot", traces, {
-    title: { text: "Warrant IV Surface", font: { color: "#e2e8f0", size: 15 } },
-    paper_bgcolor: "#13161f",
-    plot_bgcolor: "#13161f",
+    title: { text: "Warrant IV Surface", font: { color: "#d8dee4", size: 15 } },
+    paper_bgcolor: "#151a1f",
+    plot_bgcolor: "#151a1f",
     scene: {
-      bgcolor: "#0d0f16",
-      xaxis: { title: "Strike (NT$)", color: "#8b90a0", gridcolor: "#252836", zerolinecolor: "#252836" },
-      yaxis: { title: "Days to Expiry", color: "#8b90a0", gridcolor: "#252836", zerolinecolor: "#252836" },
-      zaxis: { title: "IV (%)", range: [0, 100], color: "#8b90a0", gridcolor: "#252836", zerolinecolor: "#252836" },
+      bgcolor: "#0d1013",
+      xaxis: { title: "Strike (NT$)", color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
+      yaxis: { title: "Days to Expiry", color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
+      zaxis: { title: "IV (%)", range: [0, 100], color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
       camera: { eye: { x: 1.5, y: -1.5, z: 1.0 } },
     },
-    legend: { font: { color: "#8b90a0" }, bgcolor: "#13161f" },
+    legend: { font: { color: "#7b8794" }, bgcolor: "#151a1f" },
     margin: { l: 0, r: 0, t: 48, b: 0 },
   }, { responsive: true });
 }

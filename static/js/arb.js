@@ -292,7 +292,7 @@ async function loadAdrPremium(row) {
   const flag = document.getElementById("us-prem-flag");
   flag.textContent = near0 ? "GOOD ENTRY (≈0)" : Math.abs(p0pct) > 5 ? "DISLOCATED — risky" : "off-zero — caution";
   flag.style.background = near0 ? "rgba(74,222,128,0.15)" : Math.abs(p0pct) > 5 ? "rgba(248,113,113,0.15)" : "rgba(251,191,36,0.15)";
-  flag.style.color = near0 ? "var(--put)" : Math.abs(p0pct) > 5 ? "var(--call)" : "#fbbf24";
+  flag.style.color = near0 ? "var(--put)" : Math.abs(p0pct) > 5 ? "var(--call)" : "var(--accent)";
 
   // Premium history chart with ±threshold bands
   const thr = s.threshold * 100;
@@ -307,10 +307,10 @@ async function loadAdrPremium(row) {
     { x: [s.dates[0], s.dates[s.dates.length-1]], y: [0, 0], mode: "lines",
       line: { color: "rgba(255,255,255,0.15)", width: 1 }, showlegend: false, hoverinfo: "skip" },
   ], {
-    paper_bgcolor: "#13161f", plot_bgcolor: "#0d0f16",
-    font: { color: "#8b90a0", family: "Inter,system-ui,sans-serif", size: 11 },
-    xaxis: { gridcolor: "#252836", zerolinecolor: "#252836" },
-    yaxis: { title: "premium %", gridcolor: "#252836", zerolinecolor: "#252836", ticksuffix: "%" },
+    paper_bgcolor: "#151a1f", plot_bgcolor: "#0d1013",
+    font: { color: "#7b8794", family: "ui-monospace, SFMono-Regular, Menlo, monospace", size: 11 },
+    xaxis: { gridcolor: "#222a31", zerolinecolor: "#222a31" },
+    yaxis: { title: "premium %", gridcolor: "#222a31", zerolinecolor: "#222a31", ticksuffix: "%" },
     margin: { l: 55, r: 10, t: 10, b: 30 }, showlegend: false,
   }, { responsive: true });
 
@@ -355,10 +355,10 @@ async function loadAdrPremium(row) {
       marker: { color: "rgba(96,165,250,0.55)", line: { color: "rgba(96,165,250,0.9)", width: 0.5 } },
       hovertemplate: "premium %{x:.2f}%<br>count %{y}<extra></extra>" },
   ], {
-    paper_bgcolor: "#13161f", plot_bgcolor: "#0d0f16",
-    font: { color: "#8b90a0", family: "Inter,system-ui,sans-serif", size: 11 },
-    xaxis: { title: "daily ADR premium %", gridcolor: "#252836", zerolinecolor: "#252836", ticksuffix: "%" },
-    yaxis: { title: "days", gridcolor: "#252836", zerolinecolor: "#252836" },
+    paper_bgcolor: "#151a1f", plot_bgcolor: "#0d1013",
+    font: { color: "#7b8794", family: "ui-monospace, SFMono-Regular, Menlo, monospace", size: 11 },
+    xaxis: { title: "daily ADR premium %", gridcolor: "#222a31", zerolinecolor: "#222a31", ticksuffix: "%" },
+    yaxis: { title: "days", gridcolor: "#222a31", zerolinecolor: "#222a31" },
     margin: { l: 55, r: 10, t: 24, b: 38 }, showlegend: false, bargap: 0.02,
     shapes: [ vline(thr, "rgba(248,113,113,0.8)"), vline(-thr, "rgba(248,113,113,0.8)"), vline(0, "rgba(255,255,255,0.25)") ],
     annotations: [
@@ -501,10 +501,10 @@ function renderFxSection(row, s, p0) {
     { x: isoDates, y: iso, mode: "lines", line: { color: "#a78bfa", width: 1.3 },
       hovertemplate: "%{x}<br>premium ex-FX index %{y:.2f}<extra></extra>" },
   ], {
-    paper_bgcolor: "#13161f", plot_bgcolor: "#0d0f16",
-    font: { color: "#8b90a0", family: "Inter,system-ui,sans-serif", size: 11 },
-    xaxis: { gridcolor: "#252836", zerolinecolor: "#252836" },
-    yaxis: { title: "premium ex-FX (index=100)", gridcolor: "#252836", zerolinecolor: "#252836" },
+    paper_bgcolor: "#151a1f", plot_bgcolor: "#0d1013",
+    font: { color: "#7b8794", family: "ui-monospace, SFMono-Regular, Menlo, monospace", size: 11 },
+    xaxis: { gridcolor: "#222a31", zerolinecolor: "#222a31" },
+    yaxis: { title: "premium ex-FX (index=100)", gridcolor: "#222a31", zerolinecolor: "#222a31" },
     margin: { l: 55, r: 10, t: 8, b: 30 }, showlegend: false,
   }, { responsive: true });
 
@@ -514,10 +514,10 @@ function renderFxSection(row, s, p0) {
       marker: { color: "rgba(167,139,250,0.5)", line: { color: "rgba(167,139,250,0.9)", width: 0.5 } },
       hovertemplate: "premium ex-FX %{x:.2f}%<br>count %{y}<extra></extra>" },
   ], {
-    paper_bgcolor: "#13161f", plot_bgcolor: "#0d0f16",
-    font: { color: "#8b90a0", family: "Inter,system-ui,sans-serif", size: 11 },
-    xaxis: { title: "daily premium move not explained by FX (%)", gridcolor: "#252836", zerolinecolor: "#252836", ticksuffix: "%" },
-    yaxis: { title: "days", gridcolor: "#252836", zerolinecolor: "#252836" },
+    paper_bgcolor: "#151a1f", plot_bgcolor: "#0d1013",
+    font: { color: "#7b8794", family: "ui-monospace, SFMono-Regular, Menlo, monospace", size: 11 },
+    xaxis: { title: "daily premium move not explained by FX (%)", gridcolor: "#222a31", zerolinecolor: "#222a31", ticksuffix: "%" },
+    yaxis: { title: "days", gridcolor: "#222a31", zerolinecolor: "#222a31" },
     margin: { l: 55, r: 10, t: 10, b: 38 }, showlegend: false, bargap: 0.02,
   }, { responsive: true });
 
@@ -537,11 +537,11 @@ function renderFxSection(row, s, p0) {
       { x: [xmin, xmax], y: [a+b*xmin, a+b*xmax], mode: "lines", name: "best fit",
         line: { color: "#f0abfc", width: 2 }, hoverinfo: "skip" },
     ], {
-      paper_bgcolor: "#13161f", plot_bgcolor: "#0d0f16",
-      font: { color: "#8b90a0", family: "Inter,system-ui,sans-serif", size: 11 },
-      title: { text: `corr = ${fx.corr_with_premium.toFixed(2)}  ·  R² = ${(fx.r2_with_premium*100).toFixed(0)}%  ·  slope = ${b.toFixed(3)}`, font: { size: 11, color: "#8b90a0" }, x: 0, xanchor: "left" },
-      xaxis: { title: "Δ ADR premium (%)", gridcolor: "#252836", zerolinecolor: "#3a3f52", ticksuffix: "%" },
-      yaxis: { title: "Δ FX (%)", gridcolor: "#252836", zerolinecolor: "#3a3f52", ticksuffix: "%" },
+      paper_bgcolor: "#151a1f", plot_bgcolor: "#0d1013",
+      font: { color: "#7b8794", family: "ui-monospace, SFMono-Regular, Menlo, monospace", size: 11 },
+      title: { text: `corr = ${fx.corr_with_premium.toFixed(2)}  ·  R² = ${(fx.r2_with_premium*100).toFixed(0)}%  ·  slope = ${b.toFixed(3)}`, font: { size: 11, color: "#7b8794" }, x: 0, xanchor: "left" },
+      xaxis: { title: "Δ ADR premium (%)", gridcolor: "#222a31", zerolinecolor: "#3a3f52", ticksuffix: "%" },
+      yaxis: { title: "Δ FX (%)", gridcolor: "#222a31", zerolinecolor: "#3a3f52", ticksuffix: "%" },
       margin: { l: 55, r: 10, t: 28, b: 40 }, showlegend: false,
     }, { responsive: true });
   }
@@ -1050,14 +1050,14 @@ function openStraddleModal(r) {
   document.getElementById("straddleModal").style.display = "block";
   Plotly.react("straddle-payoff-chart", [
     { x: [lo, hi], y: [0, 0], mode: "lines", line: { color: "rgba(255,255,255,0.15)", dash: "dash", width: 1 }, showlegend: false, hoverinfo: "skip" },
-    { x: xs, y: ys, mode: "lines", line: { color: "#4f8ef7", width: 2 }, hovertemplate: "spot %{x:.0f}<br>P&L %{y:+,.0f} NT$<extra></extra>", showlegend: false },
+    { x: xs, y: ys, mode: "lines", line: { color: "#e0a137", width: 2 }, hovertemplate: "spot %{x:.0f}<br>P&L %{y:+,.0f} NT$<extra></extra>", showlegend: false },
     { x: [S], y: [Math.round(payoff(S))], mode: "markers", marker: { color: "#fff", size: 7 }, hovertemplate: "spot now %{x:.0f}<br>P&L %{y:+,.0f} NT$<extra></extra>", showlegend: false },
   ], {
     shapes: _sMk.shapes, annotations: _sMk.annotations,
-    paper_bgcolor: "#13161f", plot_bgcolor: "#0d0f16",
-    font: { color: "#8b90a0", family: "Inter,system-ui,sans-serif", size: 11 },
-    xaxis: { title: "underlying at first expiry", gridcolor: "#252836", zerolinecolor: "#252836" },
-    yaxis: { title: "P&L (NT$)", gridcolor: "#252836", zerolinecolor: "#252836", tickformat: "+," },
+    paper_bgcolor: "#151a1f", plot_bgcolor: "#0d1013",
+    font: { color: "#7b8794", family: "ui-monospace, SFMono-Regular, Menlo, monospace", size: 11 },
+    xaxis: { title: "underlying at first expiry", gridcolor: "#222a31", zerolinecolor: "#222a31" },
+    yaxis: { title: "P&L (NT$)", gridcolor: "#222a31", zerolinecolor: "#222a31", tickformat: "+," },
     margin: { l: 60, r: 12, t: 10, b: 38 },
   }, { responsive: true });
 }
@@ -1153,7 +1153,7 @@ function openArbModal(row, mode) {
     if (itmFrac > 0.0) {
       usPcpAssign = `<br><span class="call" style="font-weight:700">⚠ Short US ${row.opt_type.toLowerCase()} is ITM by ${(itmFrac*100).toFixed(1)}% (ADR ${adr.toFixed(2)} vs strike ${Ko.toFixed(2)}) — American, real early-assignment risk; dividends / high USD rates raise it.</span>`;
     } else if (itmFrac > -0.03) {
-      usPcpAssign = `<br><span style="font-weight:600;color:#fbbf24">Short US ${row.opt_type.toLowerCase()} is near-the-money (${(itmFrac*100).toFixed(1)}%) — American; watch for early assignment if it moves ITM.</span>`;
+      usPcpAssign = `<br><span style="font-weight:600;color:var(--accent)">Short US ${row.opt_type.toLowerCase()} is near-the-money (${(itmFrac*100).toFixed(1)}%) — American; watch for early assignment if it moves ITM.</span>`;
     }
   }
   document.getElementById("pcp-legs-caption").innerHTML =
@@ -1646,11 +1646,11 @@ function renderPcpChart(dte) {
 
   Plotly.react("pcp-pnl-chart", [...zeroLine, expiryTrace, spotTrace], {
     shapes: _mk.shapes, annotations: _mk.annotations,
-    paper_bgcolor:"#13161f", plot_bgcolor:"#0d0f16",
-    font:{color:"#8b90a0",family:"Inter,system-ui,sans-serif",size:12},
-    xaxis:{title:`Spot Price (NT$) — ${row.warrant_name}`,gridcolor:"#252836",zerolinecolor:"#252836",tickformat:","},
-    yaxis:{title:_pcpChartMode==="whole"?`P&L (NT$, whole-張 hedge)`:`P&L (NT$, exact ${contractSize.toLocaleString()}-share hedge)`,gridcolor:"#252836",zerolinecolor:"#252836",tickformat:"+,"},
-    legend:{bgcolor:"#13161f",bordercolor:"#252836",borderwidth:1},
+    paper_bgcolor:"#151a1f", plot_bgcolor:"#0d1013",
+    font:{color:"#7b8794",family:"ui-monospace, SFMono-Regular, Menlo, monospace",size:12},
+    xaxis:{title:`Spot Price (NT$) — ${row.warrant_name}`,gridcolor:"#222a31",zerolinecolor:"#222a31",tickformat:","},
+    yaxis:{title:_pcpChartMode==="whole"?`P&L (NT$, whole-張 hedge)`:`P&L (NT$, exact ${contractSize.toLocaleString()}-share hedge)`,gridcolor:"#222a31",zerolinecolor:"#222a31",tickformat:"+,"},
+    legend:{bgcolor:"#151a1f",bordercolor:"#222a31",borderwidth:1},
     margin:{l:80,r:20,t:20,b:60},
     hovermode:"x unified",
   },{responsive:true});
@@ -1835,7 +1835,7 @@ function renderButterflyChart() {
   // Floor line — the guaranteed minimum P&L (locks the arb visually).
   const floorY = Math.round(row.guaranteed_profit);
   const floorLine = { x:[lo,hi], y:[floorY,floorY], mode:"lines", name:"Guaranteed floor",
-    line:{color:"#fbbf24",dash:"dot",width:1.5},
+    line:{color:"var(--accent)",dash:"dot",width:1.5},
     hovertemplate:`Guaranteed floor: +${floorY.toLocaleString()} NT$<extra></extra>` };
 
   const _mk = payoffStrikeMarks([
@@ -1846,11 +1846,11 @@ function renderButterflyChart() {
 
   Plotly.react("pcp-pnl-chart", [zeroLine, floorLine, expiryTrace, spotTrace], {
     shapes: _mk.shapes, annotations: _mk.annotations,
-    paper_bgcolor:"#13161f", plot_bgcolor:"#0d0f16",
-    font:{color:"#8b90a0",family:"Inter,system-ui,sans-serif",size:12},
-    xaxis:{title:`Spot Price (NT$) — ${row.underlying_code || ""}`,gridcolor:"#252836",zerolinecolor:"#252836",tickformat:","},
-    yaxis:{title:`P&L (NT$, ${(row.mid_contract_size||2000).toLocaleString()}-share structure)`,gridcolor:"#252836",zerolinecolor:"#252836",tickformat:"+,"},
-    legend:{bgcolor:"#13161f",bordercolor:"#252836",borderwidth:1},
+    paper_bgcolor:"#151a1f", plot_bgcolor:"#0d1013",
+    font:{color:"#7b8794",family:"ui-monospace, SFMono-Regular, Menlo, monospace",size:12},
+    xaxis:{title:`Spot Price (NT$) — ${row.underlying_code || ""}`,gridcolor:"#222a31",zerolinecolor:"#222a31",tickformat:","},
+    yaxis:{title:`P&L (NT$, ${(row.mid_contract_size||2000).toLocaleString()}-share structure)`,gridcolor:"#222a31",zerolinecolor:"#222a31",tickformat:"+,"},
+    legend:{bgcolor:"#151a1f",bordercolor:"#222a31",borderwidth:1},
     margin:{l:80,r:20,t:20,b:60},
     hovermode:"x unified",
   },{responsive:true});

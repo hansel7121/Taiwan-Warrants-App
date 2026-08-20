@@ -136,7 +136,7 @@ function renderPfPayoff(t, curP, curFx) {
   const traces = [{ x: [lo, hi], y: [0, 0], mode: "lines",
     line: { color: "rgba(255,255,255,0.15)", dash: "dash", width: 1 }, showlegend: false, hoverinfo: "skip" }];
   traces.push({ x: spots, y: entry, mode: "lines", name: "At entry (ADR & FX unmoved)",
-    line: { color: "#8b90a0", width: 2, dash: "dot" },
+    line: { color: "#7b8794", width: 2, dash: "dot" },
     hovertemplate: "Spot %{x:,.0f}<br>entry: %{y:+,.0f} NT$<extra></extra>" });
   if (haveNow) traces.push({ x: spots, y: now, mode: "lines", name: "Now (current ADR & FX)",
     line: { color: "#4ade80", width: 2.5 },
@@ -156,9 +156,9 @@ function renderPfPayoff(t, curP, curFx) {
   Plotly.react(chart, traces, {
     shapes: _pfMk.shapes, annotations: _pfMk.annotations,
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
-    font: { color: "#8b90a0", size: 11 },
-    xaxis: { title: `Spot (NT$) — ${r.warrant_name || ""}`, gridcolor: "#252836", zerolinecolor: "#252836", tickformat: "," },
-    yaxis: { title: "P&L at expiry (NT$)", gridcolor: "#252836", zerolinecolor: "#252836", tickformat: "+," },
+    font: { color: "#7b8794", size: 11 },
+    xaxis: { title: `Spot (NT$) — ${r.warrant_name || ""}`, gridcolor: "#222a31", zerolinecolor: "#222a31", tickformat: "," },
+    yaxis: { title: "P&L at expiry (NT$)", gridcolor: "#222a31", zerolinecolor: "#222a31", tickformat: "+," },
     legend: { orientation: "h", y: 1.14, bgcolor: "rgba(0,0,0,0)" },
     margin: { l: 72, r: 16, t: 34, b: 46 }, hovermode: "x unified",
   }, { responsive: true, displayModeBar: false });
