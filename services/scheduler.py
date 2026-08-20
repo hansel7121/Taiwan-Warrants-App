@@ -15,6 +15,7 @@ from services import memlog
 from services import db_market
 from services import db_products
 from services import db_suggestions
+from services import live_warrant
 from logic import arb_logic
 from logic import ttl_cache
 from logic import warrant_logic
@@ -262,6 +263,11 @@ def sync_suggestions():
     )
 
 
+def sync_live_warrant():
+    """Open the shared Fubon session if it isn't already (start_session is idempotent)."""
+    live_warrant.start_session()
+
+
 # ---------------------------------------------------------------------------
 # Job / gate wrappers used at registration time
 # ---------------------------------------------------------------------------
@@ -325,6 +331,10 @@ def _run_suggestions():
     _job("suggestions", sync_suggestions)
 
 
+def _run_live_warrant():
+    _job("live_warrant", sync_live_warrant)
+
+
 _FORCE_MAP = {
     "warrants": _run_warrants,
     "tw_options": _run_tw_options,
@@ -381,6 +391,12 @@ def start():
         # already written; gated on tw_equity since that's the narrower trading window.
         sched.add_job(_gated("tw_equity", _run_suggestions),
                       CronTrigger(minute="2,17,32,47", timezone=_TZ_TAIPEI))
+        # Live Warrant's Fubon session: checked every 5 min (start_session is a
+        # no-op once connected) and also attempted right away, so a restart
+        # mid-trading-day doesn't wait for the next grid tick to reconnect.
+        sched.add_job(_gated("tw_equity", _run_live_warrant),
+                      CronTrigger(minute="*/5", timezone=_TZ_TAIPEI),
+                      next_run_time=now + timedelta(seconds=2))
         sched.start()
         _scheduler = sched
         print("SCHED: started", flush=True)
