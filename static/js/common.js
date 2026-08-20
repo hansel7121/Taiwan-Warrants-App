@@ -178,6 +178,8 @@ function restoreView() {
   if (document.getElementById("tab-home")?.classList.contains("active")
       && typeof loadHomeOnce === "function") loadHomeOnce();
   if (document.getElementById("tab-dashboard")?.classList.contains("active")) loadDashboardOnce();
+  // No Dashboard tab in admin mode — still need watchSet for the scanner stars.
+  if (!document.getElementById("tab-dashboard") && can("watchlist")) loadWatchSetOnce();
   if (_readView("ws_optMarket") === "us") {
     const b = document.getElementById("optmkt-btn-us");
     if (b) setOptMarket("us", b);

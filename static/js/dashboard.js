@@ -65,6 +65,20 @@ function loadDashboardOnce() {
   loadDashboard();
 }
 
+// Admin mode has no Dashboard tab, but its scanners still draw watchlist stars.
+// Fill watchSet from the server so those render starred instead of all-hollow.
+async function loadWatchSetOnce() {
+  if (_dashboardLoaded) return;
+  _dashboardLoaded = true;
+  try {
+    const w = await apiJson("/list_watchlist");
+    watchlistData = Array.isArray(w) ? w : [];
+    watchSet = new Set(watchlistData.map(r => qKey(r.kind, r.code)));
+  } catch (e) {
+    _dashboardLoaded = false;   // let a later call retry
+  }
+}
+
 async function loadDashboard() {
   const status = document.getElementById("dash-status");
   if (status) status.textContent = "Loading…";

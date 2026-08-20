@@ -57,7 +57,9 @@
       {% if show_admin %}
       <button class="active" onclick="switchTab('home', this); loadHomeOnce()">Home</button>
       {% endif %}
-      <button {% if not show_admin %}class="active"{% endif %} onclick="switchTab('dashboard', this); loadDashboardOnce()">Dashboard</button>
+      {% if not show_admin %}
+      <button class="active" onclick="switchTab('dashboard', this); loadDashboardOnce()">Dashboard</button>
+      {% endif %}
       <button onclick="switchTab('options', this)">Options Scanner</button>
       <button onclick="switchTab('scanner', this)">Warrant Scanner</button>
       <button onclick="switchTab('ivsurface', this)">IV Surface</button>
@@ -145,8 +147,9 @@
     </div>
     {% endif %}
 
-    <!-- DASHBOARD TAB (user-mode landing; admin sees it too) -->
-    <div id="tab-dashboard" class="tab-content{% if not show_admin %} active{% endif %}">
+    {% if not show_admin %}
+    <!-- DASHBOARD TAB (user mode only; admin's landing screen is Home) -->
+    <div id="tab-dashboard" class="tab-content active">
       <main>
         <div class="dash-head">
           <span class="dash-title">Dashboard</span>
@@ -178,6 +181,7 @@
         </div>
       </main>
     </div>
+    {% endif %}
 
     <!-- OPTIONS TAB -->
     <div id="tab-options" class="tab-content">
