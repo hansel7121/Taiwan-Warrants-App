@@ -559,6 +559,8 @@ def add_live_warrant():
         live_warrant.add_code(code)
     except live_warrant_logic.CapacityExceededError as e:
         return jsonify({"error": str(e)}), 400
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
     return jsonify({"ok": True})
 
 
@@ -604,7 +606,7 @@ def reconnect_live_warrant():
 @require_auth
 @require_role(ADMIN)
 def connect_live_warrant():
-    live_warrant.start_session()
+    live_warrant.connect_session()
     return jsonify({"ok": True})
 
 

@@ -257,47 +257,21 @@ async function runLiveWarrantScan() {
   }
 }
 
-async function reconnectLiveWarrant() {
-  const btn = document.getElementById("live-reconnect-btn");
+async function _lwSessionAction(btnId, endpoint, verb) {
+  const btn = document.getElementById(btnId);
   const statusEl = document.getElementById("live-status");
   btn.disabled = true;
-  btn.textContent = "Reconnecting…";
+  btn.textContent = verb + "ing…";
   try {
-    await apiJson("/reconnect_live_warrant", { method: "POST", headers: { "Content-Type": "application/json" } });
+    await apiJson(endpoint, { method: "POST", headers: { "Content-Type": "application/json" } });
   } catch (e) {
-    if (statusEl) statusEl.textContent = "Reconnect failed: " + (e.message || e);
+    if (statusEl) statusEl.textContent = verb + " failed: " + (e.message || e);
   } finally {
     btn.disabled = false;
-    btn.textContent = "Reconnect";
+    btn.textContent = verb;
   }
 }
 
-async function connectLiveWarrant() {
-  const btn = document.getElementById("live-connect-btn");
-  const statusEl = document.getElementById("live-status");
-  btn.disabled = true;
-  btn.textContent = "Connecting…";
-  try {
-    await apiJson("/connect_live_warrant", { method: "POST", headers: { "Content-Type": "application/json" } });
-  } catch (e) {
-    if (statusEl) statusEl.textContent = "Connect failed: " + (e.message || e);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "Connect";
-  }
-}
-
-async function disconnectLiveWarrant() {
-  const btn = document.getElementById("live-disconnect-btn");
-  const statusEl = document.getElementById("live-status");
-  btn.disabled = true;
-  btn.textContent = "Disconnecting…";
-  try {
-    await apiJson("/disconnect_live_warrant", { method: "POST", headers: { "Content-Type": "application/json" } });
-  } catch (e) {
-    if (statusEl) statusEl.textContent = "Disconnect failed: " + (e.message || e);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "Disconnect";
-  }
-}
+function reconnectLiveWarrant() { return _lwSessionAction("live-reconnect-btn", "/reconnect_live_warrant", "Reconnect"); }
+function connectLiveWarrant() { return _lwSessionAction("live-connect-btn", "/connect_live_warrant", "Connect"); }
+function disconnectLiveWarrant() { return _lwSessionAction("live-disconnect-btn", "/disconnect_live_warrant", "Disconnect"); }
