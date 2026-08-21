@@ -6,7 +6,7 @@ traded volume and subscribes the busiest TOP_N (`_subscribe_top_liquid`);
 more codes can be added by hand. Each shows its full five-level bid/ask
 ladder with volume. Credentials come from Supabase (fubon_credentials table,
 Fernet-encrypted — see services/broker/), selected by FUBON_CRED_LABEL
-(defaults to "default"); run scripts/seed_fubon_credentials.py once to
+(defaults to "ian"); run scripts/seed_fubon_credentials.py once to
 populate a row from a local .env. FUBON_VIEWER_UNDERLYING and
 FUBON_VIEWER_TOP_N override what gets picked.
 
