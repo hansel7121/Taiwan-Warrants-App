@@ -92,12 +92,19 @@ alter table user_alerts enable row level security;
 alter table user_positions enable row level security;
 alter table user_position_legs enable row level security;
 
+-- create policy has no IF NOT EXISTS in Postgres, so drop-then-create keeps
+-- this script safe to rerun after a partial failure (e.g. a dropped SQL
+-- Editor connection mid-script).
+drop policy if exists "own rows" on user_watchlist;
 create policy "own rows" on user_watchlist for all
   using (auth.uid() = user_id) with check (auth.uid() = user_id);
+drop policy if exists "own rows" on user_alerts;
 create policy "own rows" on user_alerts for all
   using (auth.uid() = user_id) with check (auth.uid() = user_id);
+drop policy if exists "own rows" on user_positions;
 create policy "own rows" on user_positions for all
   using (auth.uid() = user_id) with check (auth.uid() = user_id);
+drop policy if exists "own rows" on user_position_legs;
 create policy "own rows" on user_position_legs for all
   using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
