@@ -191,6 +191,13 @@ pinned to one account, ports 5099-5105 for `stock` and 5106-5112 for
 |---|---|---|---|
 | 1 | 7 `stock` (all 7 connected) | 7 `futopt` (5/7 connected, 2 failed) | 12/14 total |
 | 2 | 7 `futopt` (all 7 connected) | 7 `stock` (6/7 connected, 1 failed) | 13/14 total |
+| 3 | alternated `stock`/`futopt` one at a time, 3s between each launch | — | 13/14 total: all 7 `stock` + 6/7 `futopt`, only the 14th (final) login failed |
+
+Run 3 shows the 3-second gap doesn't change the outcome in kind — logins
+still land in the same ~12-13 range, and it's still whichever connection
+happens to be *last* that fails, not a fixed market or slot. A slower,
+one-at-a-time launch just makes the race deterministic (last login loses)
+instead of letting several logins contend for the last slot at once.
 
 Takeaways:
 
