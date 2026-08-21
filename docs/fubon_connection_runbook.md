@@ -172,6 +172,58 @@ print('subs=',d['subs'],'confirmed=',d['subs_confirmed'],'error=',d['error'])
 Repeat for `5100` through `5105`. Seven connections × 300 confirmed, zero
 errors, confirms the account-wide 2,100-subscription cap.
 
+## Cross-market login cap: mixing stock + futopt connections
+
+The 7-connection cap above was only ever measured on the `stock` side
+alone. Opening `stock` and `futopt` connections *together* on one account
+hits a lower, shared login-level cap — this isn't a subscription-cap error
+(`1001` from Fugle), it's the broker rejecting the login itself:
+
+```
+login failed: Login Error, 超過本應用程式連線限制==>[10]
+```
+
+Measured by launching 7 `stock` + 7 `futopt` instances (`FUBON_CRED_LABEL`
+pinned to one account, ports 5099-5105 for `stock` and 5106-5112 for
+`futopt`, `FUBON_VIEWER_STRESS_MODE=code` to skip MIS):
+
+| Run | Launched first | Launched second | Result |
+|---|---|---|---|
+| 1 | 7 `stock` (all 7 connected) | 7 `futopt` (5/7 connected, 2 failed) | 12/14 total |
+| 2 | 7 `futopt` (all 7 connected) | 7 `stock` (6/7 connected, 1 failed) | 13/14 total |
+| 3 | alternated `stock`/`futopt` one at a time, 3s between each launch | — | 13/14 total: all 7 `stock` + 6/7 `futopt`, only the 14th (final) login failed |
+
+Run 3 shows the 3-second gap doesn't change the outcome in kind — logins
+still land in the same ~12-13 range, and it's still whichever connection
+happens to be *last* that fails, not a fixed market or slot. A slower,
+one-at-a-time launch just makes the race deterministic (last login loses)
+instead of letting several logins contend for the last slot at once.
+
+Takeaways:
+
+- The cap is **account-wide across markets, not per-market**. Whichever
+  batch is opened *second* is the one that eats the failures — the market
+  type doesn't matter, only login order.
+- The real ceiling sits at roughly **12-13 concurrent logins**, not a
+  clean 7-per-market split. The exact number (12 vs 13) and which
+  connections fail varies run to run — logins fired in the same batch
+  race each other at the broker, so the split isn't deterministic.
+- **Implication for the connection-pool code** (`logic/live_warrant_logic.py`,
+  `MAX_CONNECTIONS = 7`): that constant is a *per-market* subscription-slot
+  budget, not a validated total login ceiling. If a future account/service
+  ever opens `stock` and `futopt` connections concurrently under one
+  broker login, 7 + 7 is not safe to assume — expect the second market's
+  last connection or two to fail login instead of connecting.
+
+To reproduce: repeat the launch sequence above (7 of one market, then 7 of
+the other, `FUBON_VIEWER_STRESS_MODE=code`/`FUBON_VIEWER_OPTION_STRIKE_OFFSET`
+staggered per instance so codes don't overlap), and poll `/data` on every
+port — `connected: false` with the `超過本應用程式連線限制` error marks a
+login-cap failure, distinct from the `1001` subscription-cap error above.
+Prefer a non-`default` credential label for this test if the `default`
+account has a live session in use elsewhere (e.g. production Live
+Warrant), so the stress test can't disrupt it.
+
 ---
 
 Credentials come from the `fubon_credentials` table via `services/broker/`
