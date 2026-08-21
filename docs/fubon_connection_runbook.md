@@ -52,7 +52,7 @@ Open `http://127.0.0.1:5099`. Useful overrides:
 | `FUBON_VIEWER_OPTION_PRODUCT` | `TXO` | TAIFEX option product to watch (`futopt` mode only) |
 | `FUBON_VIEWER_OPTION_TOP_N` | `5` | How many contracts nearest the money to auto-subscribe (`futopt` mode) |
 | `FUBON_VIEWER_OPTION_STRIKE_OFFSET` | `0` | Skip this many strikes before picking `OPTION_TOP_N`, for running several `futopt` instances on disjoint strike ranges |
-| `FUBON_CRED_LABEL` | `default` | Which `fubon_credentials` row to log in with |
+| `FUBON_CRED_LABEL` | `ian` | Which `fubon_credentials` row to log in with |
 
 Options example:
 

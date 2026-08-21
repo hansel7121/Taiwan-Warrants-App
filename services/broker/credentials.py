@@ -1,6 +1,6 @@
 """CRUD for fubon_credentials — see supabase/schema.sql.
 
-One row per label (e.g. "default"), so more than one Fubon account/login can
+One row per label (e.g. "ian"), so more than one Fubon account/login can
 be stored later without a schema change. Credentials are stored only as a
 Fernet token in encrypted_fields. Mirrors db_products.py: thin wrappers, no
 internal try/except — callers decide how to handle failures. That is doubly
@@ -17,7 +17,7 @@ from services.broker import crypto
 TABLE = "fubon_credentials"
 CERT_BUCKET = "broker-certs"
 
-DEFAULT_LABEL = "default"
+DEFAULT_LABEL = "ian"
 
 
 def upsert_credential(label, fields):
