@@ -600,6 +600,22 @@ def reconnect_live_warrant():
     return jsonify({"ok": True})
 
 
+@app.route("/connect_live_warrant", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def connect_live_warrant():
+    live_warrant.start_session()
+    return jsonify({"ok": True})
+
+
+@app.route("/disconnect_live_warrant", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def disconnect_live_warrant():
+    live_warrant.stop_session()
+    return jsonify({"ok": True})
+
+
 @app.route("/read_warrant", methods=["POST"])
 @require_auth
 def read_warrant():

@@ -271,3 +271,33 @@ async function reconnectLiveWarrant() {
     btn.textContent = "Reconnect";
   }
 }
+
+async function connectLiveWarrant() {
+  const btn = document.getElementById("live-connect-btn");
+  const statusEl = document.getElementById("live-status");
+  btn.disabled = true;
+  btn.textContent = "Connecting…";
+  try {
+    await apiJson("/connect_live_warrant", { method: "POST", headers: { "Content-Type": "application/json" } });
+  } catch (e) {
+    if (statusEl) statusEl.textContent = "Connect failed: " + (e.message || e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Connect";
+  }
+}
+
+async function disconnectLiveWarrant() {
+  const btn = document.getElementById("live-disconnect-btn");
+  const statusEl = document.getElementById("live-status");
+  btn.disabled = true;
+  btn.textContent = "Disconnecting…";
+  try {
+    await apiJson("/disconnect_live_warrant", { method: "POST", headers: { "Content-Type": "application/json" } });
+  } catch (e) {
+    if (statusEl) statusEl.textContent = "Disconnect failed: " + (e.message || e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Disconnect";
+  }
+}

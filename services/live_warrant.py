@@ -324,6 +324,11 @@ def reconnect():
     start_session()
 
 
+def stop_session():
+    """Manual disconnect: tear down the whole pool and stay stopped (no reopen); also used by wsgi.py's shutdown hook."""
+    _teardown()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tracked-list mutation (persist, then subscribe/unsubscribe)
 # ─────────────────────────────────────────────────────────────────────────────
