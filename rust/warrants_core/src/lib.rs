@@ -322,6 +322,44 @@ fn build_warrant_columns<'py>(
     frame::to_columns(py, &cols)
 }
 
+/// Every pair the same-type warrant/option matcher would emit, in emission
+/// order. See `arb::direct_pairs`; the caller dedups and builds the rows.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn direct_pairs<'py>(
+    py: Python<'py>,
+    w_type: Vec<i64>, w_is_put: Vec<bool>, w_strike: Vec<f64>, w_dte: Vec<i64>,
+    w_ratio: Vec<f64>, w_ask: Vec<f64>, w_bid: Vec<f64>,
+    o_type: Vec<i64>, o_strike: Vec<f64>, o_dte: Vec<i64>, o_bid: Vec<f64>,
+    o_ask: Vec<f64>, o_bid_live: Vec<bool>, o_ask_live: Vec<bool>,
+    max_dte_diff: i64, positive_loose: bool,
+) -> PyResult<Vec<(i64, i64, i64, f64, f64, f64, f64, i64, bool, f64)>> {
+    let nw = w_strike.len();
+    same_len(nw, w_type.len(), "w_type")?;
+    same_len(nw, w_is_put.len(), "w_is_put")?;
+    same_len(nw, w_dte.len(), "w_dte")?;
+    same_len(nw, w_ratio.len(), "w_ratio")?;
+    same_len(nw, w_ask.len(), "w_ask")?;
+    same_len(nw, w_bid.len(), "w_bid")?;
+    let no = o_strike.len();
+    same_len(no, o_type.len(), "o_type")?;
+    same_len(no, o_dte.len(), "o_dte")?;
+    same_len(no, o_bid.len(), "o_bid")?;
+    same_len(no, o_ask.len(), "o_ask")?;
+    same_len(no, o_bid_live.len(), "o_bid_live")?;
+    same_len(no, o_ask_live.len(), "o_ask_live")?;
+
+    let hits = py.allow_threads(|| {
+        arb::direct_pairs(&w_type, &w_is_put, &w_strike, &w_dte, &w_ratio, &w_ask,
+                          &w_bid, &o_type, &o_strike, &o_dte, &o_bid, &o_ask,
+                          &o_bid_live, &o_ask_live, max_dte_diff, positive_loose)
+    });
+    Ok(hits.into_iter()
+        .map(|h| (h.wi, h.oi, h.direction, h.price_diff, h.exec_opt, h.exec_warrant,
+                  h.strike_diff_pct, h.dte_diff, h.favorable, h.max_loss_per_share))
+        .collect())
+}
+
 /// Python's builtin `round(x, nd)`, exposed so a test can prove the Rust and
 /// CPython roundings agree before any kernel relies on it.
 #[pyfunction]
@@ -342,6 +380,7 @@ fn warrants_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bs_delta_vec, m)?)?;
     m.add_function(wrap_pyfunction!(refine_iv_for_rounding, m)?)?;
     m.add_function(wrap_pyfunction!(butterfly_pairs, m)?)?;
+    m.add_function(wrap_pyfunction!(direct_pairs, m)?)?;
     m.add_function(wrap_pyfunction!(round_py, m)?)?;
     m.add_function(wrap_pyfunction!(build_warrant_columns, m)?)?;
     Ok(())

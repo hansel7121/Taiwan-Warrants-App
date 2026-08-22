@@ -163,3 +163,137 @@ fn lower_bound(xs: &[f64], v: f64) -> usize {
     }
     lo
 }
+
+/// One emitted warrant/option pair from the same-type matcher.
+pub struct DirectHit {
+    pub wi: i64,
+    pub oi: i64,
+    pub direction: i64,
+    pub price_diff: f64,
+    pub exec_opt: f64,
+    pub exec_warrant: f64,
+    pub strike_diff_pct: f64,
+    pub dte_diff: i64,
+    pub favorable: bool,
+    pub max_loss_per_share: f64,
+}
+
+/// Every pair the same-type matcher would emit, in emission order: direction,
+/// then warrant, then option. The caller applies the (warrant, contract) dedup
+/// and builds the rows.
+///
+/// NaN quotes propagate exactly as they did per row — `NaN <= 0` is false, so a
+/// pair priced off a missing side still reaches the caller.
+#[allow(clippy::too_many_arguments)]
+pub fn direct_pairs(
+    w_type: &[i64], w_is_put: &[bool], w_strike: &[f64], w_dte: &[i64],
+    w_ratio: &[f64], w_ask: &[f64], w_bid: &[f64],
+    o_type: &[i64], o_strike: &[f64], o_dte: &[i64], o_bid: &[f64], o_ask: &[f64],
+    o_bid_live: &[bool], o_ask_live: &[bool],
+    max_dte_diff: i64, positive_loose: bool,
+) -> Vec<DirectHit> {
+    let mut out = Vec::new();
+    let nw = w_strike.len();
+    let no = o_strike.len();
+    if nw == 0 || no == 0 {
+        return out;
+    }
+
+    for direction in 0..2i64 {
+        let positive = direction == 0;
+        for wi in 0..nw {
+            let kw = w_strike[wi];
+            let dte_w = w_dte[wi];
+            let ratio = w_ratio[wi];
+            if ratio <= 0.0 {
+                continue; // can't size or normalise a warrant with no exercise ratio
+            }
+            // The residual vertical must be FAVORABLE (payoff >= 0 everywhere)
+            // so the entry credit is never clawed back at expiry.
+            let opt_ge_warrant = positive != w_is_put[wi];
+            let ask_ps = round_py(w_ask[wi] / ratio, 4);
+            let bid_live = w_bid[wi] > 0.0;
+            // Loose marks tolerate the ask-as-bid fallback; an EXECUTABLE sell
+            // does not — nobody lifts a bid that isn't there.
+            let bid_ps = round_py(
+                (if bid_live { w_bid[wi] } else { w_ask[wi] }) / ratio, 4);
+            let bid_real_ps = if bid_live {
+                Some(round_py(w_bid[wi] / ratio, 4))
+            } else {
+                None
+            };
+            let typ_w = w_type[wi];
+
+            for oi in 0..no {
+                if o_type[oi] != typ_w {
+                    continue;
+                }
+                let ko = o_strike[oi];
+                let favorable = if opt_ge_warrant { ko >= kw } else { ko <= kw };
+                if !favorable {
+                    continue;
+                }
+                let dte_o = o_dte[oi];
+                // Never hold the SHORT leg as the longer-dated one — the hedge
+                // leg would expire first, leaving a naked short position.
+                if positive {
+                    if dte_o > dte_w {
+                        continue;
+                    }
+                } else if (dte_w - dte_o).max(0) > max_dte_diff {
+                    continue;
+                }
+
+                if !(o_ask_live[oi] || o_bid_live[oi]) {
+                    continue;
+                }
+                let o_bid_ps = if o_bid_live[oi] { Some(round_py(o_bid[oi], 4)) } else { None };
+                let o_ask_ps = if o_ask_live[oi] { Some(round_py(o_ask[oi], 4)) } else { None };
+
+                // Tight = prices you can actually hit. Loose = optimistic
+                // favorable-side mark, for ranking only.
+                let (price_diff, exec_opt, exec_warrant) = if positive {
+                    let (px, eo, ew) = if positive_loose {
+                        let Some(a) = o_ask_ps else { continue };
+                        (round_py(a - bid_ps, 4), a, bid_ps)
+                    } else {
+                        let Some(b) = o_bid_ps else { continue };
+                        (round_py(b - ask_ps, 4), b, ask_ps)
+                    };
+                    if px <= 0.0 {
+                        continue;
+                    }
+                    (px, eo, ew)
+                } else {
+                    let (px, eo, ew) = if positive_loose {
+                        let Some(b) = o_bid_ps else { continue };
+                        (round_py(b - ask_ps, 4), b, ask_ps)
+                    } else {
+                        // A synthetic (ask-as-bid) warrant bid would fake the
+                        // proceeds, so demand the REAL one.
+                        let (Some(a), Some(br)) = (o_ask_ps, bid_real_ps) else { continue };
+                        (round_py(a - br, 4), a, br)
+                    };
+                    if px >= 0.0 {
+                        continue;
+                    }
+                    (px, eo, ew)
+                };
+
+                out.push(DirectHit {
+                    wi: wi as i64,
+                    oi: oi as i64,
+                    direction,
+                    price_diff,
+                    exec_opt,
+                    exec_warrant,
+                    strike_diff_pct: (ko - kw).abs() / kw * 100.0,
+                    dte_diff: (dte_o - dte_w).abs(),
+                    favorable,
+                    max_loss_per_share: if favorable { 0.0 } else { (ko - kw).abs() },
+                });
+            }
+        }
+    }
+    out
+}

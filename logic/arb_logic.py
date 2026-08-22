@@ -15,7 +15,7 @@ import pandas as pd
 from logic import options_logic
 from logic import us_options_logic
 from logic import warrant_logic
-from logic.iv_engine import butterfly_pairs
+from logic.iv_engine import butterfly_pairs, direct_pairs
 
 
 class NoMatchesError(RuntimeError):
@@ -201,12 +201,9 @@ def _direct_option_arrays(opt_df):
     the IV solve, so the candidate side moves to arrays. Same values, same
     order: the index arrays are ascending, so a type slice keeps frame order.
     """
-    n = len(opt_df)
-    idx = np.arange(n)
-    types = opt_df["type"].to_numpy()
     return {
-        "n": n,
-        "idx_by_type": {t: idx[types == t] for t in np.unique(types)},
+        "n": len(opt_df),
+        "type": opt_df["type"].to_numpy(),
         "strike": opt_df["strike"].to_numpy(dtype=float),
         "dte": opt_df["days_to_expiry"].to_numpy(dtype=np.int64),
         "contract": opt_df["contract"].tolist(),
@@ -709,183 +706,111 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
     warrant_df = _with_warrant_iv(warrant_df, 0.02)
     opt_df = _with_direct_opt_iv(opt_df)
     O = _direct_option_arrays(opt_df)
-    if O["n"] == 0:
+    W = _warrant_arrays(warrant_df)
+    if O["n"] == 0 or W["n"] == 0:
         return rows
 
-    W = _warrant_arrays(warrant_df)
-    for direction in ("positive", "negative"):
-        for wi in range(W["n"]):
-            w_type = W["type"][wi]
-            cand = O["idx_by_type"].get(w_type)
-            if cand is None or cand.size == 0:
-                continue
+    # The candidate scan and both price branches run in the arb kernel — Rust
+    # when built, logic/arb_kernels_py.py otherwise. Hits come back in the order
+    # the per-row code emitted them (direction, then warrant, then option), so
+    # the dedup and the row build stay here, where the field names, the None
+    # conventions and the rounding are diffable against the original.
+    # max_strike_diff_pct is kept in the signature only because callers pass it
+    # positionally and _match_warrants_pcp still uses it.
+    codes = {t: i for i, t in
+             enumerate(sorted(set(O["type"].tolist()) | set(W["type"])))}
+    hits = direct_pairs(
+        [codes[t] for t in W["type"]],
+        [t == "Put" for t in W["type"]],
+        [float(x) for x in W["strike"]],
+        [int(x) for x in W["days_to_expiry"]],
+        [float(x) for x in W["exercise_ratio"]],
+        [float(x) for x in W["ask"]],
+        [float(x) if pd.notna(x) else float("nan") for x in W["bid"]],
+        [codes[t] for t in O["type"].tolist()],
+        # .tolist(), not the arrays: `round(np.float64, n)` rounds like NumPy
+        # (scale-rint-unscale) while `round(float, n)` rounds decimally, and the
+        # two disagree on ties — which reaches price_diff_pct.
+        O["strike"].tolist(), O["dte"].tolist(), O["bid"].tolist(),
+        O["ask"].tolist(), O["bid_live"].tolist(), O["ask_live"].tolist(),
+        max_dte_diff, positive_loose,
+    )
 
-            Kw = float(W["strike"][wi])
-            dte_w = int(W["days_to_expiry"][wi])
-            Ko = O["strike"][cand]
-            dte_o = O["dte"][cand]
-            strike_diff_pct = np.abs(Ko - Kw) / Kw * 100
-            dte_diff = np.abs(dte_o - dte_w)
+    for (wi, oi, dir_code, price_diff, exec_opt, exec_warrant,
+         strike_diff_pct, dte_diff, favorable, max_loss_per_share) in hits:
+        pair_key = (W["warrant_code"][wi], O["contract"][oi])
+        if pair_key in seen:
+            continue
+        seen.add(pair_key)
 
-            # The residual vertical spread must be FAVORABLE (payoff >= 0 everywhere)
-            # so the entry credit is never clawed back at expiry:
-            #   calls: favorable iff K_short >= K_long (bull call spread)
-            #   puts : favorable iff K_short <= K_long (bear put spread, inverted)
-            is_put_w = w_type == "Put"
-            long_side_is_warrant = direction == "positive"
-            opt_ge_warrant = long_side_is_warrant != is_put_w
-            favorable = Ko >= Kw if opt_ge_warrant else Ko <= Kw
-            # Max loss per share of the residual vertical at expiry: zero on the
-            # favorable side (payoff >= 0 everywhere), |Kw - Ko| on the other.
-            max_loss_per_share = np.where(favorable, 0.0, np.abs(Ko - Kw))
-            # Only the favorable side is emitted (pure riskless arb only) — the
-            # unfavorable side (capped loss up to |Kw - Ko|) is dropped by design.
-            # max_strike_diff_pct is kept in the signature only because callers
-            # pass it positionally and _match_warrants_pcp still uses it.
-            strike_ok = favorable
+        positive = dir_code == 0
+        ratio = float(W["exercise_ratio"][wi])
+        w_ask = W["ask"][wi]
+        w_bid = W["bid"][wi]
+        warrant_bid_live = pd.notna(w_bid) and float(w_bid or 0) > 0
+        warrant_bid_disp = round(float(w_bid), 4) if warrant_bid_live else None
+        warrants_needed = round(opt_contract_size / ratio)
+        opt_ask_live = bool(O["ask_live"][oi])
+        opt_bid_live = bool(O["bid_live"][oi])
+        opt_bid_per_share = _round4(O["bid"][oi]) if opt_bid_live else None
+        opt_ask_per_share = _round4(O["ask"][oi]) if opt_ask_live else None
 
-            # Never hold the SHORT leg as the longer-dated one — the hedge leg
-            # would expire first, leaving a naked short position.
-            if direction == "positive":
-                dte_ok = dte_o <= dte_w
-            else:
-                bad_dte = np.clip(dte_w - dte_o, 0, None)
-                dte_ok = bad_dte <= max_dte_diff
+        price_diff_pct = round(price_diff / exec_opt * 100, 2) if exec_opt > 0 else None
 
-            sel = np.flatnonzero(strike_ok & dte_ok)
-            if sel.size == 0:
-                continue
+        if positive:
+            trade = "Buy Warrant / Sell Option"
+            # Buying the warrant lifts the ask -> resting SELL size gates it.
+            warrant_depth_lots = int(W["ask_qty"][wi] or 0)
+        else:
+            trade = "Buy Option / Sell Warrant"
+            # Selling the warrant hits the bid -> resting BUY size gates it.
+            warrant_depth_lots = int(W["bid_qty"][wi] or 0)
+        board_lots_needed = round(warrants_needed / 1000, 4)
+        fillable = warrant_depth_lots >= board_lots_needed
 
-            ratio = float(W["exercise_ratio"][wi])
-            if ratio <= 0:
-                continue  # can't size or normalise a warrant with no exercise ratio
-            w_ask = W["ask"][wi]
-            w_bid = W["bid"][wi]
-            warrant_ask_per_share = round(float(w_ask) / ratio, 4)
-            warrant_bid_live = pd.notna(w_bid) and float(w_bid or 0) > 0
-            # Loose marks tolerate the ask-as-bid fallback; an EXECUTABLE sell
-            # does not — nobody lifts a bid that isn't there. Keep both and let
-            # the tight path below demand the real one.
-            warrant_bid_val = float(w_bid) if warrant_bid_live else float(w_ask)
-            warrant_bid_per_share = round(warrant_bid_val / ratio, 4)
-            warrant_bid_real_per_share = round(float(w_bid) / ratio, 4) if warrant_bid_live else None
-            warrants_needed = round(opt_contract_size / ratio)
-            is_put = is_put_w
-            # IV per leg so the modal can mark an OTM surviving leg at its time
-            # value ("sell") — the fetch dropped IV. Solved once per leg above.
-            warrant_iv = W["_arb_warrant_iv"][wi]
-            warrant_bid_disp = round(float(w_bid), 4) if warrant_bid_live else None
+        # IV per leg so the modal can mark an OTM surviving leg at its time
+        # value ("sell") — the fetch dropped IV. Both solved once per leg above,
+        # off the LIVE quote side(s) only: a settlement-backfilled side would
+        # put a stale price into the solve.
+        warrant_iv = W["_arb_warrant_iv"][wi]
+        opt_iv = O["iv"][oi]
 
-            # Emit EVERY profitable option for this warrant, not just the
-            # strike/DTE-closest one — a farther-but-profitable pair must not be
-            # hidden behind a closer-but-unprofitable "best".
-            for k in sel:
-                oi = cand[k]
-                # ask_live/bid_live are flagged before the settlement/last fallback
-                # backfills a missing side, so they distinguish a real quote from a
-                # stale settlement mark — the ask/bid columns alone can't.
-                opt_ask_live = bool(O["ask_live"][oi])
-                opt_bid_live = bool(O["bid_live"][oi])
-                if not (opt_ask_live or opt_bid_live):
-                    continue
-                opt_bid_per_share = _round4(O["bid"][oi]) if opt_bid_live else None
-                opt_ask_per_share = _round4(O["ask"][oi]) if opt_ask_live else None
-
-                # Tight = prices you can actually hit (lift the ask you buy, hit
-                # the bid you sell). Loose = optimistic favorable-side mark, for
-                # ranking only. Both directions honor the toggle symmetrically.
-                if direction == "positive":
-                    if positive_loose:
-                        if opt_ask_per_share is None:
-                            continue  # loose positive marks against the option ask
-                        price_diff = round(opt_ask_per_share - warrant_bid_per_share, 4)
-                        exec_opt = opt_ask_per_share
-                        exec_warrant = warrant_bid_per_share
-                    else:
-                        if opt_bid_per_share is None:
-                            continue  # tight positive sells the option at its bid
-                        price_diff = round(opt_bid_per_share - warrant_ask_per_share, 4)
-                        exec_opt = opt_bid_per_share
-                        exec_warrant = warrant_ask_per_share
-                    if price_diff <= 0:
-                        continue
-                else:
-                    if positive_loose:
-                        if opt_bid_per_share is None:
-                            continue  # loose negative marks against the option bid
-                        price_diff = round(opt_bid_per_share - warrant_ask_per_share, 4)
-                        exec_opt = opt_bid_per_share
-                        exec_warrant = warrant_ask_per_share
-                    else:
-                        # Executable: buy the option at its ask, sell the warrant
-                        # into its bid. A synthetic (ask-as-bid) warrant bid would
-                        # fake the proceeds, so demand the REAL one.
-                        if opt_ask_per_share is None or warrant_bid_real_per_share is None:
-                            continue
-                        price_diff = round(opt_ask_per_share - warrant_bid_real_per_share, 4)
-                        exec_opt = opt_ask_per_share
-                        exec_warrant = warrant_bid_real_per_share
-                    if price_diff >= 0:
-                        continue
-
-                pair_key = (W["warrant_code"][wi], O["contract"][oi])
-                if pair_key in seen:
-                    continue
-                seen.add(pair_key)
-
-                price_diff_pct = round(price_diff / exec_opt * 100, 2) if exec_opt > 0 else None
-
-                if direction == "positive":
-                    trade = "Buy Warrant / Sell Option"
-                    # Buying the warrant lifts the ask -> resting SELL size gates it.
-                    warrant_depth_lots = int(W["ask_qty"][wi] or 0)
-                else:
-                    trade = "Buy Option / Sell Warrant"
-                    # Selling the warrant hits the bid -> resting BUY size gates it.
-                    warrant_depth_lots = int(W["bid_qty"][wi] or 0)
-                board_lots_needed = round(warrants_needed / 1000, 4)
-                fillable = warrant_depth_lots >= board_lots_needed
-
-                # Marked off the LIVE side(s) only — a settlement-backfilled
-                # side would put a stale price into the IV solve.
-                opt_iv = O["iv"][oi]
-
-                rows.append({
-                    "warrant_code": W["warrant_code"][wi],
-                    "warrant_name": W["warrant_name"][wi],
-                    "option_contract": O["contract"][oi],
-                    "type": w_type,
-                    "trade": trade,
-                    "underlying_price": W["underlying_price"][wi],
-                    "warrant_dte": dte_w,
-                    "opt_dte": int(O["dte"][oi]),
-                    "dte_diff": int(dte_diff[k]),
-                    "warrant_strike": W["strike"][wi],
-                    "opt_strike": round(float(Ko[k]), 2),
-                    "strike_diff_pct": round(float(strike_diff_pct[k]), 2),
-                    # Favorable residual = the vertical pays >= 0 at every spot, so
-                    # the entry credit is never clawed back: a true (riskless) arb.
-                    # Otherwise the credit is at risk up to max_loss_per_share
-                    # (per underlying share, before exercise-ratio sizing).
-                    "riskless": bool(favorable[k]),
-                    "max_loss_per_share": round(float(max_loss_per_share[k]), 4),
-                    "warrants_needed": warrants_needed,
-                    "board_lots": board_lots_needed,
-                    "warrant_depth_lots": warrant_depth_lots,
-                    "fillable": bool(fillable),
-                    "opt_contract_size": opt_contract_size,
-                    "warrant_ask": w_ask,
-                    "warrant_bid": warrant_bid_disp,
-                    "opt_bid": opt_bid_per_share,
-                    "opt_ask": opt_ask_per_share,
-                    "warrant_per_share": exec_warrant,
-                    "opt_per_share": exec_opt,
-                    "price_diff": price_diff,
-                    "price_diff_pct": price_diff_pct,
-                    "warrant_iv": warrant_iv,
-                    "opt_iv": opt_iv,
-                    "iv_diff": round((opt_iv or 0) - (warrant_iv or 0), 4),
-                })
+        rows.append({
+            "warrant_code": W["warrant_code"][wi],
+            "warrant_name": W["warrant_name"][wi],
+            "option_contract": O["contract"][oi],
+            "type": W["type"][wi],
+            "trade": trade,
+            "underlying_price": W["underlying_price"][wi],
+            "warrant_dte": int(W["days_to_expiry"][wi]),
+            "opt_dte": int(O["dte"][oi]),
+            "dte_diff": int(dte_diff),
+            "warrant_strike": W["strike"][wi],
+            "opt_strike": round(float(O["strike"][oi]), 2),
+            "strike_diff_pct": round(float(strike_diff_pct), 2),
+            # Favorable residual = the vertical pays >= 0 at every spot, so
+            # the entry credit is never clawed back: a true (riskless) arb.
+            # Otherwise the credit is at risk up to max_loss_per_share
+            # (per underlying share, before exercise-ratio sizing).
+            "riskless": bool(favorable),
+            "max_loss_per_share": round(float(max_loss_per_share), 4),
+            "warrants_needed": warrants_needed,
+            "board_lots": board_lots_needed,
+            "warrant_depth_lots": warrant_depth_lots,
+            "fillable": bool(fillable),
+            "opt_contract_size": opt_contract_size,
+            "warrant_ask": w_ask,
+            "warrant_bid": warrant_bid_disp,
+            "opt_bid": opt_bid_per_share,
+            "opt_ask": opt_ask_per_share,
+            "warrant_per_share": exec_warrant,
+            "opt_per_share": exec_opt,
+            "price_diff": price_diff,
+            "price_diff_pct": price_diff_pct,
+            "warrant_iv": warrant_iv,
+            "opt_iv": opt_iv,
+            "iv_diff": round((opt_iv or 0) - (warrant_iv or 0), 4),
+        })
     return rows
 
 

@@ -184,8 +184,21 @@ if RUST_AVAILABLE and use_rust("arb"):
         a, b, body, credit, tail, worst, guaranteed = (c.tolist() for c in cols)
         return list(zip(a, b, body, credit, tail, worst, guaranteed))
 
+    def direct_pairs(w_type, w_is_put, w_strike, w_dte, w_ratio, w_ask, w_bid,
+                     o_type, o_strike, o_dte, o_bid, o_ask, o_bid_live, o_ask_live,
+                     max_dte_diff, positive_loose):
+        """See `arb_kernels_py.direct_pairs`."""
+        return _rust.direct_pairs(
+            list(w_type), list(w_is_put), list(w_strike), list(w_dte),
+            list(w_ratio), list(w_ask), list(w_bid),
+            list(o_type), list(o_strike), list(o_dte), list(o_bid), list(o_ask),
+            list(o_bid_live), list(o_ask_live), int(max_dte_diff),
+            bool(positive_loose),
+        )
+
 else:  # pragma: no cover - exercised under RUST_ENGINE=python
     butterfly_pairs = arb_kernels_py.butterfly_pairs
+    direct_pairs = arb_kernels_py.direct_pairs
 
 
 # ── warrant frame ───────────────────────────────────────────────────────────
@@ -231,5 +244,5 @@ __all__ = [
     "FEATURES", "use_rust", "feature_engines",
     "bs_price", "bs_delta", "bs_vega", "calc_real_leverage",
     "implied_vol", "implied_vol_vec", "bs_delta_vec", "_refine_iv_for_rounding",
-    "butterfly_pairs", "build_warrant_df",
+    "butterfly_pairs", "direct_pairs", "build_warrant_df",
 ]
