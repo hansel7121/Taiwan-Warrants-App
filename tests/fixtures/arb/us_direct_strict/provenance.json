@@ -1,0 +1,11 @@
+{
+ "git_sha": "0e8106b9956c2080f78ad82e9498dd0de1b649d9",
+ "engine": "rust warrants_core 0.1.0",
+ "source": "live",
+ "base": "us",
+ "mutation": "none",
+ "input_sizes": {
+  "warrant_df": 44,
+  "opt_df": 177
+ }
+}

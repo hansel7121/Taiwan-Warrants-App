@@ -1,0 +1,9 @@
+{
+ "matcher": "option_legs",
+ "max_strike_diff_pct": 3.0,
+ "max_dte_diff": 5,
+ "positive_loose": false,
+ "tw_contract_shares": 2000,
+ "us_contract_shares": 500,
+ "frames": "tw_us__none"
+}

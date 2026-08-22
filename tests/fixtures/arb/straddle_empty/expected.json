@@ -1,0 +1,4 @@
+{
+ "rows": [],
+ "diag": "No straddle rows. Stages: legs=397, long_pkgs=36, short_pkgs=16, pairs=15, cut_by_dte_cover=0, cut_by_min_iv_edge=15. Best edge found = -2.21 pts vs threshold 9999.00 pts — lower Min IV Edge to see it"
+}

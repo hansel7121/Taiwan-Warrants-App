@@ -1,0 +1,8 @@
+{
+ "matcher": "butterfly",
+ "max_strike_diff_pct": 3.0,
+ "max_dte_diff": 5,
+ "positive_loose": true,
+ "opt_contract_size": 2000,
+ "frames": "tw__none"
+}
