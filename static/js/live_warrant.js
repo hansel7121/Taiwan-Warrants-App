@@ -2,12 +2,17 @@
 // the table cells that changed, instead of rebuilding the table each tick —
 // the DOM-rebuild cost was the actual bottleneck in scripts/fubon_quote_viewer.py
 // at a few hundred tracked codes, not the websocket or Python-side cost (issue #69).
+//
+// Two views share the same poll/data: a flat table (one row per warrant, all
+// 5 book levels inline) and an orderbook card grid (mirrors the layout of
+// scripts/fubon_quote_viewer.py, one card per warrant with its own 5-row ladder).
 
 let _lwLoaded = false;
 let _lwPollTimer = null;
 let _lwInFlight = false;
-let _lwRows = {};           // code -> { tr, cells: {...}, ladderTr, ladderCells, name }
-let _lwExpanded = new Set();
+let _lwRows = {};           // code -> table row els, keyed by _lwBuildRow()
+let _lwBooks = {};          // code -> orderbook card els, keyed by _lwBuildBook()
+let _lwView = "table";      // "table" | "orderbook"
 const _lwLastText = new WeakMap();
 
 function _lwSetText(el, s) {
@@ -18,11 +23,16 @@ function _lwSetText(el, s) {
   }
 }
 
-function _lwCell(v) { return v === null || v === undefined ? "—" : v.toLocaleString(); }
+// price (vol), e.g. "12.05 (67)" — "—" when the level has no data.
+function _lwLevelText(price, size) {
+  if (price === null || price === undefined) return "—";
+  return `${price.toLocaleString()} (${size === null || size === undefined ? "—" : size.toLocaleString()})`;
+}
 
 function _lwAge(b) {
   if (b.age === null) return "no data yet";
-  const t = b.age < 90 ? `${b.age}s` : `${Math.round(b.age / 60)}m`;
+  const secs = Math.round(b.age);
+  const t = secs < 90 ? `${secs}s` : `${Math.round(secs / 60)}m`;
   return b.src === "rest" ? `snapshot, ${t} old` : `${t} ago`;
 }
 
@@ -35,15 +45,19 @@ async function loadLiveWarrantOnce() {
   _lwPoll();
 }
 
+function setLiveView(view) {
+  _lwView = view;
+  document.getElementById("live-table-view").style.display = view === "table" ? "" : "none";
+  document.getElementById("live-orderbook-view").style.display = view === "orderbook" ? "" : "none";
+  document.getElementById("live-view-table-btn").classList.toggle("active", view === "table");
+  document.getElementById("live-view-orderbook-btn").classList.toggle("active", view === "orderbook");
+  if (_lwLastData) _lwRender(_lwLastData);
+}
+
+// ── Table view: one row per warrant, 5 bid + 5 ask levels inline ──────────
 function _lwBuildRow(code) {
   const tr = document.createElement("tr");
   tr.className = "live-row";
-
-  const toggleTd = document.createElement("td");
-  toggleTd.className = "live-toggle";
-  toggleTd.style.cursor = "pointer";
-  toggleTd.onclick = () => toggleLiveRow(code);
-  tr.appendChild(toggleTd);
 
   const codeTd = document.createElement("td");
   codeTd.textContent = code;
@@ -52,18 +66,23 @@ function _lwBuildRow(code) {
   const nameTd = document.createElement("td");
   tr.appendChild(nameTd);
 
-  const bidSizeTd = document.createElement("td");
-  bidSizeTd.className = "bid";
-  const bidTd = document.createElement("td");
-  bidTd.className = "bid";
-  const askTd = document.createElement("td");
-  askTd.className = "ask";
-  const askSizeTd = document.createElement("td");
-  askSizeTd.className = "ask";
-  [bidSizeTd, bidTd, askTd, askSizeTd].forEach(td => tr.appendChild(td));
+  // Displayed lowest bid -> highest bid, then lowest ask -> highest ask,
+  // i.e. level 5..1 for bids (best bid is level 1) then level 1..5 for asks.
+  const bidTds = [4, 3, 2, 1, 0].map(() => {
+    const td = document.createElement("td");
+    td.className = "bid";
+    tr.appendChild(td);
+    return td;
+  });
+  const askTds = [0, 1, 2, 3, 4].map(() => {
+    const td = document.createElement("td");
+    td.className = "ask";
+    tr.appendChild(td);
+    return td;
+  });
 
   const ageTd = document.createElement("td");
-  ageTd.style.color = "var(--muted)";
+  ageTd.className = "live-updated";
   tr.appendChild(ageTd);
 
   const removeTd = document.createElement("td");
@@ -74,74 +93,80 @@ function _lwBuildRow(code) {
   removeTd.appendChild(removeBtn);
   tr.appendChild(removeTd);
 
-  return {
-    tr, name: null,
-    cells: { toggle: toggleTd, name: nameTd, bidSize: bidSizeTd, bid: bidTd, ask: askTd, askSize: askSizeTd, age: ageTd },
-    ladderTr: null,
-  };
+  return { tr, cells: { name: nameTd, bid: bidTds, ask: askTds, age: ageTd } };
 }
 
-function _lwBuildLadder(code) {
-  const tr = document.createElement("tr");
-  tr.className = "live-ladder-row";
-  const td = document.createElement("td");
-  td.colSpan = 8;
+function _lwPatchRow(el, b) {
+  _lwSetText(el.cells.name, b.name || "-");
+  // rows[i] is level i+1 (0 = best). bidTds[0] = level 5 (lowest, worst) ... bidTds[4] = level 1 (best).
+  [4, 3, 2, 1, 0].forEach((lvl, i) => {
+    const r = b.rows[lvl] || {};
+    _lwSetText(el.cells.bid[i], _lwLevelText(r.bid, r.bid_size));
+  });
+  [0, 1, 2, 3, 4].forEach((lvl, i) => {
+    const r = b.rows[lvl] || {};
+    _lwSetText(el.cells.ask[i], _lwLevelText(r.ask, r.ask_size));
+  });
+  _lwSetText(el.cells.age, _lwAge(b));
+}
+
+// ── Orderbook view: one card per warrant, 5-row bid/ask ladder ────────────
+function _lwBuildBook(code) {
+  const root = document.createElement("div");
+  root.className = "live-book";
+
+  const h3 = document.createElement("h3");
+  root.appendChild(h3);
+
   const table = document.createElement("table");
-  table.className = "live-ladder";
-  table.innerHTML = "<tr><th>Level</th><th>Bid Vol</th><th>Bid</th><th>Ask</th><th>Ask Vol</th></tr>";
-  const cells = [];
+  table.innerHTML = "<tr><th>Bid Vol</th><th>Bid</th><th></th><th>Ask</th><th>Ask Vol</th></tr>";
+  const rows = [];
   for (let i = 0; i < 5; i++) {
-    const row = document.createElement("tr");
-    const lv = document.createElement("td"); lv.textContent = i + 1;
+    const tr = document.createElement("tr");
     const bs = document.createElement("td"); bs.className = "bid";
     const bp = document.createElement("td"); bp.className = "bid";
+    const lv = document.createElement("td"); lv.className = "lv"; lv.textContent = i + 1;
     const ap = document.createElement("td"); ap.className = "ask";
     const as = document.createElement("td"); as.className = "ask";
-    [lv, bs, bp, ap, as].forEach(c => row.appendChild(c));
-    table.appendChild(row);
-    cells.push({ bs, bp, ap, as });
+    [bs, bp, lv, ap, as].forEach(td => tr.appendChild(td));
+    table.appendChild(tr);
+    rows.push({ tr, bs, bp, ap, as });
   }
-  td.appendChild(table);
-  tr.appendChild(td);
-  return { tr, cells };
+  root.appendChild(table);
+
+  const meta = document.createElement("div");
+  meta.className = "live-book-meta";
+  const metaText = document.createTextNode("");
+  const removeLink = document.createElement("a");
+  removeLink.textContent = "remove";
+  removeLink.href = "#";
+  removeLink.onclick = (e) => { e.preventDefault(); removeLiveWarrant(code); };
+  meta.appendChild(metaText);
+  meta.appendChild(document.createTextNode("  "));
+  meta.appendChild(removeLink);
+  root.appendChild(meta);
+
+  return { root, h3, rows, meta: metaText, title: null };
 }
 
-function toggleLiveRow(code) {
-  if (_lwExpanded.has(code)) _lwExpanded.delete(code);
-  else _lwExpanded.add(code);
-  if (_lwLastData) _lwRender(_lwLastData);
-}
+function _lwPatchBook(el, b) {
+  const title = `${b.code}  ${b.name || "-"}`;
+  if (el.title !== title) { el.h3.textContent = title; el.title = title; }
 
-function _lwPatchRow(el, b, code) {
-  _lwSetText(el.cells.name, b.name || "-");
-  el.cells.toggle.textContent = _lwExpanded.has(code) ? "▾" : "▸";
-  const best = b.rows[0] || {};
-  _lwSetText(el.cells.bidSize, _lwCell(best.bid_size));
-  _lwSetText(el.cells.bid, _lwCell(best.bid));
-  _lwSetText(el.cells.ask, _lwCell(best.ask));
-  _lwSetText(el.cells.askSize, _lwCell(best.ask_size));
-  _lwSetText(el.cells.age, _lwAge(b));
-
-  if (_lwExpanded.has(code)) {
-    if (!el.ladderTr) {
-      const ladder = _lwBuildLadder(code);
-      el.ladderTr = ladder.tr;
-      el.ladderCells = ladder.cells;
-      el.tr.after(ladder.tr);
-    }
-    b.rows.forEach((r, i) => {
-      const c = el.ladderCells[i];
-      _lwSetText(c.bs, _lwCell(r.bid_size));
-      _lwSetText(c.bp, _lwCell(r.bid));
-      _lwSetText(c.ap, _lwCell(r.ask));
-      _lwSetText(c.as, _lwCell(r.ask_size));
-    });
-  } else if (el.ladderTr) {
-    el.ladderTr.remove();
-    el.ladderTr = null;
-    el.ladderCells = null;
+  for (let i = 0; i < el.rows.length; i++) {
+    const r = b.rows[i], slot = el.rows[i];
+    slot.tr.className = r && r.level === 1 ? "best" : "";
+    _lwSetText(slot.bs, _lwCell(r ? r.bid_size : null));
+    _lwSetText(slot.bp, _lwCell(r ? r.bid : null));
+    _lwSetText(slot.ap, _lwCell(r ? r.ask : null));
+    _lwSetText(slot.as, _lwCell(r ? r.ask_size : null));
   }
+
+  const metaStr = b.age === null ? "no data yet" : _lwAge(b);
+  if (el.meta.data !== metaStr) el.meta.data = metaStr;
 }
+
+function _lwCell(v) { return v === null || v === undefined ? "—" : v.toLocaleString(); }
 
 let _lwLastData = null;
 
@@ -162,6 +187,14 @@ function _lwRender(d) {
   const statusEl = document.getElementById("live-status");
   if (statusEl) statusEl.innerHTML = _lwStatusLine(d);
 
+  if (_lwView === "table") _lwRenderTable(d);
+  else _lwRenderOrderbook(d);
+
+  const emptyEl = document.getElementById("live-empty");
+  if (emptyEl) emptyEl.style.display = d.books.length === 0 ? "block" : "none";
+}
+
+function _lwRenderTable(d) {
   const tbody = document.getElementById("live-tbody");
   if (!tbody) return;
 
@@ -173,24 +206,42 @@ function _lwRender(d) {
       el = _lwRows[b.code] = _lwBuildRow(b.code);
       tbody.appendChild(el.tr);
     }
-    _lwPatchRow(el, b, b.code);
+    _lwPatchRow(el, b);
   });
 
   Object.keys(_lwRows).forEach(code => {
     if (!seen[code]) {
       _lwRows[code].tr.remove();
-      if (_lwRows[code].ladderTr) _lwRows[code].ladderTr.remove();
       delete _lwRows[code];
-      _lwExpanded.delete(code);
     }
   });
 
-  if (d.books.length === 0) {
-    tbody.innerHTML = "";
-    document.getElementById("live-empty").style.display = "block";
-  } else {
-    document.getElementById("live-empty").style.display = "none";
-  }
+  if (d.books.length === 0) tbody.innerHTML = "";
+}
+
+function _lwRenderOrderbook(d) {
+  const container = document.getElementById("live-orderbook-grid");
+  if (!container) return;
+
+  const seen = {};
+  d.books.forEach(b => {
+    seen[b.code] = true;
+    let el = _lwBooks[b.code];
+    if (!el) {
+      el = _lwBooks[b.code] = _lwBuildBook(b.code);
+      container.appendChild(el.root);
+    }
+    _lwPatchBook(el, b);
+  });
+
+  Object.keys(_lwBooks).forEach(code => {
+    if (!seen[code]) {
+      _lwBooks[code].root.remove();
+      delete _lwBooks[code];
+    }
+  });
+
+  if (d.books.length === 0) container.innerHTML = "";
 }
 
 function _lwPoll() {
