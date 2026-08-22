@@ -20,6 +20,7 @@ from logic import live_warrant_logic
 from logic import static_arb
 # Aliased: the route functions below are named iv_surface / close_quote.
 from logic import iv_surface as iv_surface_logic
+from logic import iv_engine
 from logic import close_quote as close_quote_logic
 from logic import user_marks
 from services.auth import require_auth
@@ -1278,6 +1279,7 @@ def healthz():
             "commit": _COMMIT,
             "branch": _BRANCH,
             "scheduler": os.environ.get("ENABLE_SCHEDULER") == "1",
+            "iv_engine": iv_engine.engine_info(),
         }
     )
 

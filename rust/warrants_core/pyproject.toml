@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "warrants-core"
+version = "0.1.0"
+description = "Rust Black-Scholes IV/delta kernels for the Taiwan warrants scanner"
+requires-python = ">=3.11"
+classifiers = ["Programming Language :: Rust"]
+
+[tool.maturin]
+module-name = "warrants_core"
+features = ["pyo3/extension-module"]
+strip = true

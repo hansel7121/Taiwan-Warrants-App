@@ -32,11 +32,15 @@ Supported underlyings and their option IDs are managed as data in Supabase produ
 
 ## Commands
 
-Requires Python 3.11+. Conda env: **`warrants`**.
+Requires Python 3.11+. Conda env: **`warrants`**. The Rust IV engine additionally needs a stable Rust toolchain (`scripts/build_rust.sh` installs one via rustup if absent).
 
 ```bash
 conda activate warrants
 pip install -r requirements.txt
+
+# Optional but wanted: compile the Rust IV engine (installs rustup if missing).
+# Without it the app runs on the slower pure-Python solver — same numbers.
+./scripts/build_rust.sh
 
 # Dev server — ALWAYS prefix with the Taiwan timezone (see note)
 TZ=Asia/Taipei python app.py                 # http://127.0.0.1:5001
@@ -60,7 +64,9 @@ Three layers: **routes** (`app.py`), **pure computation** (`logic/`), **infrastr
 app.py                 Flask routes only (parse request -> call logic/services -> JSON/CSV)
 wsgi.py                gunicorn entry point (wsgi:app); starts the scheduler in production
 logic/                 pure market-data + math, no side effects, own in-process caches
-  warrant_logic.py       CMoney warrant fetch; Black-Scholes IV (Brent), delta, leverage; cmkey + universe scrape
+  iv_engine.py           picks the IV/delta backend: Rust `warrants_core` if built, else bs_python
+  bs_python.py           pure-Python/NumPy Black-Scholes reference (price, delta, vega, IV) — the fallback
+  warrant_logic.py       CMoney warrant fetch + frame build; re-exports the IV kernels; cmkey + universe scrape
   options_logic.py       TAIFEX TW option fetch + computation; R (risk-free rate); _commodity_map()
   us_options_logic.py    US ADR option fetch, TWD conversion; R_US; _adr_map(); contract_tw_shares()
   arb_logic.py           warrant<->option matching, put-call parity, straddle vol-arb, TW/US leg arb
@@ -76,6 +82,7 @@ services/              side-effecting infrastructure
 templates/index.html   single-page frontend shell (Jinja + Plotly)
 static/css/app.css     extracted stylesheet
 static/js/*.js         extracted JS (common, quant, scanners, arb, portfolio)
+rust/warrants_core/    Rust IV/delta kernels -> the `warrants_core` extension (docs/adr/0003)
 supabase/              schema.sql (current end state) + migrations/ (incremental)
 notebooks/             exploratory research (ADR parity, screening); commit WITHOUT outputs
 scripts/               one-off maintenance/seeding scripts
@@ -88,7 +95,8 @@ scripts/               one-off maintenance/seeding scripts
 - **Spot prices** — TWSE MIS API, Yahoo Finance / yfinance fallbacks.
 
 **Key computations (`logic/`):**
-- IV solved with Brent's method (`warrant_logic.implied_vol`), bounds `[1e-6, 5.0]`.
+- IV solved with Brent's method (`warrant_logic.implied_vol`), bounds `[1e-6, 10.0]`.
+- **The IV/delta kernels run in Rust** (`rust/warrants_core`, ~50x on the scanner's compute stage). `logic/iv_engine.py` falls back to the pure-Python `logic/bs_python.py` when the extension is not built; `IV_ENGINE=rust|python|auto` forces a backend, `/healthz` and the boot log report which one is live. Both engines produce identical columns after `round(..., 4)` — enforced by `tests/logic/test_iv_engine_parity.py`. **Any change to one solver must be mirrored in the other**, or that test fails. See `docs/adr/0003-rust-iv-engine.md`.
 - Black-Scholes delta with a continuous risk-free rate: Taiwan CBC benchmark `options_logic.R` (~1.875%); US leg uses `us_options_logic.R_US`.
 - All TW single-stock options: exercise ratio = **2,000 shares/contract**; TXO index = **50 NT$/point**.
 - Warrant per-underlying-share price = `warrant_ask / exercise_ratio`, and units-to-cover = `contract_size / exercise_ratio` — the normalization used across every arb path (`logic/arb_logic.py`, `_match_warrants_to_options` ~L399/L407).
@@ -113,6 +121,8 @@ scripts/               one-off maintenance/seeding scripts
 **Notebooks:** `notebooks/` holds exploratory research. Commit **without outputs** (`jupyter nbconvert --clear-output --inplace notebooks/*.ipynb`) to keep diffs small.
 
 ## Deploy (Render)
+
+The build runs `pip install -r requirements.txt && ./scripts/build_rust.sh`; the Rust step is best-effort, so a build image without a toolchain still deploys (on the Python IV solver). The `Dockerfile` compiles the same crate in a separate `rust-build` stage. Check `/healthz`'s `iv_engine` field after a deploy to confirm which engine is live.
 
 The repo ships a `render.yaml` blueprint — create a Render **Blueprint** from the repo; it provisions a native Python web service running gunicorn with a single worker on the **standard** plan (1 vCPU / 2 GB — the starter tier's 512 MB proved too tight for pandas/numpy/scipy, see issue #57). Set these secrets in the dashboard (marked `sync: false`, never committed): `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`. Post-deploy, add the live Render URL to Supabase **Auth → URL Configuration → Redirect URLs** or magic-link sign-in fails.
 

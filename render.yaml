@@ -4,7 +4,10 @@ services:
     runtime: python
     # Keep in sync with the Render dashboard plan (1 vCPU / 2 GB min — see issue #57).
     plan: standard
-    buildCommand: pip install -r requirements.txt
+    # build_rust.sh compiles rust/warrants_core (the IV engine) and installs a
+    # rustup toolchain if the build image has none. It is best-effort: without
+    # it logic/iv_engine.py falls back to the pure-Python solver.
+    buildCommand: pip install -r requirements.txt && ./scripts/build_rust.sh
     # Exactly 1 worker: market-data caches live in process memory + APScheduler.
     startCommand: gunicorn -w 1 --threads 8 --timeout 240 -b 0.0.0.0:$PORT wsgi:app
     healthCheckPath: /healthz
@@ -13,6 +16,11 @@ services:
         value: 3.11.0
       - key: MALLOC_ARENA_MAX
         value: "2"
+      # rustup/cargo need a writable home during the build step.
+      - key: CARGO_HOME
+        value: "/opt/render/project/.cargo"
+      - key: RUSTUP_HOME
+        value: "/opt/render/project/.rustup"
       # Enables scheduler.py: Supabase market snapshot refresh + Direct-Arb suggestions scan.
       - key: ENABLE_SCHEDULER
         value: "1"

@@ -7,12 +7,17 @@ import os
 import signal
 import threading
 
+from logic import iv_engine
 from services import live_warrant
 from services import memlog
 from services import scheduler
 from app import app
 
 memlog.log_baseline("boot")
+
+# Which Black-Scholes backend won at import — the Rust extension or the
+# pure-Python fallback. Worth one boot line: a missing wheel is otherwise silent.
+print(f"IV: engine = {iv_engine.engine_info()}", flush=True)
 
 # Opt-in via ENABLE_SCHEDULER (default OFF) to keep a 512MB host off the
 # memory-hungry refresh jobs; with it off, data fetches only on demand.

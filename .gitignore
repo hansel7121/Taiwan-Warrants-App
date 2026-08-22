@@ -20,3 +20,6 @@ local_certs/
 
 # fubon_neo SDK log output
 log/
+
+# Rust IV engine build output
+rust/*/target/
