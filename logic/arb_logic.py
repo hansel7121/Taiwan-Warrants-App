@@ -9,6 +9,8 @@ Market data comes only through the logic modules' fetchers (warrant_logic,
 options_logic, us_options_logic), which own their own in-process caches; this
 module keeps no cache of its own.
 """
+from bisect import bisect_left, bisect_right
+
 from services import applog
 import numpy as np
 import pandas as pd
@@ -44,6 +46,333 @@ def _finish_empty_scan(hard_errors, skip_reasons):
     )
 
 
+# ── Batched implied vol ──────────────────────────────────────────────────────
+# The matchers below display an IV per leg. Solved per row inside the pairing
+# loops that was up to 2*W*O scalar Brent solves per scan, each one its own
+# Python->Rust FFI crossing, for values that depend on a single leg. These
+# helpers solve each leg's IV once for the whole scan and hang the answer on the
+# frame, so the pairing loops only ever read it.
+
+
+def _flag(df, col):
+    """A boolean column as a numpy array, False where the column is absent.
+
+    Mirrors the row-level `bool(opt.get(col, False))` the loops used.
+    """
+    if col not in df.columns:
+        return np.zeros(len(df), dtype=bool)
+    return df[col].fillna(False).to_numpy(dtype=bool)
+
+
+def _round4(v):
+    """`round(x, 4)` on a possibly-NaN scalar, matching the per-row code exactly."""
+    return round(float(v), 4)
+
+
+def _iv_batch(price, S, K, dte, r, ratio, is_put):
+    """`implied_vol` over whole columns, keeping the scalar callers' own guard.
+
+    The per-row code kept a root only when `0 < iv <= 3` on the UNROUNDED value.
+    The vectorized solver agrees with the scalar one to 4 dp, but its root can
+    sit ~1e-6 away, so a root sitting exactly on a guard edge could be kept by
+    one solver and dropped by the other. Those few rows are re-solved with the
+    scalar solver; everything else takes the vector path.
+
+    Returns a list of `round(iv, 4)` floats with `None` where the guard rejects
+    — the same two-valued shape the loops emitted.
+    """
+    price = np.asarray(price, dtype=float)
+    n = price.shape[0]
+    if n == 0:
+        return []
+    S = np.broadcast_to(np.asarray(S, dtype=float), (n,))
+    K = np.broadcast_to(np.asarray(K, dtype=float), (n,))
+    T = np.asarray(dte, dtype=np.int64).astype(float) / 365.0
+    ratio = np.broadcast_to(np.asarray(ratio, dtype=float), (n,))
+    is_put = np.broadcast_to(np.asarray(is_put, dtype=bool), (n,))
+    r_arr = np.broadcast_to(np.asarray(r, dtype=float), (n,))
+
+    iv = warrant_logic.implied_vol_vec(price, S, K, T, r_arr, ratio, is_put)
+    edge = np.isfinite(iv) & ((np.abs(iv - 3.0) < 1e-5) | (np.abs(iv) < 1e-5))
+    for j in np.flatnonzero(edge):
+        iv[j] = warrant_logic.implied_vol(
+            float(price[j]), float(S[j]), float(K[j]), float(T[j]),
+            float(r_arr[j]), float(ratio[j]), bool(is_put[j]))
+    return [
+        _round4(v) if (pd.notna(v) and 0 < float(v) <= 3) else None
+        for v in iv
+    ]
+
+
+def _object_col(df, name, values):
+    """Attach a column of `float | None` without pandas coercing None to NaN."""
+    out = df.copy()
+    out[name] = pd.Series(values, index=out.index, dtype=object)
+    return out
+
+
+def _with_warrant_iv(warrant_df, r):
+    """Attach `_arb_warrant_iv`: the warrant leg's display IV, solved once.
+
+    It depends only on the warrant's own quote and `r`, never on the option it
+    is paired with or the direction being scanned, so the direction loop in
+    `_match_warrants_to_options` was solving the identical value twice per
+    warrant. A frame that already carries a solved `iv_ask` (the scanner's, not
+    the arb path's) is used as-is, exactly as the per-row code did.
+    """
+    if warrant_df.empty:
+        return warrant_df
+    have = (warrant_df["iv_ask"].to_numpy() if "iv_ask" in warrant_df.columns
+            else np.full(len(warrant_df), np.nan))
+    need = pd.isna(have)
+    ask = warrant_df["ask"].to_numpy(dtype=float)
+    solved = _iv_batch(
+        np.where(need, ask, np.nan),
+        warrant_df["underlying_price"].to_numpy(dtype=float),
+        warrant_df["strike"].to_numpy(dtype=float),
+        warrant_df["days_to_expiry"].to_numpy(),
+        r,
+        warrant_df["exercise_ratio"].to_numpy(dtype=float),
+        warrant_df["type"].to_numpy() == "Put",
+    )
+    vals = [s if n_ else _round4(h) for h, s, n_ in zip(have, solved, need)]
+    return _object_col(warrant_df, "_arb_warrant_iv", vals)
+
+
+def _live_per_share(opt_df):
+    """(bid, ask) per share, `None` on a side with no live quote.
+
+    `bid_live`/`ask_live` are flagged before the settlement/last fallback
+    backfills a missing side, so they distinguish a real quote from a stale mark
+    that `opt["bid"]`/`["ask"]` alone cannot.
+    """
+    bid = opt_df["bid"].to_numpy(dtype=float)
+    ask = opt_df["ask"].to_numpy(dtype=float)
+    bl = _flag(opt_df, "bid_live")
+    al = _flag(opt_df, "ask_live")
+    bid_ps = [_round4(bid[i]) if bl[i] else None for i in range(len(opt_df))]
+    ask_ps = [_round4(ask[i]) if al[i] else None for i in range(len(opt_df))]
+    return bid_ps, ask_ps
+
+
+def _opt_iv_batch(opt_df, S, r, is_put, mid):
+    """Option-leg display IV for a whole frame, honouring `if _omid` falsiness."""
+    have = (opt_df["iv_bid"].to_numpy() if "iv_bid" in opt_df.columns
+            else np.full(len(opt_df), np.nan))
+    need = pd.isna(have)
+    price = np.array([m if m else np.nan for m in mid], dtype=float)
+    solved = _iv_batch(
+        np.where(need, price, np.nan), S,
+        opt_df["strike"].to_numpy(dtype=float),
+        opt_df["days_to_expiry"].to_numpy(), r, 1.0, is_put,
+    )
+    return [s if n_ else _round4(h) for h, s, n_ in zip(have, solved, need)]
+
+
+def _with_direct_opt_iv(opt_df):
+    """Attach `_arb_opt_iv` for the same-type matcher.
+
+    `candidates` is filtered to the warrant's own type, so the put/call flag the
+    per-row solve used (`w["type"] == "Put"`) is always the OPTION's own type,
+    and the mid it prices comes from the option's live sides alone. The value is
+    therefore a property of the option row rather than of the pair — it was
+    being re-solved up to 2*W times for the same option.
+    """
+    if opt_df.empty:
+        return opt_df
+    bid_ps, ask_ps = _live_per_share(opt_df)
+    mid = []
+    for b, a in zip(bid_ps, ask_ps):
+        if b is not None and a is not None:
+            mid.append((b + a) / 2)
+        else:
+            mid.append(a if a is not None else b)
+    vals = _opt_iv_batch(opt_df, opt_df["underlying_price"].to_numpy(dtype=float),
+                         options_logic.R, opt_df["type"].to_numpy() == "Put", mid)
+    return _object_col(opt_df, "_arb_opt_iv", vals)
+
+
+def _direct_option_arrays(opt_df):
+    """Option columns as plain arrays, plus the row indices of each type.
+
+    The matcher used to rebuild a filtered DataFrame copy per warrant and assign
+    four derived columns to it — 2*W frame copies and 8*W column inserts per
+    scan. Profiling a 338x59 chain put ~90% of the runtime in pandas
+    (`Series.__init__`, `DataFrame.__setitem__`, `iterrows`) and none of it in
+    the IV solve, so the candidate side moves to arrays. Same values, same
+    order: the index arrays are ascending, so a type slice keeps frame order.
+    """
+    n = len(opt_df)
+    idx = np.arange(n)
+    types = opt_df["type"].to_numpy()
+    return {
+        "n": n,
+        "idx_by_type": {t: idx[types == t] for t in np.unique(types)},
+        "strike": opt_df["strike"].to_numpy(dtype=float),
+        "dte": opt_df["days_to_expiry"].to_numpy(dtype=np.int64),
+        "contract": opt_df["contract"].tolist(),
+        "ask_live": _flag(opt_df, "ask_live"),
+        "bid_live": _flag(opt_df, "bid_live"),
+        "bid": opt_df["bid"].to_numpy(dtype=float),
+        "ask": opt_df["ask"].to_numpy(dtype=float),
+        "iv": opt_df["_arb_opt_iv"].tolist(),
+    }
+
+
+def _pcp_option_arrays(opt_df):
+    """Option columns as arrays for the PCP matcher, plus per-type row indices.
+
+    Same reason as `_direct_option_arrays`: the per-warrant DataFrame copy and
+    its two derived columns were the matcher's dominant cost.
+    """
+    n = len(opt_df)
+    idx = np.arange(n)
+    types = opt_df["type"].to_numpy()
+    return {
+        "n": n,
+        "idx_by_type": {t: idx[types == t] for t in np.unique(types)},
+        "strike": opt_df["strike"].to_numpy(dtype=float),
+        "dte": opt_df["days_to_expiry"].to_numpy(dtype=np.int64),
+        "contract": opt_df["contract"].tolist(),
+        "underlying_price": opt_df["underlying_price"].to_numpy(dtype=float),
+        "bond_pv": opt_df["_arb_bond_pv"].tolist(),
+        "bid_ps": opt_df["_arb_bid_ps"].tolist(),
+        "ask_ps": opt_df["_arb_ask_ps"].tolist(),
+    }
+
+
+def _leg_arrays(df, cols):
+    """Named columns as plain lists/arrays, with the row indices of each type.
+
+    Same motivation as `_direct_option_arrays`: it replaces a filtered DataFrame
+    copy plus two derived columns built once per row of the other leg.
+    """
+    n = len(df)
+    types = df["type"].to_numpy()
+    out = {
+        "n": n,
+        "idx_by_type": {t: np.flatnonzero(types == t) for t in np.unique(types)},
+        "strike_f": df["strike"].to_numpy(dtype=float),
+        "dte_i": df["days_to_expiry"].to_numpy(dtype=np.int64),
+    }
+    for c in cols:
+        out[c] = df[c].tolist() if c in df.columns else [None] * n
+    return out
+
+
+def _warrant_arrays(warrant_df):
+    """Warrant columns as plain Python lists.
+
+    `iterrows()` builds a Series per row and every `w["col"]` after it is an
+    index lookup — ~50 per warrant per direction, which profiling showed was the
+    remaining pandas cost once the candidate side moved to arrays. Lists give
+    the same Python scalars the Series lookups did.
+    """
+    cols = ("warrant_code", "warrant_name", "type", "strike", "days_to_expiry",
+            "exercise_ratio", "ask", "bid", "underlying_price", "ask_qty",
+            "bid_qty", "volume", "iv_ask", "iv_bid", "_arb_warrant_iv")
+    out = {"n": len(warrant_df)}
+    for c in cols:
+        out[c] = (warrant_df[c].tolist() if c in warrant_df.columns
+                  else [None] * len(warrant_df))
+    return out
+
+
+def group_by_str(df, col):
+    """`{str(value): sub-frame}` for one column, built once per scan.
+
+    The orchestrators sliced with `df[col].astype(str) == str(code)` inside the
+    per-code loop, re-casting the whole column for every code. groupby preserves
+    within-group row order, so the slices are identical.
+    """
+    if df.empty or col not in df.columns:
+        return {}
+    return {str(k): g for k, g in df.groupby(df[col].astype(str), sort=False)}
+
+
+def _quote_mid_iv(df, r):
+    """Display IV off the two-sided mid, per row, for a whole frame.
+
+    Both legs of the TW/US matcher price their IV off their own bid/ask mid, so
+    neither depends on the pair it lands in — they were being solved inside the
+    per-row loop.
+    """
+    n = len(df)
+    if n == 0:
+        return []
+    bid = df["bid"].to_numpy(dtype=float)
+    ask = df["ask"].to_numpy(dtype=float)
+    with np.errstate(invalid="ignore"):
+        ok = (bid > 0) & (ask > 0)
+        mid = np.where(ok, (bid + ask) / 2, np.nan)
+    return _iv_batch(mid, df["underlying_price"].to_numpy(dtype=float),
+                     df["strike"].to_numpy(dtype=float),
+                     df["days_to_expiry"].to_numpy(), r, 1.0,
+                     df["type"].to_numpy() == "Put")
+
+
+def _straddle_opt_ivs(opt_df):
+    """(iv_at_ask, iv_at_bid) per option row, solved once for the frame.
+
+    `_straddle_legs` solved both per row, so an O-row chain cost 2*O scalar
+    Brent solves. Prices come straight off the quote (no liveness gate, unlike
+    the other matchers) and are marked at ratio=1.0 so the option IV stays on
+    the same scale as the warrant IV — see the module note above.
+    """
+    n = len(opt_df)
+    if n == 0:
+        return [], []
+    ask = opt_df["ask"].to_numpy(dtype=float)
+    bid = opt_df["bid"].to_numpy(dtype=float)
+    S = opt_df["underlying_price"].to_numpy(dtype=float)
+    K = opt_df["strike"].to_numpy(dtype=float)
+    dte = opt_df["days_to_expiry"].to_numpy()
+    is_put = opt_df["type"].to_numpy() == "Put"
+    with np.errstate(invalid="ignore"):
+        ask_px = np.where(ask > 0, ask, np.nan)
+        bid_px = np.where(bid > 0, bid, np.nan)
+    return (_iv_batch(ask_px, S, K, dte, options_logic.R, 1.0, is_put),
+            _iv_batch(bid_px, S, K, dte, options_logic.R, 1.0, is_put))
+
+
+def _with_pcp_option_cols(opt_df, r):
+    """Attach the option-local values the PCP loop rebuilt once per warrant.
+
+    Both per-share quotes and the bond leg's present value depend only on the
+    option row and the discount rate, so W warrants meant W identical `np.exp`
+    calls per option.
+    """
+    if opt_df.empty:
+        return opt_df
+    bid_ps, ask_ps = _live_per_share(opt_df)
+    K = opt_df["strike"].to_numpy(dtype=float)
+    dte = opt_df["days_to_expiry"].to_numpy()
+    out = _object_col(opt_df, "_arb_bid_ps", bid_ps)
+    out = _object_col(out, "_arb_ask_ps", ask_ps)
+    out["_arb_bond_pv"] = [
+        _round4(float(K[i]) * float(np.exp(-r * (int(dte[i]) / 365.0))))
+        for i in range(len(opt_df))
+    ]
+    return out
+
+
+def _pcp_opt_iv(opt_df, S, r):
+    """PCP option-leg display IV for a whole frame at one spot.
+
+    Unlike the same-type matcher there is no bid-only fallback: a book with no
+    live ask has no mark, so the IV stays None.
+    """
+    mid = []
+    for b, a in zip(opt_df["_arb_bid_ps"], opt_df["_arb_ask_ps"]):
+        if b is not None and a is not None:
+            mid.append((b + a) / 2)
+        elif a is not None:
+            mid.append(a)
+        else:
+            mid.append(None)
+    return _opt_iv_batch(opt_df, S, r, opt_df["type"].to_numpy() == "Put", mid)
+
+
 # ── Straddle arbitrage (volatility relative-value) ───────────────────────────
 # A "straddle package" = one call + one put leg (strikes may differ within ΔK,
 # so packages carry net delta). LONG the cheapest-IV package (warrant or option
@@ -73,15 +402,17 @@ def _straddle_legs(warrant_df, opt_df, loose=False, short_warrants=False):
     when the option chain has too few live quotes to form packages.
     """
     legs = []
-    for _, w in warrant_df.iterrows():
-        ratio = float(w["exercise_ratio"] or 0)
-        ask = float(w["ask"] or 0)
+    W = _warrant_arrays(warrant_df)
+    for wi in range(W["n"]):
+        ratio = float(W["exercise_ratio"][wi] or 0)
+        ask = float(W["ask"][wi] or 0)
         if ratio <= 0 or ask <= 0:
             continue
-        bid = float(w["bid"]) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else 0.0
+        w_bid = W["bid"][wi]
+        bid = float(w_bid) if pd.notna(w_bid) and float(w_bid or 0) > 0 else 0.0
 
         def _wiv(col):
-            v = w.get(col)
+            v = W[col][wi]
             return float(v) if pd.notna(v) and 0 < float(v) <= 3 else None
 
         iv_ask, iv_bid = _wiv("iv_ask"), _wiv("iv_bid")
@@ -90,41 +421,38 @@ def _straddle_legs(warrant_df, opt_df, loose=False, short_warrants=False):
         # Write side is the mirror: executable hits the bid, loose lifts the ask.
         sell_px, sell_iv = (ask, iv_ask) if loose else (bid, iv_bid)
         legs.append({
-            "source": "warrant", "type": w["type"], "K": float(w["strike"]),
-            "dte": int(w["days_to_expiry"]), "id": str(w["warrant_code"]),
-            "name": w["warrant_name"], "ratio": ratio,
+            "source": "warrant", "type": W["type"][wi], "K": float(W["strike"][wi]),
+            "dte": int(W["days_to_expiry"][wi]), "id": str(W["warrant_code"][wi]),
+            "name": W["warrant_name"][wi], "ratio": ratio,
             "px_buy": round(buy_px / ratio, 4) if buy_px > 0 else None,
             "iv_buy": buy_iv,
             "px_sell": (round(sell_px / ratio, 4) if (short_warrants and sell_px > 0) else None),
             "iv_sell": sell_iv if short_warrants else None,
             "shortable": bool(short_warrants),
-            "S": float(w["underlying_price"]), "vol": int(w.get("volume") or 0),
+            "S": float(W["underlying_price"][wi]), "vol": int(W["volume"][wi] or 0),
         })
-    for _, o in opt_df.iterrows():
-        ask = float(o["ask"] or 0) if pd.notna(o.get("ask")) else 0.0
-        bid = float(o["bid"] or 0) if pd.notna(o.get("bid")) else 0.0
-        S = float(o["underlying_price"])
-        K = float(o["strike"])
-        T = int(o["days_to_expiry"]) / 365.0
-        is_put = o["type"] == "Put"
-        # Compute option IV OURSELVES from the per-share quote (ratio=1.0) so it's
-        # on the same scale as the warrant IV (see module note above).
-        def _oiv(px):
-            if px <= 0:
-                return None
-            v = warrant_logic.implied_vol(px, S, K, T, options_logic.R, 1.0, is_put)
-            return round(float(v), 4) if pd.notna(v) and 0 < float(v) <= 3 else None
-
+    iv_at_ask, iv_at_bid = _straddle_opt_ivs(opt_df)
+    O = _leg_arrays(opt_df, ("type", "contract", "bid", "ask", "underlying_price",
+                             "exercise_ratio", "volume"))
+    for oi in range(O["n"]):
+        o_ask, o_bid = O["ask"][oi], O["bid"][oi]
+        ask = float(o_ask or 0) if pd.notna(o_ask) else 0.0
+        bid = float(o_bid or 0) if pd.notna(o_bid) else 0.0
+        K = float(O["strike_f"][oi])
+        # Option IV is computed OURSELVES from the per-share quote (ratio=1.0)
+        # so it's on the same scale as the warrant IV (see module note above).
         buy_px = bid if loose else ask
         sell_px = ask if loose else bid
+        buy_iv = iv_at_bid[oi] if loose else iv_at_ask[oi]
+        sell_iv = iv_at_ask[oi] if loose else iv_at_bid[oi]
         legs.append({
-            "source": "option", "type": o["type"], "K": K,
-            "dte": int(o["days_to_expiry"]), "id": str(o["contract"]),
-            "name": o["contract"], "ratio": float(o.get("exercise_ratio") or 2000),
-            "px_buy": round(buy_px, 4) if buy_px > 0 else None, "iv_buy": _oiv(buy_px),
-            "px_sell": round(sell_px, 4) if sell_px > 0 else None, "iv_sell": _oiv(sell_px),
+            "source": "option", "type": O["type"][oi], "K": K,
+            "dte": int(O["dte_i"][oi]), "id": str(O["contract"][oi]),
+            "name": O["contract"][oi], "ratio": float(O["exercise_ratio"][oi] or 2000),
+            "px_buy": round(buy_px, 4) if buy_px > 0 else None, "iv_buy": buy_iv,
+            "px_sell": round(sell_px, 4) if sell_px > 0 else None, "iv_sell": sell_iv,
             "shortable": True,
-            "S": S, "vol": int(o.get("volume") or 0),
+            "S": float(O["underlying_price"][oi]), "vol": int(O["volume"][oi] or 0),
         })
     return legs
 
@@ -374,37 +702,43 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
     rows = []
     seen = set()  # deduplicate (warrant_code, option_contract) pairs
 
+    # Both display IVs are properties of a single leg, so they are solved once
+    # for the whole scan here rather than per (direction, warrant, option) —
+    # see _with_warrant_iv / _with_direct_opt_iv. The warrant leg keeps its
+    # hardcoded r=0.02 while the option leg uses options_logic.R; that
+    # inconsistency is pinned by tests, not an oversight to tidy up here.
+    warrant_df = _with_warrant_iv(warrant_df, 0.02)
+    opt_df = _with_direct_opt_iv(opt_df)
+    O = _direct_option_arrays(opt_df)
+    if O["n"] == 0:
+        return rows
+
+    W = _warrant_arrays(warrant_df)
     for direction in ("positive", "negative"):
-        for _, w in warrant_df.iterrows():
-            candidates = opt_df[opt_df["type"] == w["type"]].copy()
-            if candidates.empty:
+        for wi in range(W["n"]):
+            w_type = W["type"][wi]
+            cand = O["idx_by_type"].get(w_type)
+            if cand is None or cand.size == 0:
                 continue
 
-            candidates["strike_diff_pct"] = (
-                (candidates["strike"] - w["strike"]).abs() / w["strike"] * 100
-            )
-            candidates["dte_diff"] = (
-                (candidates["days_to_expiry"] - w["days_to_expiry"]).abs()
-            )
+            Kw = float(W["strike"][wi])
+            dte_w = int(W["days_to_expiry"][wi])
+            Ko = O["strike"][cand]
+            dte_o = O["dte"][cand]
+            strike_diff_pct = np.abs(Ko - Kw) / Kw * 100
+            dte_diff = np.abs(dte_o - dte_w)
 
             # The residual vertical spread must be FAVORABLE (payoff >= 0 everywhere)
             # so the entry credit is never clawed back at expiry:
             #   calls: favorable iff K_short >= K_long (bull call spread)
             #   puts : favorable iff K_short <= K_long (bear put spread, inverted)
-            is_put_w = w["type"] == "Put"
+            is_put_w = w_type == "Put"
             long_side_is_warrant = direction == "positive"
             opt_ge_warrant = long_side_is_warrant != is_put_w
-            favorable = (
-                candidates["strike"] >= w["strike"]
-                if opt_ge_warrant
-                else candidates["strike"] <= w["strike"]
-            )
-            candidates["favorable"] = favorable
+            favorable = Ko >= Kw if opt_ge_warrant else Ko <= Kw
             # Max loss per share of the residual vertical at expiry: zero on the
             # favorable side (payoff >= 0 everywhere), |Kw - Ko| on the other.
-            candidates["max_loss_per_share"] = np.where(
-                favorable, 0.0, (candidates["strike"] - w["strike"]).abs()
-            )
+            max_loss_per_share = np.where(favorable, 0.0, np.abs(Ko - Kw))
             # Only the favorable side is emitted (pure riskless arb only) — the
             # unfavorable side (capped loss up to |Kw - Ko|) is dropped by design.
             # max_strike_diff_pct is kept in the signature only because callers
@@ -414,52 +748,49 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
             # Never hold the SHORT leg as the longer-dated one — the hedge leg
             # would expire first, leaving a naked short position.
             if direction == "positive":
-                dte_ok = candidates["days_to_expiry"] <= w["days_to_expiry"]
+                dte_ok = dte_o <= dte_w
             else:
-                bad_dte = (w["days_to_expiry"] - candidates["days_to_expiry"]).clip(lower=0)
+                bad_dte = np.clip(dte_w - dte_o, 0, None)
                 dte_ok = bad_dte <= max_dte_diff
 
-            candidates = candidates[strike_ok & dte_ok]
-            if candidates.empty:
+            sel = np.flatnonzero(strike_ok & dte_ok)
+            if sel.size == 0:
                 continue
 
-            ratio = float(w["exercise_ratio"])
+            ratio = float(W["exercise_ratio"][wi])
             if ratio <= 0:
                 continue  # can't size or normalise a warrant with no exercise ratio
-            warrant_ask_per_share = round(float(w["ask"]) / ratio, 4)
-            warrant_bid_live = pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0
+            w_ask = W["ask"][wi]
+            w_bid = W["bid"][wi]
+            warrant_ask_per_share = round(float(w_ask) / ratio, 4)
+            warrant_bid_live = pd.notna(w_bid) and float(w_bid or 0) > 0
             # Loose marks tolerate the ask-as-bid fallback; an EXECUTABLE sell
             # does not — nobody lifts a bid that isn't there. Keep both and let
             # the tight path below demand the real one.
-            warrant_bid_val = float(w["bid"]) if warrant_bid_live else float(w["ask"])
+            warrant_bid_val = float(w_bid) if warrant_bid_live else float(w_ask)
             warrant_bid_per_share = round(warrant_bid_val / ratio, 4)
-            warrant_bid_real_per_share = round(float(w["bid"]) / ratio, 4) if warrant_bid_live else None
+            warrant_bid_real_per_share = round(float(w_bid) / ratio, 4) if warrant_bid_live else None
             warrants_needed = round(opt_contract_size / ratio)
-            is_put = w["type"] == "Put"
-            # IV per leg (matched pair only, cheap) so the modal can mark an OTM
-            # surviving leg at its time value ("sell") — the fetch dropped IV.
-            if pd.notna(w.get("iv_ask")):
-                warrant_iv = round(float(w["iv_ask"]), 4)
-            else:
-                _wiv = warrant_logic.implied_vol(
-                    float(w["ask"]), float(w["underlying_price"]), float(w["strike"]),
-                    int(w["days_to_expiry"]) / 365.0, 0.02, ratio, is_put)
-                warrant_iv = round(float(_wiv), 4) if pd.notna(_wiv) and 0 < float(_wiv) <= 3 else None
-            warrant_bid_disp = round(float(w["bid"]), 4) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else None
+            is_put = is_put_w
+            # IV per leg so the modal can mark an OTM surviving leg at its time
+            # value ("sell") — the fetch dropped IV. Solved once per leg above.
+            warrant_iv = W["_arb_warrant_iv"][wi]
+            warrant_bid_disp = round(float(w_bid), 4) if warrant_bid_live else None
 
             # Emit EVERY profitable option for this warrant, not just the
             # strike/DTE-closest one — a farther-but-profitable pair must not be
             # hidden behind a closer-but-unprofitable "best".
-            for _, opt in candidates.iterrows():
+            for k in sel:
+                oi = cand[k]
                 # ask_live/bid_live are flagged before the settlement/last fallback
                 # backfills a missing side, so they distinguish a real quote from a
-                # stale settlement mark — opt["ask"]/["bid"] alone can't.
-                opt_ask_live = bool(opt.get("ask_live", False))
-                opt_bid_live = bool(opt.get("bid_live", False))
+                # stale settlement mark — the ask/bid columns alone can't.
+                opt_ask_live = bool(O["ask_live"][oi])
+                opt_bid_live = bool(O["bid_live"][oi])
                 if not (opt_ask_live or opt_bid_live):
                     continue
-                opt_bid_per_share = round(float(opt["bid"]), 4) if opt_bid_live else None
-                opt_ask_per_share = round(float(opt["ask"]), 4) if opt_ask_live else None
+                opt_bid_per_share = _round4(O["bid"][oi]) if opt_bid_live else None
+                opt_ask_per_share = _round4(O["ask"][oi]) if opt_ask_live else None
 
                 # Tight = prices you can actually hit (lift the ask you buy, hit
                 # the bid you sell). Loose = optimistic favorable-side mark, for
@@ -498,7 +829,7 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                     if price_diff >= 0:
                         continue
 
-                pair_key = (w["warrant_code"], opt["contract"])
+                pair_key = (W["warrant_code"][wi], O["contract"][oi])
                 if pair_key in seen:
                     continue
                 seen.add(pair_key)
@@ -508,53 +839,43 @@ def _match_warrants_to_options(warrant_df, opt_df, opt_contract_size,
                 if direction == "positive":
                     trade = "Buy Warrant / Sell Option"
                     # Buying the warrant lifts the ask -> resting SELL size gates it.
-                    warrant_depth_lots = int(w.get("ask_qty") or 0)
+                    warrant_depth_lots = int(W["ask_qty"][wi] or 0)
                 else:
                     trade = "Buy Option / Sell Warrant"
                     # Selling the warrant hits the bid -> resting BUY size gates it.
-                    warrant_depth_lots = int(w.get("bid_qty") or 0)
+                    warrant_depth_lots = int(W["bid_qty"][wi] or 0)
                 board_lots_needed = round(warrants_needed / 1000, 4)
                 fillable = warrant_depth_lots >= board_lots_needed
 
-                if pd.notna(opt.get("iv_bid")):
-                    opt_iv = round(float(opt["iv_bid"]), 4)
-                else:
-                    # Mark off the LIVE side(s) only — a settlement-backfilled
-                    # side would put a stale price into the IV solve.
-                    if opt_bid_per_share is not None and opt_ask_per_share is not None:
-                        _omid = (opt_bid_per_share + opt_ask_per_share) / 2
-                    else:
-                        _omid = opt_ask_per_share if opt_ask_per_share is not None else opt_bid_per_share
-                    _oiv = warrant_logic.implied_vol(
-                        _omid, float(opt["underlying_price"]), float(opt["strike"]),
-                        int(opt["days_to_expiry"]) / 365.0, options_logic.R, 1.0, is_put) if _omid else None
-                    opt_iv = round(float(_oiv), 4) if (_oiv is not None and pd.notna(_oiv) and 0 < float(_oiv) <= 3) else None
+                # Marked off the LIVE side(s) only — a settlement-backfilled
+                # side would put a stale price into the IV solve.
+                opt_iv = O["iv"][oi]
 
                 rows.append({
-                    "warrant_code": w["warrant_code"],
-                    "warrant_name": w["warrant_name"],
-                    "option_contract": opt["contract"],
-                    "type": w["type"],
+                    "warrant_code": W["warrant_code"][wi],
+                    "warrant_name": W["warrant_name"][wi],
+                    "option_contract": O["contract"][oi],
+                    "type": w_type,
                     "trade": trade,
-                    "underlying_price": w["underlying_price"],
-                    "warrant_dte": int(w["days_to_expiry"]),
-                    "opt_dte": int(opt["days_to_expiry"]),
-                    "dte_diff": int(opt["dte_diff"]),
-                    "warrant_strike": w["strike"],
-                    "opt_strike": round(float(opt["strike"]), 2),
-                    "strike_diff_pct": round(float(opt["strike_diff_pct"]), 2),
+                    "underlying_price": W["underlying_price"][wi],
+                    "warrant_dte": dte_w,
+                    "opt_dte": int(O["dte"][oi]),
+                    "dte_diff": int(dte_diff[k]),
+                    "warrant_strike": W["strike"][wi],
+                    "opt_strike": round(float(Ko[k]), 2),
+                    "strike_diff_pct": round(float(strike_diff_pct[k]), 2),
                     # Favorable residual = the vertical pays >= 0 at every spot, so
                     # the entry credit is never clawed back: a true (riskless) arb.
                     # Otherwise the credit is at risk up to max_loss_per_share
                     # (per underlying share, before exercise-ratio sizing).
-                    "riskless": bool(opt["favorable"]),
-                    "max_loss_per_share": round(float(opt["max_loss_per_share"]), 4),
+                    "riskless": bool(favorable[k]),
+                    "max_loss_per_share": round(float(max_loss_per_share[k]), 4),
                     "warrants_needed": warrants_needed,
                     "board_lots": board_lots_needed,
                     "warrant_depth_lots": warrant_depth_lots,
                     "fillable": bool(fillable),
                     "opt_contract_size": opt_contract_size,
-                    "warrant_ask": w["ask"],
+                    "warrant_ask": w_ask,
                     "warrant_bid": warrant_bid_disp,
                     "opt_bid": opt_bid_per_share,
                     "opt_ask": opt_ask_per_share,
@@ -612,70 +933,77 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
         r = options_logic.R
     s_from_option = synthetic_underlying == "option"
 
-    for _, w in warrant_df.iterrows():
-        opp = "Put" if w["type"] == "Call" else "Call"
-        candidates = opt_df[opt_df["type"] == opp].copy()
-        if candidates.empty:
+    # Everything that depends on one leg only is solved once here. The option
+    # leg's IV also needs a spot: in the cross-market case that is the option's
+    # own, so it resolves to a single column; otherwise it is the warrant's
+    # local spot, which is shared by every warrant on an underlying — hence the
+    # memo rather than a per-warrant solve.
+    opt_df = opt_df.reset_index(drop=True)
+    opt_df = _with_pcp_option_cols(opt_df, r)
+    warrant_df = _with_warrant_iv(warrant_df, r)
+    _opt_iv_all = (_pcp_opt_iv(opt_df, opt_df["underlying_price"].to_numpy(dtype=float), r)
+                   if s_from_option and not opt_df.empty else None)
+    _opt_iv_memo = {}
+
+    def _opt_iv_at(spot):
+        key = float(spot)
+        if key not in _opt_iv_memo:
+            _opt_iv_memo[key] = _pcp_opt_iv(opt_df, key, r)
+        return _opt_iv_memo[key]
+
+    P = _pcp_option_arrays(opt_df)
+    W = _warrant_arrays(warrant_df)
+    for wi in range(W["n"]):
+        w_type = W["type"][wi]
+        opp = "Put" if w_type == "Call" else "Call"
+        cand = P["idx_by_type"].get(opp)
+        if cand is None or cand.size == 0:
             continue
 
-        ratio = float(w["exercise_ratio"])
+        ratio = float(W["exercise_ratio"][wi])
         if ratio <= 0:
             continue  # can't size or normalise a warrant with no exercise ratio
 
-        candidates["strike_diff_pct"] = (
-            (candidates["strike"] - w["strike"]).abs() / w["strike"] * 100
-        )
-        candidates["dte_diff"] = (
-            (candidates["days_to_expiry"] - w["days_to_expiry"]).abs()
-        )
-        candidates = candidates[candidates["strike_diff_pct"] <= max_strike_diff_pct]
-        if candidates.empty:
+        Kw = float(W["strike"][wi])
+        dte_w = int(W["days_to_expiry"][wi])
+        Ko_all = P["strike"][cand]
+        strike_diff_pct = np.abs(Ko_all - Kw) / Kw * 100
+        dte_diff = np.abs(P["dte"][cand] - dte_w)
+        sel = np.flatnonzero(strike_diff_pct <= max_strike_diff_pct)
+        if sel.size == 0:
             continue
 
-        S_local = float(w["underlying_price"])   # warrant's own (local) spot
-        Kw = float(w["strike"])
-        is_call = w["type"] == "Call"
-        warrant_ask_per_share = round(float(w["ask"]) / ratio, 4)
-        warrant_bid_val = float(w["bid"]) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else float(w["ask"])
+        S_local = float(W["underlying_price"][wi])   # warrant's own (local) spot
+        is_call = w_type == "Call"
+        w_ask = W["ask"][wi]
+        w_bid = W["bid"][wi]
+        warrant_bid_live = pd.notna(w_bid) and float(w_bid or 0) > 0
+        warrant_ask_per_share = round(float(w_ask) / ratio, 4)
+        warrant_bid_val = float(w_bid) if warrant_bid_live else float(w_ask)
         warrant_bid_per_share = round(warrant_bid_val / ratio, 4)
         warrants_needed = round(opt_contract_size / ratio)
-        warrant_bid_disp = round(float(w["bid"]), 4) if pd.notna(w.get("bid")) and float(w.get("bid", 0)) > 0 else None
+        warrant_bid_disp = round(float(w_bid), 4) if warrant_bid_live else None
 
-        # Warrant-leg IV (display only; payoff is intrinsic). Use warrant type.
-        if pd.notna(w.get("iv_ask")):
-            warrant_iv = round(float(w["iv_ask"]), 4)
-        else:
-            _wiv = warrant_logic.implied_vol(
-                float(w["ask"]), S_local, Kw,
-                int(w["days_to_expiry"]) / 365.0, r, ratio, not is_call)
-            warrant_iv = round(float(_wiv), 4) if pd.notna(_wiv) and 0 < float(_wiv) <= 3 else None
+        # Warrant-leg IV (display only; payoff is intrinsic), solved once above.
+        warrant_iv = W["_arb_warrant_iv"][wi]
+        opt_iv_col = _opt_iv_all if s_from_option else _opt_iv_at(S_local)
 
-        for _, opt in candidates.iterrows():
+        for k in sel:
+            oi = cand[k]
             # Spot for the synthetic: the option's underlying in the cross-market
             # case (ADR-converted), else the warrant's own local spot.
-            S = float(opt["underlying_price"]) if s_from_option else S_local
-            Ko = float(opt["strike"])
-            To = int(opt["days_to_expiry"]) / 365.0
-            bond_pv = round(Ko * float(np.exp(-r * To)), 4)
+            S = float(P["underlying_price"][oi]) if s_from_option else S_local
+            Ko = float(Ko_all[k])
+            opt_dte = int(P["dte"][oi])
+            bond_pv = P["bond_pv"][oi]
             # Gate on per-side liveness flagged BEFORE the settlement/last
             # fallback: opt["bid"]/["ask"] are post-fallback, so a missing side
             # carries a stale settlement mark that is not an executable price.
-            opt_bid_ps = round(float(opt["bid"]), 4) if bool(opt.get("bid_live", False)) else None
-            opt_ask_ps = round(float(opt["ask"]), 4) if bool(opt.get("ask_live", False)) else None
-
-            # Option-leg IV (display only) — use the OPTION's put/call flag.
-            is_put_opt = opp == "Put"
-            if pd.notna(opt.get("iv_bid")):
-                opt_iv = round(float(opt["iv_bid"]), 4)
-            else:
-                _omid = None
-                if opt_bid_ps is not None and opt_ask_ps is not None:
-                    _omid = (opt_bid_ps + opt_ask_ps) / 2
-                elif opt_ask_ps is not None:
-                    _omid = opt_ask_ps
-                _oiv = warrant_logic.implied_vol(
-                    _omid, S, Ko, To, r, 1.0, is_put_opt) if _omid else None
-                opt_iv = round(float(_oiv), 4) if (_oiv is not None and pd.notna(_oiv) and 0 < float(_oiv) <= 3) else None
+            opt_bid_ps = P["bid_ps"][oi]
+            opt_ask_ps = P["ask_ps"][oi]
+            # Option-leg IV (display only) — solved above off the OPTION's own
+            # put/call flag, which is what `opp` selected these candidates on.
+            opt_iv = opt_iv_col[oi]
 
             def _synth(opt_ps):
                 # synthetic call = P + S - PV(K);  synthetic put = C - S + PV(K)
@@ -686,7 +1014,7 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
                 pct = round(price_diff / synthetic_price * 100, 2) if synthetic_price > 0 else None
                 # Executable side buys the warrant (lifts ask -> SELL size gates);
                 # the non-executable debug side would short it (hits bid).
-                warrant_depth_lots = int(w.get("ask_qty") or 0) if executable else int(w.get("bid_qty") or 0)
+                warrant_depth_lots = int((W["ask_qty"] if executable else W["bid_qty"])[wi] or 0)
                 board_lots_needed = round(warrants_needed / 1000, 4)
                 fillable = warrant_depth_lots >= board_lots_needed
                 if executable:
@@ -696,29 +1024,29 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
                         trade = "Buy Put Warrant / Short Synthetic (short Call + long stock + borrow)"
                 else:
                     side = "short Put + short stock + lend" if is_call else "short Call + long stock + borrow"
-                    trade = f"Short {w['type']} Warrant / Long Synthetic ({side}) — NON-EXECUTABLE"
+                    trade = f"Short {w_type} Warrant / Long Synthetic ({side}) — NON-EXECUTABLE"
                 rows.append({
-                    "warrant_code": w["warrant_code"],
-                    "warrant_name": w["warrant_name"],
-                    "option_contract": opt["contract"],
-                    "type": w["type"],
+                    "warrant_code": W["warrant_code"][wi],
+                    "warrant_name": W["warrant_name"][wi],
+                    "option_contract": P["contract"][oi],
+                    "type": w_type,
                     "opt_type": opp,
                     "trade": trade,
                     "executable": bool(executable),
                     "underlying_price": round(S_local, 4),
                     "adr_underlying": round(S, 4),
-                    "warrant_dte": int(w["days_to_expiry"]),
-                    "opt_dte": int(opt["days_to_expiry"]),
-                    "dte_diff": int(opt["dte_diff"]),
+                    "warrant_dte": dte_w,
+                    "opt_dte": opt_dte,
+                    "dte_diff": int(dte_diff[k]),
                     "warrant_strike": round(Kw, 2),
                     "opt_strike": round(Ko, 2),
-                    "strike_diff_pct": round(float(opt["strike_diff_pct"]), 2),
+                    "strike_diff_pct": round(float(strike_diff_pct[k]), 2),
                     "warrants_needed": warrants_needed,
                     "board_lots": board_lots_needed,
                     "warrant_depth_lots": warrant_depth_lots,
                     "fillable": bool(fillable),
                     "opt_contract_size": opt_contract_size,
-                    "warrant_ask": round(float(w["ask"]), 4),
+                    "warrant_ask": round(float(w_ask), 4),
                     "warrant_bid": warrant_bid_disp,
                     "opt_bid": opt_bid_ps,
                     "opt_ask": opt_ask_ps,
@@ -744,7 +1072,7 @@ def _match_warrants_pcp(warrant_df, opt_df, opt_contract_size,
                 # Guards: short option must not outlive the long warrant, and the
                 # strike gap must be on the no-downside side (Call: Ko>=Kw, Put:
                 # Ko<=Kw) so the residual is a bounded, never-negative vertical.
-                dte_ok = int(opt["days_to_expiry"]) <= int(w["days_to_expiry"])
+                dte_ok = opt_dte <= dte_w
                 strike_ok = (Ko >= Kw) if is_call else (Ko <= Kw)
                 if price_diff > 0 and dte_ok and strike_ok:
                     _emit(True, exec_opt_ps, exec_warrant_ps, price_diff)
@@ -811,46 +1139,62 @@ def _match_butterflies(warrant_df, opt_df, opt_contract_size, positive_loose=Fal
         # Collapse warrants to the single cheapest-to-BUY wing per strike.
         # buy side = ask (tight) / bid (loose); price per underlying share.
         wings = {}
-        for _, w in warr.iterrows():
-            ratio = float(w["exercise_ratio"] or 0)
-            ask = float(w["ask"] or 0) if pd.notna(w.get("ask")) else 0.0
-            bid = float(w["bid"] or 0) if pd.notna(w.get("bid")) else 0.0
+        WA = _warrant_arrays(warr)
+        for wi in range(WA["n"]):
+            ratio = float(WA["exercise_ratio"][wi] or 0)
+            w_ask, w_bid = WA["ask"][wi], WA["bid"][wi]
+            ask = float(w_ask or 0) if pd.notna(w_ask) else 0.0
+            bid = float(w_bid or 0) if pd.notna(w_bid) else 0.0
             if ratio <= 0 or ask <= 0:
                 continue
             if positive_loose and bid <= 0:
                 continue
             buy_raw = bid if positive_loose else ask
             buy_ps = round(buy_raw / ratio, 6)
-            K = round(float(w["strike"]), 4)
+            K = round(float(WA["strike"][wi]), 4)
             cur = wings.get(K)
             if cur is None or buy_ps < cur["buy_ps"]:
                 wings[K] = {
                     "K": K, "buy_ps": buy_ps, "ratio": ratio,
                     "ask": ask, "bid": bid if bid > 0 else None,
-                    "dte": int(w["days_to_expiry"]),
-                    "code": str(w["warrant_code"]), "name": w["warrant_name"],
-                    "depth_lots": int(w.get("ask_qty") or 0),
-                    "S": float(w["underlying_price"]),
+                    "dte": int(WA["days_to_expiry"][wi]),
+                    "code": str(WA["warrant_code"][wi]), "name": WA["warrant_name"][wi],
+                    "depth_lots": int(WA["ask_qty"][wi] or 0),
+                    "S": float(WA["underlying_price"][wi]),
                 }
 
         # Sellable body options: sell side = bid (tight) / ask (loose).
         bodies = []
-        for _, o in opts.iterrows():
-            bid = float(o["bid"] or 0) if pd.notna(o.get("bid")) else 0.0
-            ask = float(o["ask"] or 0) if pd.notna(o.get("ask")) else 0.0
+        o_bid = opts["bid"].tolist()
+        o_ask = opts["ask"].tolist()
+        o_K = opts["strike"].tolist()
+        o_dte = opts["days_to_expiry"].tolist()
+        o_contract = opts["contract"].tolist()
+        o_vol = (opts["volume"].tolist() if "volume" in opts.columns
+                 else [0] * len(opts))
+        o_S = opts["underlying_price"].tolist()
+        for oi in range(len(opts)):
+            bid = float(o_bid[oi] or 0) if pd.notna(o_bid[oi]) else 0.0
+            ask = float(o_ask[oi] or 0) if pd.notna(o_ask[oi]) else 0.0
             sell_raw = ask if positive_loose else bid
             if sell_raw <= 0:
                 continue
             bodies.append({
-                "K": round(float(o["strike"]), 4), "sell_ps": round(sell_raw, 6),
+                "K": round(float(o_K[oi]), 4), "sell_ps": round(sell_raw, 6),
                 "bid": bid if bid > 0 else None, "ask": ask if ask > 0 else None,
-                "dte": int(o["days_to_expiry"]),
-                "contract": str(o["contract"]),
-                "vol": int(o.get("volume") or 0),
-                "S": float(o["underlying_price"]),
+                "dte": int(o_dte[oi]),
+                "contract": str(o_contract[oi]),
+                "vol": int(o_vol[oi] or 0),
+                "S": float(o_S[oi]),
             })
         if len(wings) < 2 or not bodies:
             continue
+
+        # Bodies indexed by strike so each wing pair scans only the strikes
+        # strictly between them, instead of re-filtering the whole body list
+        # inside an O(K^2) loop.
+        by_k = sorted(range(len(bodies)), key=lambda i: bodies[i]["K"])
+        body_ks = [bodies[i]["K"] for i in by_k]
 
         strikes = sorted(wings)
         for a in range(len(strikes)):
@@ -859,12 +1203,22 @@ def _match_butterflies(warrant_df, opt_df, opt_contract_size, positive_loose=Fal
                 K1, K2 = w1["K"], w2["K"]
                 dte_cap = min(w1["dte"], w2["dte"])
                 # Most-expensive-to-sell body strictly between the wings, expiring
-                # no later than the shorter-dated wing.
-                cands = [bd for bd in bodies
-                         if K1 < bd["K"] < K2 and bd["dte"] <= dte_cap]
-                if not cands:
+                # no later than the shorter-dated wing. Ties keep the first body
+                # in chain order, which is what max() over the filtered list did.
+                best = -1
+                for i in by_k[bisect_right(body_ks, K1):bisect_left(body_ks, K2)]:
+                    bd = bodies[i]
+                    if bd["dte"] > dte_cap:
+                        continue
+                    if best < 0:
+                        best = i
+                        continue
+                    cur = bodies[best]["sell_ps"]
+                    if bd["sell_ps"] > cur or (bd["sell_ps"] == cur and i < best):
+                        best = i
+                if best < 0:
                     continue
-                body = max(cands, key=lambda bd: bd["sell_ps"])
+                body = bodies[best]
                 x = body["K"]
 
                 credit_ps = round(2 * body["sell_ps"] - w1["buy_ps"] - w2["buy_ps"], 6)
@@ -964,6 +1318,9 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
         if min_volume > 0:
             all_opt_df = all_opt_df[all_opt_df["volume"] >= min_volume]
 
+    warrant_groups = group_by_str(all_warrant_df, "underlying_code")
+    opt_groups = group_by_str(all_opt_df, "stock_code")
+
     def _process(i, code):
         """Match one stock code against the pre-fetched frames.
 
@@ -977,20 +1334,14 @@ def match_warrant_tw_option(stock_codes, option_type, max_strike_diff_pct, max_d
         cfg = options_logic._commodity_map()[code]
         opt_contract_size = cfg["exercise_ratio"]
 
-        warrant_df = (
-            all_warrant_df[all_warrant_df["underlying_code"].astype(str) == str(code)]
-            if not all_warrant_df.empty else all_warrant_df
-        )
+        warrant_df = warrant_groups.get(str(code), all_warrant_df.iloc[0:0])
         if warrant_df.empty:
             msg = f"{code}: {warrant_err or 'no warrants'}"
             applog.log("ARB", f"{code} {pos} skipped: {warrant_err or 'no warrants'}",
                        level="ERROR" if warrant_hard else "INFO")
             return ([], None, msg) if warrant_hard else ([], msg, None)
 
-        opt_df = (
-            all_opt_df[all_opt_df["stock_code"].astype(str) == str(code)]
-            if not all_opt_df.empty else all_opt_df
-        )
+        opt_df = opt_groups.get(str(code), all_opt_df.iloc[0:0])
         if opt_df.empty:
             msg = f"{code}: {opt_err or 'no options'}"
             applog.log("ARB", f"{code} {pos} skipped: no live options",
@@ -1191,30 +1542,44 @@ def _match_option_legs(tw_df, us_df, tw_contract_shares, us_contract_shares,
     matched_shares = base
 
     rows = []
-    for _, tw in tw_df.iterrows():
-        cands = us_df[us_df["type"] == tw["type"]].copy()
-        if cands.empty:
+    # Both display IVs price off their own leg's mid, so they are solved once
+    # per frame rather than once per matched pair.
+    us_df = us_df.reset_index(drop=True)
+    tw_ivs = _quote_mid_iv(tw_df, options_logic.R)
+    us_ivs = _quote_mid_iv(us_df, us_options_logic.R_US)
+
+    T = _leg_arrays(tw_df, ("contract", "type", "underlying_price", "bid", "ask",
+                            "ask_size", "bid_size"))
+    U = _leg_arrays(us_df, ("contract", "type", "bid", "ask", "volume", "oi"))
+
+    for ti in range(T["n"]):
+        tw_type = T["type"][ti]
+        cand = U["idx_by_type"].get(tw_type)
+        if cand is None or cand.size == 0:
             continue
 
-        cands["strike_diff_pct"] = (
-            (cands["strike"] - tw["strike"]).abs() / tw["strike"] * 100
-        )
-        cands["dte_diff"] = (cands["days_to_expiry"] - tw["days_to_expiry"]).abs()
-        cands = cands[
-            (cands["strike_diff_pct"] <= max_strike_diff_pct)
-            & (cands["dte_diff"] <= max_dte_diff)
-        ]
-        if cands.empty:
+        tw_K = float(T["strike_f"][ti])
+        tw_dte = int(T["dte_i"][ti])
+        strike_diff_pct = np.abs(U["strike_f"][cand] - tw_K) / tw_K * 100
+        dte_diff = np.abs(U["dte_i"][cand] - tw_dte)
+        sel = np.flatnonzero((strike_diff_pct <= max_strike_diff_pct)
+                             & (dte_diff <= max_dte_diff))
+        if sel.size == 0:
             continue
 
         # Best pair = closest strike, then closest expiry (delta-match priority).
-        cands = cands.sort_values(["strike_diff_pct", "dte_diff"])
-        us = cands.iloc[0]
+        # lexsort is the argmin of those two keys and breaks ties by original
+        # order, exactly as pandas' multi-key (stable) sort did — without
+        # sorting a candidate frame once per TW row.
+        k = sel[np.lexsort((dte_diff[sel], strike_diff_pct[sel]))[0]]
+        ui = cand[k]
 
-        tw_bid = float(tw["bid"]) if pd.notna(tw.get("bid")) and float(tw.get("bid", 0)) > 0 else None
-        tw_ask = float(tw["ask"]) if pd.notna(tw.get("ask")) and float(tw.get("ask", 0)) > 0 else None
-        us_bid = float(us["bid"]) if pd.notna(us.get("bid")) and float(us.get("bid", 0)) > 0 else None
-        us_ask = float(us["ask"]) if pd.notna(us.get("ask")) and float(us.get("ask", 0)) > 0 else None
+        tw_b, tw_a = T["bid"][ti], T["ask"][ti]
+        us_b, us_a = U["bid"][ui], U["ask"][ui]
+        tw_bid = float(tw_b) if pd.notna(tw_b) and float(tw_b or 0) > 0 else None
+        tw_ask = float(tw_a) if pd.notna(tw_a) and float(tw_a or 0) > 0 else None
+        us_bid = float(us_b) if pd.notna(us_b) and float(us_b or 0) > 0 else None
+        us_ask = float(us_a) if pd.notna(us_a) and float(us_a or 0) > 0 else None
         if None in (tw_bid, tw_ask, us_bid, us_ask):
             continue
 
@@ -1234,8 +1599,9 @@ def _match_option_legs(tw_df, us_df, tw_contract_shares, us_contract_shares,
         # leg expired first, the long leg would be gone while the short lives
         # on — a naked short option, which is exactly the risk we refuse to
         # carry. Short = US when "Long TW / Short US", else TW.
-        short_dte = int(us["days_to_expiry"]) if trade == "Long TW / Short US" else int(tw["days_to_expiry"])
-        long_dte = int(tw["days_to_expiry"]) if trade == "Long TW / Short US" else int(us["days_to_expiry"])
+        us_dte = int(U["dte_i"][ui])
+        short_dte = us_dte if trade == "Long TW / Short US" else tw_dte
+        long_dte = tw_dte if trade == "Long TW / Short US" else us_dte
         if short_dte > long_dte:
             continue  # would leave a naked short leg after the long expires
 
@@ -1245,9 +1611,10 @@ def _match_option_legs(tw_df, us_df, tw_contract_shares, us_contract_shares,
         #   Call: short strike >= long strike (short the higher call)
         #   Put:  short strike <= long strike (short the lower put)
         # Anything else has min payoff = credit − (unfavorable gap) < 0.
-        short_strike = float(us["strike"]) if trade == "Long TW / Short US" else float(tw["strike"])
-        long_strike = float(tw["strike"]) if trade == "Long TW / Short US" else float(us["strike"])
-        if tw["type"] == "Put":
+        us_K = float(U["strike_f"][ui])
+        short_strike = us_K if trade == "Long TW / Short US" else tw_K
+        long_strike = tw_K if trade == "Long TW / Short US" else us_K
+        if tw_type == "Put":
             if short_strike > long_strike:
                 continue  # short the higher put -> downside loss
         else:
@@ -1267,42 +1634,35 @@ def _match_option_legs(tw_df, us_df, tw_contract_shares, us_contract_shares,
         # IV for each leg (matched pairs only, so cheap) — the modal needs it to
         # mark the not-yet-expired leg with time value at the trade horizon, so
         # the scenario P&L varies with the premium instead of being flat.
-        is_put = tw["type"] == "Put"
-        tw_iv = warrant_logic.implied_vol(
-            tw_mid, float(tw["underlying_price"]), float(tw["strike"]),
-            int(tw["days_to_expiry"]) / 365.0, options_logic.R, 1.0, is_put)
-        us_iv = warrant_logic.implied_vol(
-            us_mid, float(us["underlying_price"]), float(us["strike"]),
-            int(us["days_to_expiry"]) / 365.0, us_options_logic.R_US, 1.0, is_put)
-        tw_iv = round(float(tw_iv), 4) if pd.notna(tw_iv) and 0 < float(tw_iv) <= 3 else None
-        us_iv = round(float(us_iv), 4) if pd.notna(us_iv) and 0 < float(us_iv) <= 3 else None
+        tw_iv = tw_ivs[ti]
+        us_iv = us_ivs[ui]
 
         # Orderbook depth per leg. TW leg: best-level size (口) from TAIFEX MIS on
         # the side actually hit (buy TW@ask -> ask_size; sell TW@bid -> bid_size).
         # US leg: yfinance exposes no bid/ask size, so volume + OI stand in as a
         # liquidity proxy (NOT true resting depth).
-        tw_size = tw.get("ask_size") if trade == "Long TW / Short US" else tw.get("bid_size")
+        tw_size = (T["ask_size"] if trade == "Long TW / Short US" else T["bid_size"])[ti]
         tw_size = int(tw_size) if pd.notna(tw_size) else None
         tw_fillable = tw_size is not None and tw_size >= int(tw_contracts)
-        us_vol = int(us.get("volume") or 0)
-        us_oi = int(us.get("oi") or 0)
+        us_vol = int(U["volume"][ui] or 0)
+        us_oi = int(U["oi"][ui] or 0)
 
         denom = exec_opt if exec_opt else 1
         rows.append({
-            "tw_option_code": tw["contract"],
-            "tw_option_name": f"TW {tw['contract']}",
-            "us_option_contract": us["contract"],
-            "type": tw["type"],
-            "tw_option_type": tw["type"],
-            "us_option_type": us["type"],
+            "tw_option_code": T["contract"][ti],
+            "tw_option_name": f"TW {T['contract'][ti]}",
+            "us_option_contract": U["contract"][ui],
+            "type": tw_type,
+            "tw_option_type": tw_type,
+            "us_option_type": U["type"][ui],
             "trade": trade,
-            "underlying_price": round(float(tw["underlying_price"]), 4),
-            "tw_option_dte": int(tw["days_to_expiry"]),
-            "us_option_dte": int(us["days_to_expiry"]),
-            "dte_diff": int(us["dte_diff"]),
-            "tw_option_strike": round(float(tw["strike"]), 2),
-            "us_option_strike": round(float(us["strike"]), 2),
-            "strike_diff_pct": round(float(us["strike_diff_pct"]), 2),
+            "underlying_price": round(float(T["underlying_price"][ti]), 4),
+            "tw_option_dte": tw_dte,
+            "us_option_dte": int(U["dte_i"][ui]),
+            "dte_diff": int(dte_diff[k]),
+            "tw_option_strike": round(tw_K, 2),
+            "us_option_strike": round(float(U["strike_f"][ui]), 2),
+            "strike_diff_pct": round(float(strike_diff_pct[k]), 2),
             "tw_contracts": int(tw_contracts),
             "us_contracts": int(us_contracts),
             "tw_depth_contracts": tw_size,

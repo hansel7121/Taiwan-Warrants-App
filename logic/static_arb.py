@@ -354,6 +354,10 @@ def match_static_arb(stock_codes, min_volume=0, min_edge=0.0,
 
     all_rows, skip_reasons, hard_errors = [], [], []
     total_dropped = 0
+    # One pass over each frame instead of an astype(str) over the whole column
+    # per code (arb_logic.group_by_str keeps within-group row order).
+    warrant_groups = arb_logic.group_by_str(all_warrant_df, "underlying_code")
+    opt_groups = arb_logic.group_by_str(all_opt_df, "stock_code")
 
     for i, code in enumerate(stock_codes, 1):
         pos = f"({i}/{len(stock_codes)})"
@@ -362,15 +366,13 @@ def match_static_arb(stock_codes, min_volume=0, min_edge=0.0,
             continue
         M = options_logic._commodity_map()[code]["exercise_ratio"]
 
-        warrant_df = (all_warrant_df[all_warrant_df["underlying_code"].astype(str) == str(code)]
-                      if not all_warrant_df.empty else all_warrant_df)
+        warrant_df = warrant_groups.get(str(code), all_warrant_df.iloc[0:0])
         if warrant_df.empty:
             msg = f"{code}: {warrant_err or 'no warrants'}"
             (hard_errors if warrant_hard else skip_reasons).append(msg)
             continue
 
-        opt_df = (all_opt_df[all_opt_df["stock_code"].astype(str) == str(code)]
-                  if not all_opt_df.empty else all_opt_df)
+        opt_df = opt_groups.get(str(code), all_opt_df.iloc[0:0])
         if opt_df.empty:
             msg = f"{code}: {opt_err or 'no options'}"
             (hard_errors if opt_hard else skip_reasons).append(msg)
