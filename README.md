@@ -69,8 +69,10 @@ Uses put-call parity to identify mispricing between call and put warrants via sy
 app.py                Flask routes (request/response only)
 wsgi.py               gunicorn entry point (wsgi:app)
 logic/                pure market-data + math, no side effects
-  iv_engine.py          picks the IV backend: Rust warrants_core, else bs_python
-  bs_python.py          pure-Python Black-Scholes reference (the fallback engine)
+  iv_engine.py          engine registry: Rust warrants_core, or the Python twins
+  bs_python.py          Python Black-Scholes reference (fallback)
+  arb_kernels_py.py     Python arb-matcher kernels (fallback)
+  warrant_frame_py.py   Python warrant-frame builder (fallback)
   warrant_logic.py      CMoney data fetch, IV/delta/leverage computation
   options_logic.py      TAIFEX option data fetch and computation
   us_options_logic.py   US ADR option data fetch and computation
@@ -97,12 +99,12 @@ rust/
 
 **Key computations:**
 - IV solved with Brent's method (bounds `[1e-6, 10.0]`)
-- **IV/delta run in Rust** (`rust/warrants_core`) — ~50x faster than the Python
-  solver on the scanner's compute stage, needed for tick-by-tick data. The
-  pure-Python solver stays in `logic/bs_python.py` as the fallback and is used
-  automatically when the extension is not built. Both produce identical numbers
-  (see `docs/adr/0003-rust-iv-engine.md`); `IV_ENGINE=rust|python` forces one,
-  and `/healthz` reports which is live.
+- **IV/delta, the arb matchers and the warrant-frame builder run in Rust**
+  (`rust/warrants_core`), needed for tick-by-tick data. Each has a Python twin
+  used automatically when the extension is not built, and both produce identical
+  numbers. `RUST_ENGINE=rust|python` forces a backend, `RUST_ENGINE_OFF=arb`
+  disables one feature, and `/healthz` reports the engine per feature. See
+  `docs/adr/0003-rust-iv-engine.md` and `docs/adr/0004-rust-engine-expansion.md`.
 - Black-Scholes delta with continuous risk-free rate (Taiwan CBC benchmark, 1.875%)
 - All Taiwan equity options use exercise ratio = 2,000 shares/contract
 - TXO index options use 50 NT$/point
@@ -126,7 +128,8 @@ pip install -r requirements.txt
 ./scripts/build_rust.sh
 
 # Benchmark the two engines against each other
-python scripts/bench_iv.py
+python scripts/bench_iv.py        # IV kernels + the warrant frame
+python scripts/bench_engines.py   # every arb matcher, against the fixtures
 
 # Dev server — always prefix with the Taiwan timezone (see note below)
 TZ=Asia/Taipei python app.py                 # http://127.0.0.1:5001

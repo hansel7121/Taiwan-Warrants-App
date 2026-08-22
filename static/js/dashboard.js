@@ -686,6 +686,18 @@ function legPnlAt(leg, S, days) {
   return exitNotional - entryNotional;
 }
 
+// The DTE slider fires oninput on every pointer move. Coalescing to one redraw
+// per animation frame means a fast drag repaints at the display's rate instead
+// of queueing a redraw per event.
+let _payoffFrame = 0;
+function onPayoffSlider() {
+  if (_payoffFrame) return;
+  _payoffFrame = requestAnimationFrame(() => {
+    _payoffFrame = 0;
+    renderPayoff();
+  });
+}
+
 function renderPayoff() {
   const p = _payoffPosition;
   if (!p) return;
@@ -716,7 +728,9 @@ function renderPayoff() {
   marks.shapes.push({ type: "line", x0: lo, x1: hi, y0: 0, y1: 0,
     line: { color: "rgba(255,255,255,0.25)", width: 1 } });
 
-  Plotly.newPlot("payoff-chart", [{
+  // react, not newPlot: this runs on every tick of the DTE slider, and newPlot
+  // tears the whole plot down and rebuilds the SVG each time.
+  Plotly.react("payoff-chart", [{
     x: xs, y: ys, type: "scatter", mode: "lines",
     line: { color: "#e0a137", width: 2 }, hovertemplate: "S %{x:.2f}<br>P&L %{y:,.0f}<extra></extra>",
   }], {

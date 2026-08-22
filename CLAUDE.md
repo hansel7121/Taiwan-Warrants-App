@@ -32,15 +32,19 @@ Supported underlyings and their option IDs are managed as data in Supabase produ
 
 ## Commands
 
-Requires Python 3.11+. Conda env: **`warrants`**. The Rust IV engine additionally needs a stable Rust toolchain (`scripts/build_rust.sh` installs one via rustup if absent).
+Requires Python 3.11+. Conda env: **`warrants`**. The Rust engine additionally needs a stable Rust toolchain (`scripts/build_rust.sh` installs one via rustup if absent).
 
 ```bash
 conda activate warrants
 pip install -r requirements.txt
 
-# Optional but wanted: compile the Rust IV engine (installs rustup if missing).
-# Without it the app runs on the slower pure-Python solver — same numbers.
+# Optional but wanted: compile the Rust engine (installs rustup if missing).
+# Without it the app runs on the Python fallbacks — same numbers, slower.
 ./scripts/build_rust.sh
+
+# Benchmark every ported path against the committed fixtures, either engine
+python scripts/bench_engines.py
+python scripts/bench_iv.py
 
 # Dev server — ALWAYS prefix with the Taiwan timezone (see note)
 TZ=Asia/Taipei python app.py                 # http://127.0.0.1:5001
@@ -50,6 +54,14 @@ TZ=Asia/Taipei gunicorn -w 1 --threads 8 --timeout 240 -b 0.0.0.0:5001 wsgi:app
 ```
 
 Stop the dev server with `Ctrl+C` (or `pkill -f "python app.py"`).
+
+Run the suite under **both** engines before pushing — the Python fallbacks are
+only exercised when you ask for them:
+
+```bash
+TZ=Asia/Taipei python -m pytest tests -q                    # as it ships
+RUST_ENGINE=python TZ=Asia/Taipei python -m pytest tests -q # every fallback
+```
 
 - **Always set `TZ=Asia/Taipei`.** Days-to-expiry is computed against the machine's local "today". West of Taiwan (e.g. US Pacific), the local date lags Taiwan for part of the day, so an already-expired batch leaks into results and counts inflate (~1580 locally vs ~1407 on the UTC deploy). The `TZ` prefix scopes Taiwan time to this process only.
 - **Exactly 1 gunicorn worker.** Market-data caches live in process memory and would diverge across workers; the APScheduler jobs share those caches too. Use threads for concurrency, never extra workers.
@@ -64,9 +76,11 @@ Three layers: **routes** (`app.py`), **pure computation** (`logic/`), **infrastr
 app.py                 Flask routes only (parse request -> call logic/services -> JSON/CSV)
 wsgi.py                gunicorn entry point (wsgi:app); starts the scheduler in production
 logic/                 pure market-data + math, no side effects, own in-process caches
-  iv_engine.py           picks the IV/delta backend: Rust `warrants_core` if built, else bs_python
-  bs_python.py           pure-Python/NumPy Black-Scholes reference (price, delta, vega, IV) — the fallback
-  warrant_logic.py       CMoney warrant fetch + frame build; re-exports the IV kernels; cmkey + universe scrape
+  iv_engine.py           engine registry: binds each feature to Rust `warrants_core` or its Python twin
+  bs_python.py           Python Black-Scholes reference (price, delta, vega, IV) — fallback for `iv`
+  arb_kernels_py.py      Python arb-matcher kernels — fallback for `arb`
+  warrant_frame_py.py    Python warrant-frame builder + COL_ORDER — fallback for `warrant_frame`
+  warrant_logic.py       CMoney warrant fetch; re-exports the frame builder + IV kernels; cmkey + universe scrape
   options_logic.py       TAIFEX TW option fetch + computation; R (risk-free rate); _commodity_map()
   us_options_logic.py    US ADR option fetch, TWD conversion; R_US; _adr_map(); contract_tw_shares()
   arb_logic.py           warrant<->option matching, put-call parity, straddle vol-arb, TW/US leg arb
@@ -82,7 +96,8 @@ services/              side-effecting infrastructure
 templates/index.html   single-page frontend shell (Jinja + Plotly)
 static/css/app.css     extracted stylesheet
 static/js/*.js         extracted JS (common, quant, scanners, arb, portfolio)
-rust/warrants_core/    Rust IV/delta kernels -> the `warrants_core` extension (docs/adr/0003)
+rust/warrants_core/    Rust extension: src/bs.rs (IV/delta), arb.rs (matchers), frame.rs (warrant frame)
+tests/fixtures/arb/    recorded matcher output — pins current behaviour; see its README before touching
 supabase/              schema.sql (current end state) + migrations/ (incremental)
 notebooks/             exploratory research (ADR parity, screening); commit WITHOUT outputs
 scripts/               one-off maintenance/seeding scripts
@@ -96,7 +111,11 @@ scripts/               one-off maintenance/seeding scripts
 
 **Key computations (`logic/`):**
 - IV solved with Brent's method (`warrant_logic.implied_vol`), bounds `[1e-6, 10.0]`.
-- **The IV/delta kernels run in Rust** (`rust/warrants_core`, ~50x on the scanner's compute stage). `logic/iv_engine.py` falls back to the pure-Python `logic/bs_python.py` when the extension is not built; `IV_ENGINE=rust|python|auto` forces a backend, `/healthz` and the boot log report which one is live. Both engines produce identical columns after `round(..., 4)` — enforced by `tests/logic/test_iv_engine_parity.py`. **Any change to one solver must be mirrored in the other**, or that test fails. See `docs/adr/0003-rust-iv-engine.md`.
+- **Three features run in Rust** (`rust/warrants_core`): the IV/delta kernels (`iv`), the arb matcher kernels (`arb`), and the warrant-frame builder (`warrant_frame`). `logic/iv_engine.py` is the registry — it binds each to the extension or its Python twin **once at import**, never per call. `RUST_ENGINE=rust|python|auto` picks the backend (`IV_ENGINE` still works as the old name); `RUST_ENGINE_OFF=arb,warrant_frame` disables named features individually; `/healthz` and the boot log report the engine **per feature**.
+- Both engines must produce identical output after `round(..., 4)` — same values, same NaN/None placement, same row order, **same dtypes**. Enforced by `tests/logic/test_iv_engine_parity.py`, `test_arb_engine_parity.py` and the recorded fixtures in `tests/fixtures/arb/`. **Any change to one implementation must be mirrored in the other**, or those tests fail.
+- Rust returns **column arrays and row indices** — never strings, nested dicts, pandas or finished JSON. The Supabase snapshot path builds the same frames from Postgres and feeds the same filters, so a richer return type would need a second implementation of everything downstream. Nothing Rust-owned ever enters a TTL cache, Supabase or a response.
+- ⚠️ `arb_logic`/`warrant_logic` round with Python's builtin `round(x, n)` (decimal, ties to even) while `_refine_iv_for_rounding` uses NumPy's `np.round` (scale-rint-unscale). **They disagree on ties.** Passing a numpy array where a list is expected silently switches which one runs. Rust reproduces the builtin via `arb::round_py`.
+- See `docs/adr/0004-rust-engine-expansion.md` for what was deliberately NOT ported (`griddata`, the static-arb LP, WASM, the MIS frame) and why.
 - Black-Scholes delta with a continuous risk-free rate: Taiwan CBC benchmark `options_logic.R` (~1.875%); US leg uses `us_options_logic.R_US`.
 - All TW single-stock options: exercise ratio = **2,000 shares/contract**; TXO index = **50 NT$/point**.
 - Warrant per-underlying-share price = `warrant_ask / exercise_ratio`, and units-to-cover = `contract_size / exercise_ratio` — the normalization used across every arb path (`logic/arb_logic.py`, `_match_warrants_to_options` ~L399/L407).
