@@ -62,7 +62,7 @@ def bench_scalar(reps=3000):
 
 def bench_frame(rows, reps):
     """Full warrant-scanner compute stage: parse -> IV/delta/leverage solve -> DataFrame."""
-    from logic import warrant_logic
+    from logic import warrant_frame_py, warrant_logic
 
     rng = np.random.default_rng(99)
     data = {}
@@ -82,18 +82,23 @@ def bench_frame(rows, reps):
             "Stock": {"CommKey": "2330", "SalePr": S},
         }
 
-    saved = {k: getattr(warrant_logic, k) for k in
+    # Three points, because two different ports contributed: the engine as it
+    # ships, the Python frame builder on Rust IV kernels, and all-Python.
+    live = timeit(lambda: warrant_logic.build_warrant_df(data), reps)
+    py_frame = timeit(lambda: warrant_frame_py.build_warrant_df(data), max(1, reps // 2))
+    saved = {k: getattr(warrant_frame_py, k) for k in
              ("implied_vol", "implied_vol_vec", "bs_delta_vec", "_refine_iv_for_rounding")}
-    tr = timeit(lambda: warrant_logic.build_warrant_df(data), reps)
     try:
         for k in saved:
-            setattr(warrant_logic, k, getattr(bs_python, k))
-        tp = timeit(lambda: warrant_logic.build_warrant_df(data), max(1, reps // 2))
+            setattr(warrant_frame_py, k, getattr(bs_python, k))
+        all_py = timeit(lambda: warrant_frame_py.build_warrant_df(data), max(1, reps // 4))
     finally:
         for k, v in saved.items():
-            setattr(warrant_logic, k, v)
-    print(f"\nbuild_warrant_df({rows} warrants)   python {tp * 1e3:8.1f} ms   "
-          f"rust {tr * 1e3:7.2f} ms   speedup {tp / tr:6.1f}x")
+            setattr(warrant_frame_py, k, v)
+    print(f"\nbuild_warrant_df({rows} warrants)")
+    print(f"  active engine            {live * 1e3:8.2f} ms")
+    print(f"  python frame + rust IV   {py_frame * 1e3:8.2f} ms  ({py_frame / live:5.1f}x)")
+    print(f"  all python               {all_py * 1e3:8.2f} ms  ({all_py / live:5.1f}x)")
 
 
 def bench_surface(points=1200, reps=5):

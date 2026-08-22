@@ -25,6 +25,7 @@ per-call ``if RUST:``. Callers get the winners re-exported from
 import os
 
 import numpy as np
+import pandas as pd
 
 from logic import arb_kernels_py
 from logic import bs_python
@@ -187,10 +188,48 @@ else:  # pragma: no cover - exercised under RUST_ENGINE=python
     butterfly_pairs = arb_kernels_py.butterfly_pairs
 
 
+# ── warrant frame ───────────────────────────────────────────────────────────
+# Imported lazily inside the binding: warrant_frame_py imports the IV kernels
+# from this module, so a top-level import here would be circular.
+
+if RUST_AVAILABLE and use_rust("warrant_frame"):
+
+    def build_warrant_df(cmoney_results, compute_iv=True, keep_noniv=False,
+                         allow_no_quote=False):
+        """CMoney payloads -> the scanner frame, built in Rust.
+
+        Rust hands back one array per column, so `pd.DataFrame(..., copy=False)`
+        wraps them as blocks instead of pandas inferring types from a list of
+        several hundred dicts. Column arrays rather than a finished frame or a
+        JSON buffer because the Supabase snapshot path builds the same frame
+        from Postgres and feeds the same filters — a richer return type would
+        need a second implementation of everything downstream.
+        """
+        from logic import warrant_frame_py
+
+        cols = _rust.build_warrant_columns(
+            cmoney_results, bool(compute_iv), bool(keep_noniv),
+            bool(allow_no_quote), warrant_frame_py.R_FREE_DEFAULT,
+        )
+        if not len(cols["warrant_code"]):
+            return pd.DataFrame(columns=warrant_frame_py.COL_ORDER)
+        return pd.DataFrame(cols, copy=False)[warrant_frame_py.COL_ORDER]
+
+else:  # pragma: no cover - exercised under RUST_ENGINE=python
+
+    def build_warrant_df(cmoney_results, compute_iv=True, keep_noniv=False,
+                         allow_no_quote=False):
+        from logic import warrant_frame_py
+
+        return warrant_frame_py.build_warrant_df(
+            cmoney_results, compute_iv=compute_iv, keep_noniv=keep_noniv,
+            allow_no_quote=allow_no_quote)
+
+
 __all__ = [
     "ENGINE", "RUST_AVAILABLE", "RUST_IMPORT_ERROR", "engine_info",
     "FEATURES", "use_rust", "feature_engines",
     "bs_price", "bs_delta", "bs_vega", "calc_real_leverage",
     "implied_vol", "implied_vol_vec", "bs_delta_vec", "_refine_iv_for_rounding",
-    "butterfly_pairs",
+    "butterfly_pairs", "build_warrant_df",
 ]

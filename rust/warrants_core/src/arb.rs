@@ -8,12 +8,24 @@
 /// Python's builtin `round(x, nd)`: correctly-rounded to `nd` decimal places,
 /// ties to even. Rust's float formatting has the same contract, so a format and
 /// re-parse round-trip agrees with CPython bit for bit.
+thread_local! {
+    /// Reused so the hot paths (one round per emitted column, per row) do not
+    /// allocate a String each time.
+    static ROUND_BUF: std::cell::RefCell<String> = std::cell::RefCell::new(String::with_capacity(48));
+}
+
 #[inline]
 pub fn round_py(x: f64, nd: usize) -> f64 {
     if !x.is_finite() {
         return x;
     }
-    format!("{:.*}", nd, x).parse::<f64>().unwrap_or(x)
+    use std::fmt::Write;
+    ROUND_BUF.with(|b| {
+        let mut buf = b.borrow_mut();
+        buf.clear();
+        let _ = write!(buf, "{:.*}", nd, x);
+        buf.parse::<f64>().unwrap_or(x)
+    })
 }
 
 /// One surviving butterfly: the two wing positions, the chosen body, and the

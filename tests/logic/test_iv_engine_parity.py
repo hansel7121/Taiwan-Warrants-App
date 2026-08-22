@@ -148,17 +148,45 @@ def _fake_cmoney(n=600, seed=29):
 @rust_only
 @pytest.mark.parametrize("keep_noniv,allow_no_quote", [(False, False), (True, True)])
 def test_build_warrant_df_identical_across_engines(monkeypatch, keep_noniv, allow_no_quote):
+    """The Rust frame builder against the pure-Python one, end to end.
+
+    Dtypes are asserted alongside values: the two engines reach the frame by
+    different routes (column arrays vs a list of dicts), `to_json` renders both
+    NaN and None as null, and a column that silently became object-dtype would
+    pass every value check while breaking `.fillna`, `> 0` comparisons and the
+    Supabase writer.
+    """
+    from logic import warrant_frame_py
+
     data = _fake_cmoney()
     rust_df = warrant_logic.build_warrant_df(
         data, keep_noniv=keep_noniv, allow_no_quote=allow_no_quote)
 
     for name in ("implied_vol", "implied_vol_vec", "bs_delta_vec", "_refine_iv_for_rounding"):
-        monkeypatch.setattr(warrant_logic, name, getattr(bs_python, name))
-    py_df = warrant_logic.build_warrant_df(
+        monkeypatch.setattr(warrant_frame_py, name, getattr(bs_python, name))
+    py_df = warrant_frame_py.build_warrant_df(
         data, keep_noniv=keep_noniv, allow_no_quote=allow_no_quote)
 
     assert list(rust_df.columns) == list(py_df.columns)
     assert len(rust_df) == len(py_df)
     assert rust_df["warrant_code"].tolist() == py_df["warrant_code"].tolist()
-    for col in ("iv_ask", "iv_bid", "delta_calc", "leverage_calc", "time_value"):
-        _same(rust_df[col].to_numpy(dtype=float), py_df[col].to_numpy(dtype=float))
+    assert rust_df.dtypes.equals(py_df.dtypes), (
+        f"dtype drift:\n{rust_df.dtypes}\nvs\n{py_df.dtypes}")
+    assert (rust_df.isna().to_numpy() == py_df.isna().to_numpy()).all()
+    for col in rust_df.columns:
+        if rust_df[col].dtype == object:
+            assert rust_df[col].tolist() == py_df[col].tolist(), col
+        else:
+            _same(rust_df[col].to_numpy(dtype=float), py_df[col].to_numpy(dtype=float))
+
+
+@rust_only
+def test_empty_result_frames_match():
+    """An all-dropped batch must give the same empty frame from either engine."""
+    from logic import warrant_frame_py
+
+    bad = {"030000": {"Warrant": {}, "Stock": {}}}
+    rust_df = warrant_logic.build_warrant_df(bad)
+    py_df = warrant_frame_py.build_warrant_df(bad)
+    assert rust_df.empty and py_df.empty
+    assert list(rust_df.columns) == list(py_df.columns)

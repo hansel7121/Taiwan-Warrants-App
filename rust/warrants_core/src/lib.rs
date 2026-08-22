@@ -7,14 +7,16 @@
 
 mod arb;
 mod bs;
+mod frame;
 
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use rayon::prelude::*;
 
 /// Row count above which the solve is worth handing to rayon.
-const PAR_MIN: usize = 256;
+pub(crate) const PAR_MIN: usize = 256;
 
 fn same_len(n: usize, got: usize, name: &str) -> PyResult<()> {
     if n != got {
@@ -302,6 +304,24 @@ fn butterfly_pairs<'py>(
     ))
 }
 
+/// The warrant scanner's whole compute stage: CMoney payloads in, DataFrame
+/// columns out. See `frame.rs`; `logic/warrant_logic.py` wraps the result in
+/// `pd.DataFrame(cols, copy=False)`.
+#[pyfunction]
+#[pyo3(signature = (results, compute_iv=true, keep_noniv=false, allow_no_quote=false, r_free=0.02))]
+fn build_warrant_columns<'py>(
+    py: Python<'py>,
+    results: &Bound<'py, PyDict>,
+    compute_iv: bool,
+    keep_noniv: bool,
+    allow_no_quote: bool,
+    r_free: f64,
+) -> PyResult<Bound<'py, PyDict>> {
+    let rows = frame::parse_all(py, results, allow_no_quote)?;
+    let cols = py.allow_threads(move || frame::solve(rows, compute_iv, keep_noniv, r_free));
+    frame::to_columns(py, &cols)
+}
+
 /// Python's builtin `round(x, nd)`, exposed so a test can prove the Rust and
 /// CPython roundings agree before any kernel relies on it.
 #[pyfunction]
@@ -323,5 +343,6 @@ fn warrants_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(refine_iv_for_rounding, m)?)?;
     m.add_function(wrap_pyfunction!(butterfly_pairs, m)?)?;
     m.add_function(wrap_pyfunction!(round_py, m)?)?;
+    m.add_function(wrap_pyfunction!(build_warrant_columns, m)?)?;
     Ok(())
 }
