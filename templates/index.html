@@ -770,6 +770,14 @@
             <span id="live-scan-status" style="font-size:12px;color:var(--muted)"></span>
           </div>
           <div style="display:flex;align-items:center;gap:10px">
+            <button class="sm" id="live-connect-btn" onclick="connectLiveWarrant()"
+                    title="Log in and resume streaming the persisted tracked list. No-op if already connected.">
+              Connect
+            </button>
+            <button class="sm" id="live-disconnect-btn" onclick="disconnectLiveWarrant()"
+                    title="Close every open connection and log out. The tracked list is kept — Connect resumes it.">
+              Disconnect
+            </button>
             <button class="sm" id="live-reconnect-btn" onclick="reconnectLiveWarrant()"
                     title="Hard restart: re-logs in and reopens however many connections the tracked list needs. Reserved for error recovery — the session connects automatically during TW-equity trading hours.">
               Reconnect
@@ -777,14 +785,32 @@
           </div>
         </div>
 
-        <div id="live-status" style="margin:10px 0;font-size:12px;color:var(--muted)"></div>
+        <div style="display:flex;align-items:center;gap:14px;margin:10px 0">
+          <div id="live-status" style="font-size:12px;color:var(--muted)"></div>
+          <div class="live-view-toggle">
+            <button class="sm active" id="live-view-table-btn" onclick="setLiveView('table')">Table</button>
+            <button class="sm" id="live-view-orderbook-btn" onclick="setLiveView('orderbook')">Orderbook</button>
+          </div>
+        </div>
 
-        <table>
-          <thead>
-            <tr><th></th><th>Code</th><th>Name</th><th>Bid Vol</th><th>Bid</th><th>Ask</th><th>Ask Vol</th><th>Updated</th><th></th></tr>
-          </thead>
-          <tbody id="live-tbody"></tbody>
-        </table>
+        <div id="live-table-view">
+          <table>
+            <thead>
+              <tr>
+                <th>Code</th><th>Name</th>
+                <th>Bid 5</th><th>Bid 4</th><th>Bid 3</th><th>Bid 2</th><th>Bid 1</th>
+                <th>Ask 1</th><th>Ask 2</th><th>Ask 3</th><th>Ask 4</th><th>Ask 5</th>
+                <th>Updated</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="live-tbody"></tbody>
+          </table>
+        </div>
+
+        <div id="live-orderbook-view" style="display:none">
+          <div id="live-orderbook-grid"></div>
+        </div>
+
         <p id="live-empty" style="display:none;padding:16px;color:var(--muted)">
           No warrants tracked yet — add one by code or run a Liquidity Scan.
         </p>

@@ -374,10 +374,26 @@ tbody tr.row-pinned td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 #tab-live .dot.ok { background: var(--put); }
 #tab-live .dot.warn { background: var(--accent); }
 #tab-live .down { color: var(--call); }
-#tab-live .live-toggle { width: 1.2em; text-align: center; color: var(--muted); }
-#tab-live .live-ladder-row td { background: var(--surface); padding: 6px 10px 10px 28px; }
-#tab-live table.live-ladder { width: auto; margin: 0; }
-#tab-live table.live-ladder th, #tab-live table.live-ladder td { padding: 3px 10px; font-size: 11.5px; }
+#tab-live .live-updated { min-width: 6.5em; color: var(--muted); }
+#tab-live .live-vol { color: var(--muted); font-size: .9em; }
+#tab-live .live-view-toggle { display: inline-flex; gap: 4px; }
+#tab-live .live-view-toggle button.active { background: var(--accent-soft); border-color: var(--accent); }
+
+/* Orderbook card grid, mirrors scripts/fubon_quote_viewer.py's layout */
+#live-orderbook-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+                        gap: 1rem 1.5rem; align-items: start; }
+#live-orderbook-grid .live-book { border: 1px solid var(--border); border-radius: 6px; padding: .6rem .8rem;
+                                   min-height: 15rem; display: flex; flex-direction: column;
+                                   min-width: 0; box-sizing: border-box; overflow-x: auto; }
+#live-orderbook-grid .live-book h3 { margin: 0 0 .4rem; font-size: .85rem; line-height: 1.25;
+                                      min-height: 3.75em; white-space: normal; overflow-wrap: break-word; }
+#live-orderbook-grid table { border-collapse: collapse; font-variant-numeric: tabular-nums; width: 100%; }
+#live-orderbook-grid th, #live-orderbook-grid td { padding: .25rem .5rem; text-align: right;
+                                                    border-bottom: 1px solid var(--border); white-space: nowrap; }
+#live-orderbook-grid th { font-size: .7rem; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+#live-orderbook-grid tr.best td { font-weight: 700; }
+#live-orderbook-grid .lv { color: var(--muted); font-size: .75rem; text-align: center; }
+#live-orderbook-grid .live-book-meta { color: var(--muted); font-size: .8rem; margin-top: .3rem; }
 
 /* ── IV plot ── */
 #iv-plot {

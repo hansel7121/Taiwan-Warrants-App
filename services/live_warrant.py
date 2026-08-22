@@ -45,6 +45,7 @@ _names = {}       # code -> name
 _tracked = []     # codes, add order — mirrors live_warrant_tracked
 _connections = [] # each: {"sdk", "ws", "codes": set(), "sub_ids": {}, "state", "last_error"}
 _session_error = None  # set when the session can't even start (e.g. no credentials)
+_stopped_by_user = False  # set by stop_session(); blocks scheduler/add_code from silently reopening it
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -108,6 +109,8 @@ def _ensure_connection(idx):
     with _lock:
         if idx < len(_connections):
             return _connections[idx]
+        if _stopped_by_user:
+            raise RuntimeError("session disconnected — click Connect to resume")
     conn = _login_new_connection()
     with _lock:
         conn["index"] = len(_connections)
@@ -278,10 +281,10 @@ def _untrack_one(code):
 # Session lifecycle (called by the scheduler gate and the manual Reconnect route)
 # ─────────────────────────────────────────────────────────────────────────────
 def start_session():
-    """Idempotent: no-op if the pool already has connections; otherwise loads the persisted tracked list."""
+    """Idempotent: no-op if the pool already has connections or the user disconnected; otherwise loads the persisted tracked list."""
     global _session_error
     with _lock:
-        if _connections:
+        if _connections or _stopped_by_user:
             return
     _session_error = None
 
@@ -307,21 +310,45 @@ def start_session():
 
 
 def _teardown():
+    """Close every pooled connection and log out. `state` is set to "closing" before
+    disconnect() so _on_disconnect doesn't see was_connected=True and spawn an
+    auto-reconnect thread that would log in a fresh, never-logged-out session."""
     with _lock:
         conns = list(_connections)
         _connections.clear()
+        for conn in conns:
+            conn["state"] = "closing"
     for conn in conns:
         try:
             conn["ws"].disconnect()
+        except Exception as e:
+            print(f"LIVEWARRANT: teardown disconnect failed: {e}", flush=True)
+        try:
             conn["sdk"].logout()
         except Exception as e:
-            print(f"LIVEWARRANT: teardown failed: {e}", flush=True)
+            print(f"LIVEWARRANT: teardown logout failed: {e}", flush=True)
 
 
 def reconnect():
     """Manual hard restart: tear down the whole pool, then reopen from the persisted tracked list."""
+    global _stopped_by_user
+    _stopped_by_user = False
     _teardown()
     start_session()
+
+
+def connect_session():
+    """Manual Connect: clear the user-stop flag, then start_session()."""
+    global _stopped_by_user
+    _stopped_by_user = False
+    start_session()
+
+
+def stop_session():
+    """Manual disconnect: tear down the whole pool and stay stopped until connect_session(); also used by wsgi.py's shutdown hook."""
+    global _stopped_by_user
+    _stopped_by_user = True
+    _teardown()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
