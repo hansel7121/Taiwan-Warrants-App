@@ -9,14 +9,13 @@ Market data comes only through the logic modules' fetchers (warrant_logic,
 options_logic, us_options_logic), which own their own in-process caches; this
 module keeps no cache of its own.
 """
-from bisect import bisect_left, bisect_right
-
 from services import applog
 import numpy as np
 import pandas as pd
 from logic import options_logic
 from logic import us_options_logic
 from logic import warrant_logic
+from logic.iv_engine import butterfly_pairs
 
 
 class NoMatchesError(RuntimeError):
@@ -1190,43 +1189,30 @@ def _match_butterflies(warrant_df, opt_df, opt_contract_size, positive_loose=Fal
         if len(wings) < 2 or not bodies:
             continue
 
-        # Bodies indexed by strike so each wing pair scans only the strikes
-        # strictly between them, instead of re-filtering the whole body list
-        # inside an O(K^2) loop.
+        # The wing-pair scan is O(K^2) over distinct warrant strikes and is the
+        # matcher's whole remaining cost, so it runs in the arb kernel (Rust
+        # when built, logic/arb_kernels_py.py otherwise). Bodies go in sorted by
+        # strike with their chain positions, so a pair scans only the strikes
+        # between the wings and a tie on sell price still keeps the body that
+        # came first in the chain.
         by_k = sorted(range(len(bodies)), key=lambda i: bodies[i]["K"])
-        body_ks = [bodies[i]["K"] for i in by_k]
-
         strikes = sorted(wings)
-        for a in range(len(strikes)):
-            for b in range(a + 1, len(strikes)):
+        hits = butterfly_pairs(
+            [wings[k]["K"] for k in strikes],
+            [wings[k]["buy_ps"] for k in strikes],
+            [wings[k]["dte"] for k in strikes],
+            [bodies[i]["K"] for i in by_k],
+            [bodies[i]["sell_ps"] for i in by_k],
+            [bodies[i]["dte"] for i in by_k],
+            by_k,
+            is_call,
+        )
+
+        for a, b, bidx, credit_ps, tail, worst_payoff_ps, guaranteed_ps in hits:
                 w1, w2 = wings[strikes[a]], wings[strikes[b]]
                 K1, K2 = w1["K"], w2["K"]
-                dte_cap = min(w1["dte"], w2["dte"])
-                # Most-expensive-to-sell body strictly between the wings, expiring
-                # no later than the shorter-dated wing. Ties keep the first body
-                # in chain order, which is what max() over the filtered list did.
-                best = -1
-                for i in by_k[bisect_right(body_ks, K1):bisect_left(body_ks, K2)]:
-                    bd = bodies[i]
-                    if bd["dte"] > dte_cap:
-                        continue
-                    if best < 0:
-                        best = i
-                        continue
-                    cur = bodies[best]["sell_ps"]
-                    if bd["sell_ps"] > cur or (bd["sell_ps"] == cur and i < best):
-                        best = i
-                if best < 0:
-                    continue
-                body = bodies[best]
+                body = bodies[bidx]
                 x = body["K"]
-
-                credit_ps = round(2 * body["sell_ps"] - w1["buy_ps"] - w2["buy_ps"], 6)
-                tail = (2 * x - K1 - K2) if is_call else (K1 + K2 - 2 * x)
-                worst_payoff_ps = min(0.0, tail)
-                guaranteed_ps = round(worst_payoff_ps + credit_ps, 6)
-                if guaranteed_ps <= 0:
-                    continue  # not a locked arb — skip
 
                 max_loss_ps = round(max(0.0, -guaranteed_ps), 6)
                 wing_lo_units = round(M / w1["ratio"])

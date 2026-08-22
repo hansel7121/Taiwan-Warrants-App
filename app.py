@@ -1289,6 +1289,10 @@ def healthz():
             "branch": _BRANCH,
             "scheduler": os.environ.get("ENABLE_SCHEDULER") == "1",
             "iv_engine": iv_engine.engine_info(),
+            # Per feature, not one string: a best-effort Rust build that failed
+            # downgrades several features at once, and "which path ran" has to
+            # be answerable during an incident.
+            "features": iv_engine.feature_engines(),
         }
     )
 

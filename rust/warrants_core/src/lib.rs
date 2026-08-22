@@ -5,6 +5,7 @@
 //! C-contiguous 1-D arrays (the Python side broadcasts), releases the GIL, and
 //! fans out over rayon above `PAR_MIN` rows.
 
+mod arb;
 mod bs;
 
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
@@ -229,6 +230,85 @@ fn refine_iv_for_rounding<'py>(
     Ok(out.into_pyarray_bound(py))
 }
 
+/// Every wing pair whose best body yields a locked-in credit.
+///
+/// Wings must arrive sorted by strike and bodies sorted by strike with their
+/// original chain positions in `body_orig` — see `arb::butterfly_pairs`.
+/// Returns seven parallel arrays: the two wing positions, the chosen body's
+/// original position, and the four economics values, already rounded the way
+/// the Python matcher rounds them.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn butterfly_pairs<'py>(
+    py: Python<'py>,
+    wing_k: PyReadonlyArray1<'py, f64>,
+    wing_buy: PyReadonlyArray1<'py, f64>,
+    wing_dte: PyReadonlyArray1<'py, i64>,
+    body_k: PyReadonlyArray1<'py, f64>,
+    body_sell: PyReadonlyArray1<'py, f64>,
+    body_dte: PyReadonlyArray1<'py, i64>,
+    body_orig: PyReadonlyArray1<'py, i64>,
+    is_call: bool,
+) -> PyResult<(
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+)> {
+    let wk = wing_k.as_slice()?;
+    let nw = wk.len();
+    let wb = wing_buy.as_slice()?;
+    let wd = wing_dte.as_slice()?;
+    same_len(nw, wb.len(), "wing_buy")?;
+    same_len(nw, wd.len(), "wing_dte")?;
+    let bk = body_k.as_slice()?;
+    let nb = bk.len();
+    let bs_ = body_sell.as_slice()?;
+    let bd = body_dte.as_slice()?;
+    let bo = body_orig.as_slice()?;
+    same_len(nb, bs_.len(), "body_sell")?;
+    same_len(nb, bd.len(), "body_dte")?;
+    same_len(nb, bo.len(), "body_orig")?;
+
+    let hits = py.allow_threads(|| arb::butterfly_pairs(wk, wb, wd, bk, bs_, bd, bo, is_call));
+    let n = hits.len();
+    let mut a = Vec::with_capacity(n);
+    let mut b = Vec::with_capacity(n);
+    let mut body = Vec::with_capacity(n);
+    let mut credit = Vec::with_capacity(n);
+    let mut tail = Vec::with_capacity(n);
+    let mut worst = Vec::with_capacity(n);
+    let mut guaranteed = Vec::with_capacity(n);
+    for h in hits {
+        a.push(h.wing_lo);
+        b.push(h.wing_hi);
+        body.push(h.body);
+        credit.push(h.credit_ps);
+        tail.push(h.tail);
+        worst.push(h.worst_payoff_ps);
+        guaranteed.push(h.guaranteed_ps);
+    }
+    Ok((
+        a.into_pyarray_bound(py),
+        b.into_pyarray_bound(py),
+        body.into_pyarray_bound(py),
+        credit.into_pyarray_bound(py),
+        tail.into_pyarray_bound(py),
+        worst.into_pyarray_bound(py),
+        guaranteed.into_pyarray_bound(py),
+    ))
+}
+
+/// Python's builtin `round(x, nd)`, exposed so a test can prove the Rust and
+/// CPython roundings agree before any kernel relies on it.
+#[pyfunction]
+fn round_py(x: f64, nd: usize) -> f64 {
+    arb::round_py(x, nd)
+}
+
 #[pymodule]
 fn warrants_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -241,5 +321,7 @@ fn warrants_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(implied_vol_vec_exact, m)?)?;
     m.add_function(wrap_pyfunction!(bs_delta_vec, m)?)?;
     m.add_function(wrap_pyfunction!(refine_iv_for_rounding, m)?)?;
+    m.add_function(wrap_pyfunction!(butterfly_pairs, m)?)?;
+    m.add_function(wrap_pyfunction!(round_py, m)?)?;
     Ok(())
 }

@@ -1,25 +1,43 @@
-"""Backend selection for the Black-Scholes IV / delta kernels.
+"""Engine registry: which implementation of each compute-heavy feature is live.
 
-Two interchangeable engines sit behind these names: the compiled Rust extension
-``warrants_core`` (used whenever it imports) and the pure-Python/NumPy reference
-in ``logic/bs_python.py`` (the backup). Both return columns that are identical
-after ``round(..., 4)`` — the Rust solver reuses the same ``[1e-6, 10]`` bracket,
+Two interchangeable engines sit behind every name here: the compiled Rust
+extension ``warrants_core`` (used whenever it imports) and a pure-Python/NumPy
+reference (the backup). Both produce columns that are identical after
+``round(..., 4)`` — the Rust IV solver reuses the same ``[1e-6, 10]`` bracket,
 the same certified-Newton acceptance test, and a port of SciPy's ``brentq`` for
-the exact fallback, so switching engines cannot move a displayed number.
+the exact fallback — so switching engines cannot move a displayed number.
 
-``IV_ENGINE=rust|python|auto`` (default ``auto``) picks the backend at import.
-Callers get these names re-exported from ``logic.warrant_logic``.
+``RUST_ENGINE=rust|python|auto`` (default ``auto``) picks the backend at import
+for every feature at once. ``rust`` is a hard requirement and raises if the
+extension will not import; ``auto`` falls back silently, which is why
+``/healthz`` and the boot log report what actually won.
+
+``RUST_ENGINE_OFF=arb,warrant_frame`` disables named features individually while
+leaving the rest on Rust — the escape hatch for a production incident, where
+dropping every feature back to Python is a bigger change than the one at fault.
+
+``IV_ENGINE`` is the previous name for ``RUST_ENGINE`` and still works.
+
+Selection happens once, at import, by binding module-level names — never a
+per-call ``if RUST:``. Callers get the winners re-exported from
+``logic.warrant_logic``.
 """
 import os
 
 import numpy as np
 
+from logic import arb_kernels_py
 from logic import bs_python
 
 # Always available regardless of engine: trivial, no solver involved.
 calc_real_leverage = bs_python.calc_real_leverage
 
-_MODE = (os.getenv("IV_ENGINE") or "auto").strip().lower()
+# Features that have both engines. Named so RUST_ENGINE_OFF can address them.
+FEATURES = ("iv", "arb", "warrant_frame")
+
+_MODE = (os.getenv("RUST_ENGINE") or os.getenv("IV_ENGINE") or "auto").strip().lower()
+_OFF = {f.strip().lower() for f in (os.getenv("RUST_ENGINE_OFF") or "").split(",")
+        if f.strip()}
 
 _rust = None
 RUST_IMPORT_ERROR = None
@@ -36,13 +54,25 @@ RUST_AVAILABLE = _rust is not None
 ENGINE = "rust" if RUST_AVAILABLE else "python"
 
 
+def use_rust(feature):
+    """Whether `feature` runs on Rust in this process."""
+    return RUST_AVAILABLE and feature not in _OFF
+
+
+def feature_engines():
+    """{feature: "rust"|"python"} — what actually ran, not what was asked for."""
+    return {f: ("rust" if use_rust(f) else "python") for f in FEATURES}
+
+
 def engine_info():
     """One-line engine description for boot logs and /healthz."""
     if RUST_AVAILABLE:
-        return f"rust warrants_core {_rust.__version__}"
+        base = f"rust warrants_core {_rust.__version__}"
+        off = sorted(_OFF & set(FEATURES))
+        return f"{base} (off: {','.join(off)})" if off else base
     if RUST_IMPORT_ERROR:
         return f"python (warrants_core unavailable: {RUST_IMPORT_ERROR})"
-    return "python (IV_ENGINE=python)"
+    return "python (RUST_ENGINE=python)"
 
 
 def _is_scalar(*vals):
@@ -67,7 +97,7 @@ def _flat(arrays, dtypes):
 _F = float
 _B = bool
 
-if RUST_AVAILABLE:
+if RUST_AVAILABLE and use_rust("iv"):
 
     def bs_price(S, K, T, r, sigma, ratio, is_put=False):
         if _is_scalar(S, K, T, r, sigma, ratio, is_put):
@@ -132,8 +162,35 @@ else:  # pragma: no cover - exercised only when the extension is missing
     _refine_iv_for_rounding = bs_python._refine_iv_for_rounding
 
 
+# ── arb kernels ─────────────────────────────────────────────────────────────
+
+if RUST_AVAILABLE and use_rust("arb"):
+
+    def butterfly_pairs(wing_k, wing_buy, wing_dte,
+                        body_k, body_sell, body_dte, body_orig, is_call):
+        """See `arb_kernels_py.butterfly_pairs`. Rust returns seven parallel
+        arrays; they are zipped here so both engines hand back the same tuples."""
+        cols = _rust.butterfly_pairs(
+            np.ascontiguousarray(wing_k, dtype=float),
+            np.ascontiguousarray(wing_buy, dtype=float),
+            np.ascontiguousarray(wing_dte, dtype=np.int64),
+            np.ascontiguousarray(body_k, dtype=float),
+            np.ascontiguousarray(body_sell, dtype=float),
+            np.ascontiguousarray(body_dte, dtype=np.int64),
+            np.ascontiguousarray(body_orig, dtype=np.int64),
+            bool(is_call),
+        )
+        a, b, body, credit, tail, worst, guaranteed = (c.tolist() for c in cols)
+        return list(zip(a, b, body, credit, tail, worst, guaranteed))
+
+else:  # pragma: no cover - exercised under RUST_ENGINE=python
+    butterfly_pairs = arb_kernels_py.butterfly_pairs
+
+
 __all__ = [
     "ENGINE", "RUST_AVAILABLE", "RUST_IMPORT_ERROR", "engine_info",
+    "FEATURES", "use_rust", "feature_engines",
     "bs_price", "bs_delta", "bs_vega", "calc_real_leverage",
     "implied_vol", "implied_vol_vec", "bs_delta_vec", "_refine_iv_for_rounding",
+    "butterfly_pairs",
 ]
