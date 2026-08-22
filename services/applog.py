@@ -90,3 +90,21 @@ def set_rows(n):
             g.log_rows = n
     except Exception:
         pass
+
+
+def add_stage(name, seconds):
+    """Attach a named stage duration to this request's completion line.
+
+    Lets a route report where its time actually went (`enc=3.2ms` for response
+    encoding, say) without a second log line to correlate. Off the request path
+    it is a no-op, like the rest of this module.
+    """
+    try:
+        if has_request_context():
+            stages = getattr(g, "log_stages", None)
+            if stages is None:
+                stages = {}
+                g.log_stages = stages
+            stages[name] = stages.get(name, 0.0) + float(seconds)
+    except Exception:
+        pass
