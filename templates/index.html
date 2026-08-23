@@ -355,10 +355,9 @@
         <!-- Warrants controls -->
         <div id="iv-warrants-controls" class="filters">
           <div class="stock-select">
-            <span>Stock (multi-select)</span>
+            <span>Stock (one only)</span>
             <select id="ivStockSelect" multiple size="6">
             </select>
-            <button class="sm" onclick="toggleSelectAllIV()">Select All</button>
           </div>
           <label>Option Type
             <select id="ivOptionType">
@@ -391,6 +390,28 @@
           <div class="action-group compact">
             <button class="primary" onclick="fetchIVSurfaceOptions()">Plot IV Surface</button>
           </div>
+        </div>
+
+        <!-- Shared by both sub-tabs. The dropdown picks which bound pair the two
+             inputs edit; all three filters stay applied, blank meaning unbounded. -->
+        <div class="filters" style="margin-bottom:10px">
+          <label>Filter
+            <select id="ivFilterPick" onchange="setIVFilter(this.value)">
+              <option value="iv">IV (vol pts)</option>
+              <option value="dte">Days to expiry</option>
+              <option value="strike">Strike</option>
+            </select>
+          </label>
+          <label>Min
+            <input type="number" id="ivFilterMin" step="any" placeholder="none" oninput="onIVFilterInput()" />
+          </label>
+          <label>Max
+            <input type="number" id="ivFilterMax" step="any" placeholder="none" oninput="onIVFilterInput()" />
+          </label>
+          <div class="action-group compact">
+            <button class="sm" onclick="resetIVFilters()" title="Back to the default IV band, no DTE or strike bounds">Reset</button>
+          </div>
+          <div id="iv-filter-summary" style="font-size:11px;color:var(--muted);align-self:flex-end;padding-bottom:6px"></div>
         </div>
 
         <div id="iv-status"></div>

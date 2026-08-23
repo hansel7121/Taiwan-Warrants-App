@@ -859,7 +859,14 @@ def scrape_cmoney_warrant(
     return df, None, meta
 
 
-def fetch_iv_surface(stock_codes, option_type="All"):
+def fetch_iv_surface(stock_codes, option_type="All", dte_min=None, dte_max=None,
+                     strike_min=None, strike_max=None):
+    """Warrants for the IV surface, with the filters that apply to BOTH quote sides.
+
+    The IV bounds are deliberately not applied here: the bid and ask surfaces are
+    built from their own IV columns and are filtered per side by the caller, so a
+    warrant can appear on one sheet and not the other. `None` means unbounded.
+    """
     df, error, meta = read_warrant(
         stock_codes,
         option_type=option_type,
@@ -872,15 +879,24 @@ def fetch_iv_surface(stock_codes, option_type="All"):
     if df.empty:
         return None, error or "No data", meta
 
-    df_clean = df[
-        (df["iv_ask"] > 0.20)
-        & (df["iv_ask"] < 1.00)
-        & (df["days_to_expiry"] > 0)
+    keep = (
+        (df["days_to_expiry"] > 0)
         & (df["days_to_expiry"] < 666)
+        # A bid IV a full 100 vol points from the ask is a solver artefact, not a
+        # spread — drop the row from both sides rather than letting it tilt either.
         & (abs(df["iv_ask"] - df["iv_bid"]) < 1)
-    ].copy()
+    )
+    if dte_min is not None:
+        keep &= df["days_to_expiry"] >= dte_min
+    if dte_max is not None:
+        keep &= df["days_to_expiry"] <= dte_max
+    if strike_min is not None:
+        keep &= df["strike"] >= strike_min
+    if strike_max is not None:
+        keep &= df["strike"] <= strike_max
 
+    df_clean = df[keep].copy()
     if df_clean.empty:
-        return None, "No warrants passed IV filter", meta
+        return None, "No warrants passed the surface filters", meta
 
     return df_clean, None, meta

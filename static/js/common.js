@@ -405,6 +405,9 @@ async function _boot() {
     });
   }
   await initProductSelects();
+  // Seed the IV-surface filter inputs from their defaults so the band that is
+  // actually applied is visible before the first plot.
+  if (typeof setIVFilter === "function") setIVFilter("iv");
   // Portfolio is loaded lazily on first Portfolio-tab click (loadPortfolioOnce),
   // not here — the landing tab doesn't use it. Saves /get_portfolio +
   // /adr_premium_scenario calls on every reload.

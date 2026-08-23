@@ -14,7 +14,6 @@ let optSortAsc = true;
 
 let allSelected = false;
 
-let allSelectedIV = false;
 
 // Remember the current view so a page reload restores it. sessionStorage
 // (not localStorage) is deliberate: a reload keeps your place, but opening
@@ -26,13 +25,6 @@ function toggleSelectAll() {
   allSelected = !allSelected;
   for (let opt of select.options) opt.selected = allSelected;
   document.querySelectorAll(".btn-row .sm")[0].textContent = allSelected ? "Deselect All" : "Select All";
-}
-
-function toggleSelectAllIV() {
-  const select = document.getElementById("ivStockSelect");
-  allSelectedIV = !allSelectedIV;
-  for (let opt of select.options) opt.selected = allSelectedIV;
-  document.querySelector("#tab-ivsurface .sm").textContent = allSelectedIV ? "Deselect All" : "Select All";
 }
 
 // Unified Add / Remove product UI. Warrant = code + an auto-looked-up name
@@ -334,6 +326,57 @@ async function downloadCSV() {
   a.click();
 }
 
+// ── Surface filters ────────────────────────────────────────────────────────
+// One control shared by both sub-tabs. The dropdown chooses which bound pair the
+// Min/Max inputs edit; every filter stays applied with whatever it holds, and a
+// blank bound means unbounded. IV is in vol points, the unit the z-axis uses.
+const _IV_FILTER_DEFAULTS = { iv: { min: 20, max: 100 }, dte: { min: "", max: "" }, strike: { min: "", max: "" } };
+const _IV_FILTER_LABEL = { iv: "IV", dte: "DTE", strike: "K" };
+let _ivFilters = JSON.parse(JSON.stringify(_IV_FILTER_DEFAULTS));
+let _ivFilterKind = "iv";
+
+function setIVFilter(kind) {
+  _ivFilterKind = kind;
+  document.getElementById("ivFilterMin").value = _ivFilters[kind].min;
+  document.getElementById("ivFilterMax").value = _ivFilters[kind].max;
+  renderIVFilterSummary();
+}
+
+function onIVFilterInput() {
+  _ivFilters[_ivFilterKind] = {
+    min: document.getElementById("ivFilterMin").value,
+    max: document.getElementById("ivFilterMax").value,
+  };
+  renderIVFilterSummary();
+}
+
+function resetIVFilters() {
+  _ivFilters = JSON.parse(JSON.stringify(_IV_FILTER_DEFAULTS));
+  setIVFilter(_ivFilterKind);
+}
+
+// All three are listed, not just the one being edited — otherwise a bound set
+// under another dropdown entry silently shapes the plot.
+function renderIVFilterSummary() {
+  const parts = [];
+  for (const k of ["iv", "dte", "strike"]) {
+    const { min, max } = _ivFilters[k];
+    if (min === "" && max === "") continue;
+    parts.push(`${_IV_FILTER_LABEL[k]} ${min === "" ? "−∞" : min}–${max === "" ? "∞" : max}`);
+  }
+  const el = document.getElementById("iv-filter-summary");
+  if (el) el.textContent = parts.length ? "Active: " + parts.join("  ·  ") : "No filters";
+}
+
+function ivFilterPayload() {
+  const out = {};
+  for (const k of ["iv", "dte", "strike"]) {
+    out[k + "_min"] = _ivFilters[k].min === "" ? null : Number(_ivFilters[k].min);
+    out[k + "_max"] = _ivFilters[k].max === "" ? null : Number(_ivFilters[k].max);
+  }
+  return out;
+}
+
 function setIVSource(src) {
   const isOpt = src === "options";
   document.getElementById("iv-warrants-controls").style.display = isOpt ? "none" : "flex";
@@ -344,12 +387,69 @@ function setIVSource(src) {
   document.getElementById("iv-status").textContent = "";
 }
 
+// ── Surface rendering ──────────────────────────────────────────────────────
+// Every plot carries BOTH quote sides as separate sheets. They are built from
+// their own IV columns and filtered independently, so the two can cover
+// different strikes and expiries — the gap between them IS the bid/ask vol
+// spread, which a single mid-based sheet hides.
+const _IV_SIDE = {
+  ask: { colorscale: "Viridis", dot: "#ef4444", label: "Ask" },
+  bid: { colorscale: "Cividis", dot: "#38bdf8", label: "Bid" },
+};
+
+function ivSurfaceTraces(data, dotSize) {
+  const traces = [];
+  for (const side of ["ask", "bid"]) {
+    const d = data[side];
+    if (!d) continue;
+    const cfg = _IV_SIDE[side];
+    traces.push({
+      type: "surface", x: d.x, y: d.y, z: d.z,
+      colorscale: cfg.colorscale, opacity: 0.8, showscale: side === "ask",
+      colorbar: { title: "IV (%)", tickfont: { color: "#7b8794" }, titlefont: { color: "#7b8794" } },
+      name: cfg.label + " surface", showlegend: true,
+    });
+    traces.push({
+      type: "scatter3d", x: d.scatter_x, y: d.scatter_y, z: d.scatter_z,
+      mode: "markers",
+      marker: { size: dotSize, color: cfg.dot, opacity: 0.6 },
+      text: d.labels,
+      hovertemplate: `%{text}<br>${cfg.label} IV: %{z:.1f}%<br>Strike: %{x:.0f}<br>DTE: %{y}<extra></extra>`,
+      name: cfg.label,
+    });
+  }
+  return traces;
+}
+
+function ivPlottedCount(data) {
+  return ["ask", "bid"].map(k => (data[k] ? data[k].scatter_x.length : 0));
+}
+
+function ivSceneLayout(title) {
+  return {
+    title: { text: title, font: { color: "#d8dee4", size: 15 } },
+    paper_bgcolor: "#151a1f",
+    plot_bgcolor: "#151a1f",
+    scene: {
+      bgcolor: "#0d1013",
+      xaxis: { title: "Strike", color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
+      yaxis: { title: "Days to Expiry", color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
+      zaxis: { title: "IV (%)", color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
+      camera: { eye: { x: 1.5, y: -1.5, z: 1.0 } },
+    },
+    legend: { font: { color: "#7b8794" }, bgcolor: "#151a1f" },
+    margin: { l: 0, r: 0, t: 48, b: 0 },
+  };
+}
+
 async function fetchIVSurfaceOptions() {
-  document.getElementById("iv-status").textContent = "Building surface…";
+  document.getElementById("iv-status").textContent = "Building surfaces…";
   document.getElementById("iv-plot").innerHTML = "";
+  const sel = document.getElementById("ivOptProduct");
   const payload = {
-    stock_codes: [document.getElementById("ivOptProduct").value],
+    stock_codes: [sel.value],
     option_type: document.getElementById("ivOptType").value,
+    ...ivFilterPayload(),
   };
   let data;
   try {
@@ -359,7 +459,7 @@ async function fetchIVSurfaceOptions() {
       body: JSON.stringify(payload),
     });
     data = await res.json();
-  } catch(e) {
+  } catch (e) {
     document.getElementById("iv-status").textContent = "Error: " + e.message;
     return;
   }
@@ -367,128 +467,79 @@ async function fetchIVSurfaceOptions() {
     document.getElementById("iv-status").textContent = "Error: " + data.error;
     return;
   }
-  const product = document.getElementById("ivOptProduct").options[document.getElementById("ivOptProduct").selectedIndex].text;
+  const product = sel.options[sel.selectedIndex].text;
   const callPut = document.getElementById("ivOptType").value;
-  document.getElementById("iv-status").textContent = `${data.scatter_x.length} contracts plotted`;
-  const traces = [
-    {
-      type: "surface",
-      x: data.x, y: data.y, z: data.z,
-      colorscale: "Viridis",
-      opacity: 0.85,
-      colorbar: { title: "IV (%)", tickfont: { color: "#7b8794" }, titlefont: { color: "#7b8794" } },
-      name: "IV Surface",
-    },
-    {
-      type: "scatter3d",
-      x: data.scatter_x, y: data.scatter_y, z: data.scatter_z,
-      mode: "markers",
-      marker: { size: 4, color: callPut === "Call" ? "#f87171" : "#4ade80", opacity: 0.7 },
-      text: data.labels,
-      hovertemplate: "%{text}<br>Strike: %{x:.0f}<br>DTE: %{y}<br>IV: %{z:.1f}%<extra></extra>",
-      name: callPut + "s",
-    },
-  ];
-  Plotly.newPlot("iv-plot", traces, {
-    title: { text: `${product} ${callPut} IV Surface`, font: { color: "#d8dee4", size: 15 } },
-    paper_bgcolor: "#151a1f",
-    plot_bgcolor: "#151a1f",
-    scene: {
-      bgcolor: "#0d1013",
-      xaxis: { title: "Strike", color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
-      yaxis: { title: "Days to Expiry", color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
-      zaxis: { title: "IV (%)", range: [0, 150], color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
-      camera: { eye: { x: 1.5, y: -1.5, z: 1.0 } },
-    },
-    legend: { font: { color: "#7b8794" }, bgcolor: "#151a1f" },
-    margin: { l: 0, r: 0, t: 48, b: 0 },
-  }, { responsive: true });
+  const [na, nb] = ivPlottedCount(data);
+  document.getElementById("iv-status").textContent =
+    `${na} ask · ${nb} bid contracts plotted`;
+  Plotly.newPlot("iv-plot", ivSurfaceTraces(data, 4),
+    ivSceneLayout(`${product} ${callPut} IV Surface — bid vs ask`), { responsive: true });
 }
 
 async function fetchIVSurface() {
   const select = document.getElementById("ivStockSelect");
   const stock_codes = Array.from(select.selectedOptions).map(o => o.value);
+  const status = document.getElementById("iv-status");
   if (!stock_codes.length) {
-    document.getElementById("iv-status").textContent = "Please select at least one stock.";
+    status.textContent = "Please select an underlying stock.";
     return;
   }
-  document.getElementById("iv-status").textContent = "Building surface…";
+  // A surface spanning two underlyings interpolates across a strike range where
+  // no instrument exists, so it draws the triangulation rather than the market.
+  if (stock_codes.length > 1) {
+    status.textContent = "Please select only one underlying stock.";
+    return;
+  }
+  status.textContent = "Building surfaces…";
   document.getElementById("iv-plot").innerHTML = "";
 
   const payload = {
     stock_codes,
     option_type: document.getElementById("ivOptionType").value,
     highlight_code: document.getElementById("highlightCode").value.trim(),
+    ...ivFilterPayload(),
   };
 
-  const res = await api("/iv_surface", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json();
-
+  let data;
+  try {
+    const res = await api("/iv_surface", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    data = await res.json();
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+    return;
+  }
   if (data.error) {
-    document.getElementById("iv-status").textContent = "Error: " + data.error;
+    status.textContent = "Error: " + data.error;
     return;
   }
 
-  document.getElementById("iv-status").textContent = `${data.scatter_x.length} warrants plotted`;
+  const [na, nb] = ivPlottedCount(data);
+  status.textContent = `${na} ask · ${nb} bid warrants plotted`;
 
-  const traces = [
-    {
-      type: "surface",
-      x: data.x, y: data.y, z: data.z,
-      colorscale: "Viridis",
-      opacity: 0.85,
-      colorbar: { title: "IV (%)", tickfont: { color: "#7b8794" }, titlefont: { color: "#7b8794" } },
-      name: "IV Surface",
-    },
-    {
-      type: "scatter3d",
-      x: data.scatter_x, y: data.scatter_y, z: data.scatter_z,
-      mode: "markers",
-      marker: { size: 3, color: "#ef4444", opacity: 0.5 },
-      text: data.codes.map((c, i) => c + " " + data.names[i]),
-      hovertemplate: "%{text}<br>Strike: %{x:.0f}<br>DTE: %{y}<br>IV: %{z:.1f}%<extra></extra>",
-      name: "Warrants",
-    },
-  ];
-
+  const traces = ivSurfaceTraces(data, 3);
   if (data.highlight) {
     const h = data.highlight;
     traces.push({
       type: "scatter3d",
       x: [h.x], y: [h.y], z: [h.z],
       mode: "markers+text",
-      marker: { size: 6, color: "var(--accent)", symbol: "diamond", opacity: 1.0, line: { color: "#fff", width: 2 } },
+      marker: { size: 6, color: "#fbbf24", symbol: "diamond", opacity: 1.0, line: { color: "#fff", width: 2 } },
       text: [h.code],
       textposition: "top center",
-      textfont: { color: "var(--accent)", size: 12 },
-      hovertemplate: `${h.code}<br>Strike: %{x:.0f}<br>DTE: %{y}<br>IV: %{z:.1f}%<extra></extra>`,
+      textfont: { color: "#fbbf24", size: 12 },
+      hovertemplate: `${h.code}<br>Strike: %{x:.0f}<br>DTE: %{y}<br>Ask IV: %{z:.1f}%<extra></extra>`,
       name: "Selected: " + h.code,
     });
   }
 
-  Plotly.newPlot("iv-plot", traces, {
-    title: { text: "Warrant IV Surface", font: { color: "#d8dee4", size: 15 } },
-    paper_bgcolor: "#151a1f",
-    plot_bgcolor: "#151a1f",
-    scene: {
-      bgcolor: "#0d1013",
-      xaxis: { title: "Strike (NT$)", color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
-      yaxis: { title: "Days to Expiry", color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
-      zaxis: { title: "IV (%)", range: [0, 100], color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
-      camera: { eye: { x: 1.5, y: -1.5, z: 1.0 } },
-    },
-    legend: { font: { color: "#7b8794" }, bgcolor: "#151a1f" },
-    margin: { l: 0, r: 0, t: 48, b: 0 },
-  }, { responsive: true });
+  Plotly.newPlot("iv-plot", traces,
+    ivSceneLayout(`${stock_codes[0]} Warrant IV Surface — bid vs ask`), { responsive: true });
 }
 
-let _optMarket = "tw";   // "tw" = TAIFEX (European), "us" = US ADR (American)
-
-// Set an element's display, tolerating elements the current mode doesn't render.
 function _setDisplay(id, value) {
   const el = document.getElementById(id);
   if (el) el.style.display = value;

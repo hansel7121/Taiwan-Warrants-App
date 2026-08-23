@@ -807,63 +807,130 @@ def read_tw_option_csv():
     )
 
 
+# The IV surface is built for ONE underlying at a time. Two underlyings share no
+# strike axis, so interpolating across them produces a sheet spanning a gap where
+# no instrument exists — a picture of the triangulation, not of the market.
+_ONE_UNDERLYING = "Please select only one underlying stock."
+
+
+def _single_code(stock_codes):
+    """(code, error). Rejects an empty or multi-code selection."""
+    codes = [str(c).strip() for c in (stock_codes or []) if str(c).strip()]
+    if not codes:
+        return None, "Please select an underlying stock."
+    if len(codes) > 1:
+        return None, _ONE_UNDERLYING
+    return codes[0], None
+
+
+def _surface_filters(data):
+    """IV / DTE / strike bounds from the request; missing or blank means unbounded.
+
+    IV arrives in vol POINTS, the unit the axis and the inputs both use, and is
+    converted to the decimal the frames carry.
+    """
+    def num(key):
+        v = data.get(key)
+        if v is None or v == "":
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    iv_min, iv_max = num("iv_min"), num("iv_max")
+    return {
+        "iv_min": None if iv_min is None else iv_min / 100.0,
+        "iv_max": None if iv_max is None else iv_max / 100.0,
+        "dte_min": num("dte_min"), "dte_max": num("dte_max"),
+        "strike_min": num("strike_min"), "strike_max": num("strike_max"),
+    }
+
+
+def _side_surface(df, iv_col, label_col, f):
+    """Build one quote side's surface from `iv_col`, applying that side's IV bounds."""
+    side = df[df[iv_col].notna() & (df[iv_col] > 0)]
+    if f["iv_min"] is not None:
+        side = side[side[iv_col] >= f["iv_min"]]
+    if f["iv_max"] is not None:
+        side = side[side[iv_col] <= f["iv_max"]]
+    if side.empty:
+        return None, side
+    return iv_surface_logic.surface_from_points(
+        side["strike"].tolist(),
+        side["days_to_expiry"].tolist(),
+        (side[iv_col] * 100).tolist(),
+        side[label_col].astype(str).tolist(),
+        resolution=iv_surface_logic.DEFAULT_RESOLUTION,
+    ), side
+
+
 @app.route("/iv_surface_options", methods=["POST"])
 @require_auth
 def iv_surface_options():
     data = request.json
-    stock_codes = data.get("stock_codes", ["TXO"])
+    code, err = _single_code(data.get("stock_codes", ["TXO"]))
+    if err:
+        return jsonify({"error": err})
     option_type = data.get("option_type", "Call")
-    df, error, _meta = options_logic.read_tw_option(stock_codes, option_type, min_days=1)
+    f = _surface_filters(data)
+
+    df, error, _meta = options_logic.read_tw_option([code], option_type, min_days=1)
     if df.empty:
         return jsonify({"error": error or "No data"})
 
-    df = df[df["iv_ask"].notna() & (df["iv_ask"] > 0)]
-    if len(df) < 4:
+    keep = df["days_to_expiry"] > 0
+    if f["dte_min"] is not None:
+        keep &= df["days_to_expiry"] >= f["dte_min"]
+    if f["dte_max"] is not None:
+        keep &= df["days_to_expiry"] <= f["dte_max"]
+    if f["strike_min"] is not None:
+        keep &= df["strike"] >= f["strike_min"]
+    if f["strike_max"] is not None:
+        keep &= df["strike"] <= f["strike_max"]
+    df = df[keep]
+
+    ask, _ = _side_surface(df, "iv_ask", "contract", f)
+    bid, _ = _side_surface(df, "iv_bid", "contract", f)
+    if ask is None and bid is None:
         return jsonify({"error": "Not enough data points to build a surface."})
-
-    x = df["strike"].values.tolist()
-    y = df["days_to_expiry"].values.tolist()
-    z = (df["iv_ask"].values * 100).tolist()
-    labels = df["contract"].tolist()
-
-    xi, yi, zi = iv_surface_logic.interpolate_grid(x, y, z, resolution=80)
-
-    return jsonify({
-        "x": xi,
-        "y": yi,
-        "z": zi,
-        "scatter_x": x,
-        "scatter_y": y,
-        "scatter_z": z,
-        "labels": labels,
-    })
+    return jsonify({"ask": ask, "bid": bid})
 
 
 @app.route("/iv_surface", methods=["POST"])
 @require_auth
 def iv_surface():
     data = request.json
-    stock_codes = data.get("stock_codes", ["2330"])
+    code, err = _single_code(data.get("stock_codes", ["2330"]))
+    if err:
+        return jsonify({"error": err})
     option_type = data.get("option_type", "All")
     highlight_code = data.get("highlight_code", "").strip()
+    f = _surface_filters(data)
 
-    df_clean, error, meta = warrant_logic.fetch_iv_surface(stock_codes, option_type)
+    df_clean, error, meta = warrant_logic.fetch_iv_surface(
+        [code], option_type, dte_min=f["dte_min"], dte_max=f["dte_max"],
+        strike_min=f["strike_min"], strike_max=f["strike_max"])
     if df_clean is None:
         return jsonify({"error": error, **meta})
 
-    x = df_clean["strike"].values.tolist()
-    y = df_clean["days_to_expiry"].values.tolist()
-    z = (df_clean["iv_ask"].values * 100).tolist()
-    codes = df_clean["warrant_code"].astype(str).tolist()
-    names = df_clean["warrant_name"].tolist()
+    # The warrant scatter is labelled "code name", so the two are joined here
+    # rather than shipping parallel arrays the frontend has to zip back up.
+    labels = (df_clean["warrant_code"].astype(str) + " "
+              + df_clean["warrant_name"].astype(str))
+    df_clean = df_clean.assign(_label=labels)
+    ask, ask_df = _side_surface(df_clean, "iv_ask", "_label", f)
+    bid, _ = _side_surface(df_clean, "iv_bid", "_label", f)
+    if ask is None and bid is None:
+        return jsonify({"error": "No warrants passed the surface filters", **meta})
 
-    xi, yi, zi = iv_surface_logic.interpolate_grid(x, y, z, resolution=80)
-
+    # Highlight sits on the ask sheet when the code survived that side's filter,
+    # so the marker is never floating above a surface the warrant is not on.
     highlight = None
-    if highlight_code:
-        mask = df_clean["warrant_code"].astype(str) == highlight_code
+    if highlight_code and ask_df is not None and not ask_df.empty:
+        mask = ask_df["warrant_code"].astype(str) == highlight_code
         if mask.any():
-            row = df_clean[mask].iloc[0]
+            row = ask_df[mask].iloc[0]
             highlight = {
                 "x": float(row["strike"]),
                 "y": int(row["days_to_expiry"]),
@@ -871,20 +938,7 @@ def iv_surface():
                 "code": highlight_code,
             }
 
-    return jsonify(
-        {
-            "x": xi,
-            "y": yi,
-            "z": zi,
-            "scatter_x": x,
-            "scatter_y": y,
-            "scatter_z": z,
-            "codes": codes,
-            "names": names,
-            "highlight": highlight,
-            **meta,
-        }
-    )
+    return jsonify({"ask": ask, "bid": bid, "highlight": highlight, **meta})
 
 
 @app.route("/universe_status")
