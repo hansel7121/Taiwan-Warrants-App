@@ -415,7 +415,12 @@
         </div>
 
         <div id="iv-status"></div>
-        <div id="iv-plot"></div>
+        <!-- One plot per quote side. Separate axes, not two sheets on one set:
+             overlapping them buries whichever sheet sits underneath. -->
+        <div id="iv-plot-grid">
+          <div id="iv-plot-bid" class="iv-plot"></div>
+          <div id="iv-plot-ask" class="iv-plot"></div>
+        </div>
       </main>
     </div>
 

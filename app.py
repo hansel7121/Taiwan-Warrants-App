@@ -1239,6 +1239,39 @@ def match_static_arb_csv():
     )
 
 
+# SOURCE_COMMIT is Coolify's build-time equivalent of Render's RENDER_GIT_COMMIT;
+# absent locally and until the Hetzner/Coolify deploy passes it through.
+_COMMIT = (os.environ.get("SOURCE_COMMIT") or "dev")[:7]
+_BRANCH = os.environ.get("SOURCE_BRANCH") or "dev"
+
+
+def _asset_version():
+    """Cache-busting stamp appended to static asset URLs (?v=...).
+
+    On Render this is the deploy's commit SHA, so a new deploy invalidates every
+    cached JS/CSS file. Locally it falls back to the newest static-file mtime
+    (edits bump it), then to process start time if static/ is missing.
+    """
+    if _COMMIT != "dev":
+        return _COMMIT
+    try:
+        return str(int(max(
+            os.path.getmtime(os.path.join(r, f))
+            for r, _, fs in os.walk(os.path.join(base_dir, "static"))
+            for f in fs
+        )))
+    except (ValueError, OSError):
+        return str(int(time.time()))
+
+
+ASSET_VERSION = _asset_version()
+
+
+@app.context_processor
+def _inject_asset_version():
+    return {"ASSET_VERSION": ASSET_VERSION}
+
+
 @app.route("/healthz")
 def healthz():
     return jsonify(

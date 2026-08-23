@@ -395,14 +395,25 @@ tbody tr.row-pinned td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 #live-orderbook-grid .lv { color: var(--muted); font-size: .75rem; text-align: center; }
 #live-orderbook-grid .live-book-meta { color: var(--muted); font-size: .8rem; margin-top: .3rem; }
 
-/* ── IV plot ── */
-#iv-plot {
+/* ── IV plots ── */
+/* Bid and ask sit side by side so the two surfaces can be read against each
+   other; below 1100px they stack rather than shrink into illegibility. */
+#iv-plot-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+@media (max-width: 1100px) {
+  #iv-plot-grid { grid-template-columns: 1fr; }
+}
+.iv-plot {
   width: 100%;
-  height: 680px;
+  height: 560px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
 }
+.iv-plot:empty { display: none; }
 
 /* ── Action buttons group ── */
 .action-group {

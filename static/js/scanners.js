@@ -383,68 +383,102 @@ function setIVSource(src) {
   document.getElementById("iv-options-controls").style.display  = isOpt ? "flex" : "none";
   document.getElementById("iv-src-warrants").classList.toggle("active", !isOpt);
   document.getElementById("iv-src-options").classList.toggle("active", isOpt);
-  document.getElementById("iv-plot").innerHTML = "";
+  ivClearPlots();
   document.getElementById("iv-status").textContent = "";
 }
 
 // ── Surface rendering ──────────────────────────────────────────────────────
-// Every plot carries BOTH quote sides as separate sheets. They are built from
-// their own IV columns and filtered independently, so the two can cover
-// different strikes and expiries — the gap between them IS the bid/ask vol
-// spread, which a single mid-based sheet hides.
+// One plot per quote side, on its own axes. The two are built from their own IV
+// columns and filtered independently, so they can cover different strikes and
+// expiries — but they are NOT drawn together: overlaying two sheets buries
+// whichever one sits underneath at any given strike.
+// Both sides use the same colorscale. They are separate plots with their own
+// titles, so a second scheme would only make the same surface look like a
+// different quantity.
+const _IV_COLORSCALE = "Viridis";
 const _IV_SIDE = {
-  ask: { colorscale: "Viridis", dot: "#ef4444", label: "Ask" },
-  bid: { colorscale: "Cividis", dot: "#38bdf8", label: "Bid" },
+  bid: { div: "iv-plot-bid", label: "Bid" },
+  ask: { div: "iv-plot-ask", label: "Ask" },
 };
 
-function ivSurfaceTraces(data, dotSize) {
-  const traces = [];
-  for (const side of ["ask", "bid"]) {
-    const d = data[side];
-    if (!d) continue;
-    const cfg = _IV_SIDE[side];
-    traces.push({
+function ivSideTraces(d, cfg, dotSize, dotColor) {
+  return [
+    {
       type: "surface", x: d.x, y: d.y, z: d.z,
-      colorscale: cfg.colorscale, opacity: 0.8, showscale: side === "ask",
+      colorscale: _IV_COLORSCALE, opacity: 0.9, showscale: true,
       colorbar: { title: "IV (%)", tickfont: { color: "#7b8794" }, titlefont: { color: "#7b8794" } },
-      name: cfg.label + " surface", showlegend: true,
-    });
-    traces.push({
+      name: cfg.label + " surface", showlegend: false,
+    },
+    {
       type: "scatter3d", x: d.scatter_x, y: d.scatter_y, z: d.scatter_z,
       mode: "markers",
-      marker: { size: dotSize, color: cfg.dot, opacity: 0.6 },
+      marker: { size: dotSize, color: dotColor, opacity: 0.6 },
       text: d.labels,
       hovertemplate: `%{text}<br>${cfg.label} IV: %{z:.1f}%<br>Strike: %{x:.0f}<br>DTE: %{y}<extra></extra>`,
       name: cfg.label,
-    });
+    },
+  ];
+}
+
+// Both plots share one z range so the sheets are comparable by eye — a side
+// auto-scaled to its own IVs would look identical to the other no matter how
+// far apart they actually sit.
+function ivZRange(data) {
+  const all = ["ask", "bid"].flatMap(k => (data[k] ? data[k].scatter_z : []));
+  if (!all.length) return null;
+  const lo = Math.min(...all), hi = Math.max(...all);
+  const pad = Math.max(1, (hi - lo) * 0.08);
+  return [Math.max(0, lo - pad), hi + pad];
+}
+
+function ivClearPlots() {
+  for (const side of Object.values(_IV_SIDE)) {
+    const el = document.getElementById(side.div);
+    if (!el) continue;
+    Plotly.purge(side.div);
+    el.innerHTML = "";
   }
-  return traces;
+}
+
+// `extra` lets the warrant surface add its highlight marker to the ask plot.
+function ivRenderPlots(data, title, dotSize, dotColor, extra) {
+  const zr = ivZRange(data);
+  for (const side of ["bid", "ask"]) {
+    const cfg = _IV_SIDE[side];
+    const el = document.getElementById(cfg.div);
+    const d = data[side];
+    if (!d) { Plotly.purge(cfg.div); el.innerHTML = ""; continue; }
+    const traces = ivSideTraces(d, cfg, dotSize, dotColor);
+    if (side === "ask" && extra) traces.push(extra);
+    Plotly.newPlot(cfg.div, traces,
+      ivSceneLayout(`${title} — ${cfg.label}`, zr), { responsive: true });
+  }
 }
 
 function ivPlottedCount(data) {
   return ["ask", "bid"].map(k => (data[k] ? data[k].scatter_x.length : 0));
 }
 
-function ivSceneLayout(title) {
+function ivSceneLayout(title, zRange) {
   return {
-    title: { text: title, font: { color: "#d8dee4", size: 15 } },
+    title: { text: title, font: { color: "#d8dee4", size: 14 } },
     paper_bgcolor: "#151a1f",
     plot_bgcolor: "#151a1f",
     scene: {
       bgcolor: "#0d1013",
       xaxis: { title: "Strike", color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
       yaxis: { title: "Days to Expiry", color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
-      zaxis: { title: "IV (%)", color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
+      zaxis: { title: "IV (%)", range: zRange || undefined, color: "#7b8794", gridcolor: "#222a31", zerolinecolor: "#222a31" },
       camera: { eye: { x: 1.5, y: -1.5, z: 1.0 } },
     },
-    legend: { font: { color: "#7b8794" }, bgcolor: "#151a1f" },
-    margin: { l: 0, r: 0, t: 48, b: 0 },
+    showlegend: false,
+    margin: { l: 0, r: 0, t: 40, b: 0 },
   };
 }
 
 async function fetchIVSurfaceOptions() {
   document.getElementById("iv-status").textContent = "Building surfaces…";
-  document.getElementById("iv-plot").innerHTML = "";
+  ivClearPlots();
   const sel = document.getElementById("ivOptProduct");
   const payload = {
     stock_codes: [sel.value],
@@ -472,8 +506,8 @@ async function fetchIVSurfaceOptions() {
   const [na, nb] = ivPlottedCount(data);
   document.getElementById("iv-status").textContent =
     `${na} ask · ${nb} bid contracts plotted`;
-  Plotly.newPlot("iv-plot", ivSurfaceTraces(data, 4),
-    ivSceneLayout(`${product} ${callPut} IV Surface — bid vs ask`), { responsive: true });
+  ivRenderPlots(data, `${product} ${callPut} IV Surface`, 4,
+    callPut === "Call" ? "#f87171" : "#4ade80", null);
 }
 
 async function fetchIVSurface() {
@@ -491,7 +525,7 @@ async function fetchIVSurface() {
     return;
   }
   status.textContent = "Building surfaces…";
-  document.getElementById("iv-plot").innerHTML = "";
+  ivClearPlots();
 
   const payload = {
     stock_codes,
@@ -520,10 +554,11 @@ async function fetchIVSurface() {
   const [na, nb] = ivPlottedCount(data);
   status.textContent = `${na} ask · ${nb} bid warrants plotted`;
 
-  const traces = ivSurfaceTraces(data, 3);
+  // The highlight is an ask-IV point, so it goes on the ask plot only.
+  let marker = null;
   if (data.highlight) {
     const h = data.highlight;
-    traces.push({
+    marker = {
       type: "scatter3d",
       x: [h.x], y: [h.y], z: [h.z],
       mode: "markers+text",
@@ -533,11 +568,10 @@ async function fetchIVSurface() {
       textfont: { color: "#fbbf24", size: 12 },
       hovertemplate: `${h.code}<br>Strike: %{x:.0f}<br>DTE: %{y}<br>Ask IV: %{z:.1f}%<extra></extra>`,
       name: "Selected: " + h.code,
-    });
+    };
   }
 
-  Plotly.newPlot("iv-plot", traces,
-    ivSceneLayout(`${stock_codes[0]} Warrant IV Surface — bid vs ask`), { responsive: true });
+  ivRenderPlots(data, `${stock_codes[0]} Warrant IV Surface`, 3, "#ef4444", marker);
 }
 
 function _setDisplay(id, value) {
