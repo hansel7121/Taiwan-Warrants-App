@@ -791,10 +791,14 @@
         </div>
 
         <div id="pfsub-suggestions" class="pfsub-content" style="display:none">
-          <div style="display:flex;align-items:flex-start;gap:12px;margin:0 0 14px">
+          <div style="display:flex;align-items:flex-start;gap:12px;margin:0 0 12px">
             <p style="font-size:12px;color:var(--muted);margin:0;flex:1">
-              Direct Match opportunities found automatically by the background scanner (every 15 min, market hours only). Click a row for the full P&amp;L detail — same view as Arb Finder.</p>
+              Found automatically by the background scanner (every 15 min, market hours only). Both scanners run on the <b>same</b> snapshot, so a difference between the two tabs is method, not timing. Click a row for the full breakdown.</p>
             <button class="sm" onclick="clearSuggestions()" title="Delete every suggestion currently shown. The scanner re-populates still-live arbs on its next run.">Clear all</button>
+          </div>
+          <div id="sug-mode-btns" class="sort-btns" style="margin:0 0 12px">
+            <button id="sug-mode-direct" class="pfsub-btn active" onclick="setSugMode('direct', this)">Direct Match</button>
+            <button id="sug-mode-lp" class="pfsub-btn" onclick="setSugMode('lp', this)">Static-arb LP</button>
           </div>
           <div id="portfolio-suggestionsContainer"></div>
         </div>

@@ -1,4 +1,5 @@
 """In-process APScheduler jobs that refresh market-data snapshots and the Direct-Arb suggestions log."""
+import hashlib
 import json
 import threading
 import time
@@ -17,6 +18,7 @@ from services import db_products
 from services import db_suggestions
 from services import live_warrant
 from logic import arb_logic
+from logic import static_arb
 from logic import ttl_cache
 from logic import warrant_logic
 from logic import options_logic
@@ -215,14 +217,96 @@ def sync_us_option():
 # stored rows route into the same modal. Only same_type (Call-Call/Put-Put) is scanned.
 _SUGGEST_ARB_TYPE = "direct_same_type"
 
+# The static-arb LP's output, logged alongside Direct Match's so the two can be
+# compared on identical market data. Scanned with allow_short_warrants=True: the
+# LP's reachable set then contains BOTH of Direct Match's directions, which is
+# the only setting under which "did the LP find everything Direct did" is a
+# meaningful question. Rows that needed a short warrant are flagged in `legs`.
+_SUGGEST_LP_ARB_TYPE = "static_lp"
+
+
+def _lp_suggestion_id(row):
+    """Deterministic id for one LP structure: underlying, horizon, and the leg set.
+
+    Sizes are deliberately excluded — the LP re-solves against whatever depth is
+    resting, so the same structure found an hour later carries different lot
+    counts. Keying on the legs means re-finding it updates nothing rather than
+    logging a near-duplicate.
+    """
+    legs = "|".join(sorted(f"{l['side'][0]}{l['kind'][0]}{l['code']}"
+                           for l in row.get("legs") or []))
+    digest = hashlib.sha1(legs.encode()).hexdigest()[:12]
+    return f"{_SUGGEST_LP_ARB_TYPE}:{row.get('underlying_code')}:{row.get('horizon_dte')}:{digest}"
+
+
+def _scan_lp_suggestions(codes):
+    """Static-arb LP rows as suggestion records, or [] when the scan is clean-empty."""
+    try:
+        df = static_arb.match_static_arb(
+            codes, min_volume=0, min_edge=0.0, allow_short_warrants=True)
+    except arb_logic.NoMatchesError as e:
+        print(f"SCHED: lp suggestions no matches: {e}", flush=True)
+        return []
+
+    out = {}
+    for row in json.loads(df.to_json(orient="records")):
+        legs = row.get("legs") or []
+        row["needs_short_warrant"] = any(
+            l.get("side") == "short" and l.get("kind") == "warrant" for l in legs)
+        sug_id = _lp_suggestion_id(row)
+        out[sug_id] = {
+            "id": sug_id,
+            "arb_type": _SUGGEST_LP_ARB_TYPE,
+            "legs": row,
+            # price_diff carries the headline number for whichever scanner wrote
+            # the row. Direct Match's is NT$ per underlying share; the LP's is
+            # the guaranteed profit in NT$ for the whole structure. The two live
+            # in separate tabs, which is what keeps the units unambiguous.
+            "price_diff": row.get("guaranteed_profit"),
+            "price_diff_pct": row.get("return_pct"),
+            "legs_status": {l["code"]: "live" for l in legs},
+        }
+    return list(out.values())
+
 
 def sync_suggestions():
-    """Append-only log of Arb Finder -> Direct Match (Call-Call/Put-Put) output, at the tab's own defaults."""
+    """Append-only log of Direct Match AND the static-arb LP, on one snapshot.
+
+    Both scanners run in the same job so they read the same TTL-cached frames.
+    Running them as separate jobs would let a refresh land between them, and any
+    difference in what they found could then be timing rather than method —
+    which is the whole point of logging both.
+    """
     codes = sorted(set(warrant_universe()) & set(tw_option_codes()))
     if not codes:
         print("SCHED: suggestions: no warrant/tw_option overlap, skipping", flush=True)
         return
 
+    direct = _scan_direct_suggestions(codes)
+    lp = _scan_lp_suggestions(codes)
+    _append_suggestions(direct + lp, len(direct), len(lp))
+
+
+def _append_suggestions(candidates, n_direct, n_lp):
+    """Insert only ids not already stored; logged rows' frozen prices are never touched."""
+    if not candidates:
+        print("SCHED: suggestions no rows", flush=True)
+        return
+    by_id = {c["id"]: c for c in candidates}
+    already = db_suggestions.existing_ids(list(by_id))
+    new_rows = [r for cid, r in by_id.items() if cid not in already]
+    if new_rows:
+        db_suggestions.insert_suggestions(new_rows)
+    print(
+        f"SCHED: suggestions +{len(new_rows)} new, "
+        f"{len(by_id) - len(new_rows)} already logged "
+        f"({len(by_id)} found this scan: {n_direct} direct, {n_lp} lp)",
+        flush=True,
+    )
+
+
+def _scan_direct_suggestions(codes):
+    """Direct Match (Call-Call/Put-Put) rows as suggestion records, at the tab's own defaults."""
     try:
         df = arb_logic.match_warrant_tw_option(
             codes, "All", SUGGEST_MAX_STRIKE_DIFF_PCT, SUGGEST_MAX_DTE_DIFF,
@@ -230,7 +314,7 @@ def sync_suggestions():
         )
     except arb_logic.NoMatchesError as e:
         print(f"SCHED: suggestions no matches: {e}", flush=True)
-        return
+        return []
 
     # Direction is part of the id: a flipped long/short pair is a distinct trade.
     recs = json.loads(df.to_json(orient="records"))
@@ -246,21 +330,7 @@ def sync_suggestions():
             "price_diff_pct": row.get("price_diff_pct"),
             "legs_status": {"warrant": "live", "option": "live"},
         }
-    if not candidates:
-        print("SCHED: suggestions no rows", flush=True)
-        return
-
-    # Insert only ids not already stored; existing rows' frozen prices are never touched.
-    already = db_suggestions.existing_ids(list(candidates))
-    new_rows = [r for cid, r in candidates.items() if cid not in already]
-    if new_rows:
-        db_suggestions.insert_suggestions(new_rows)
-    print(
-        f"SCHED: suggestions +{len(new_rows)} new, "
-        f"{len(candidates) - len(new_rows)} already logged "
-        f"({len(candidates)} found this scan)",
-        flush=True,
-    )
+    return list(candidates.values())
 
 
 def sync_live_warrant():

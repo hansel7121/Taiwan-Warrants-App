@@ -182,7 +182,12 @@ function renderHomePnl() {
 // ── Live risk-free suggestions (top of the background-scanner output) ─
 function renderHomeSuggestions() {
   const c = document.getElementById("home-suggestions");
-  const sug = ((typeof suggestionsData !== "undefined" && suggestionsData) || []).slice(0, 6);
+  // Direct Match rows only: this widget renders a warrant/option pair and opens
+  // openDirectModal, neither of which fits the LP's variable leg set. The LP's
+  // output lives in its own Suggestions sub-tab.
+  const all = ((typeof suggestionsData !== "undefined" && suggestionsData) || [])
+    .filter(s => s.arb_type !== "static_lp");
+  const sug = all.slice(0, 6);
   const label = (typeof _ARB_TYPE_LABEL !== "undefined" && _ARB_TYPE_LABEL) || {};
   if (!sug.length) {
     c.innerHTML = `<p class="home-empty">No arb suggestions logged yet. The scanner appends every Direct Match arb it finds (every 15 min during TWSE hours).</p>`;
@@ -198,7 +203,8 @@ function renderHomeSuggestions() {
     // Direction-aware: rows now include both "Buy Warrant / Sell Option" and
     // the reversed "Buy Option / Sell Warrant", so label each leg by the trade.
     const bw = String(r.trade || "").startsWith("Buy Warrant");
-    return `<div class="home-srow" onclick="openDirectModal(suggestionsData[${i}].legs)" title="Click for the full breakdown">
+    const gi = suggestionsData.indexOf(s);
+    return `<div class="home-srow" onclick="openDirectModal(suggestionsData[${gi}].legs)" title="Click for the full breakdown">
       <div class="home-leg">
         <div class="home-leg-t"><span class="${bw ? "pos" : "neg"}">${bw ? "Buy" : "Sell"}</span> ${r.warrant_name || r.warrant_code || ""} <span class="home-muted">/</span> <span class="${bw ? "neg" : "pos"}">${bw ? "Sell" : "Buy"}</span> ${r.option_contract || ""}</div>
         <div class="home-leg-l">${label[s.arb_type] || s.arb_type} · ${strikes}${dte}${lots}</div>

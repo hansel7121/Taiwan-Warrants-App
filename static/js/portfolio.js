@@ -416,12 +416,43 @@ async function loadSuggestions() {
   renderSuggestions();
 }
 
-const _ARB_TYPE_LABEL = { direct_same_type: "Call-Call / Put-Put", direct_pcp: "Put-Call Parity" };
+const _ARB_TYPE_LABEL = { direct_same_type: "Call-Call / Put-Put", direct_pcp: "Put-Call Parity",
+                          static_lp: "Static-arb LP" };
 
+// Which scanner's output the Suggestions tab is showing. Both are logged from
+// one job on one snapshot, so switching compares method rather than timing.
+let _sugMode = "direct";
+
+function setSugMode(mode, btn) {
+  _sugMode = mode;
+  document.querySelectorAll("#sug-mode-btns .pfsub-btn").forEach(el => el.classList.remove("active"));
+  if (btn) btn.classList.add("active");
+  renderSuggestions();
+}
+
+function _sugRows(mode) {
+  return suggestionsData.filter(s =>
+    mode === "lp" ? s.arb_type === "static_lp" : s.arb_type !== "static_lp");
+}
+
+// The two scanners emit different row shapes — Direct Match one warrant against
+// one option, the LP a variable leg set — so each gets its own table rather
+// than a lowest-common-denominator one.
 function renderSuggestions() {
   const c = document.getElementById("portfolio-suggestionsContainer");
-  if (!suggestionsData.length) {
-    c.innerHTML = "<p style='padding:16px;color:var(--muted)'>No suggestions logged yet. The scanner appends every Direct Match arb it finds (every 15 min during TWSE hours) and keeps it here.</p>";
+  const dn = _sugRows("direct").length, ln = _sugRows("lp").length;
+  const db = document.getElementById("sug-mode-direct");
+  const lb = document.getElementById("sug-mode-lp");
+  if (db) db.textContent = `Direct Match (${dn})`;
+  if (lb) lb.textContent = `Static-arb LP (${ln})`;
+  if (_sugMode === "lp") return renderLpSuggestions(c);
+  renderDirectSuggestions(c);
+}
+
+function renderDirectSuggestions(c) {
+  const rows = _sugRows("direct");
+  if (!rows.length) {
+    c.innerHTML = "<p style='padding:16px;color:var(--muted)'>No Direct Match suggestions logged yet. The scanner appends every arb it finds (every 15 min during TWSE hours) and keeps it here.</p>";
     return;
   }
   const th = "padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;border-bottom:1px solid var(--border);text-align:left";
@@ -431,7 +462,8 @@ function renderSuggestions() {
     <th style="${th}">Strategy</th><th style="${th}">Trade</th><th style="${th}">Warrant</th><th style="${th}">Option</th>
     <th style="${th};text-align:right">Edge</th><th style="${th}">Found</th><th style="${th}"></th>
   </tr></thead><tbody>`;
-  suggestionsData.forEach((s, i) => {
+  rows.forEach(s => {
+    const i = suggestionsData.indexOf(s);
     const row = s.legs;
     const legs = String(row.trade || "").split("/").map(x => x.trim()).filter(Boolean);
     const tradeHtml = legs.map(p =>
@@ -454,6 +486,52 @@ function renderSuggestions() {
   c.innerHTML = h + "</tbody></table>";
 }
 
+// LP rows carry a variable leg set and total-NT$ economics, so the columns are
+// the structure's shape and its guaranteed profit rather than a warrant/option
+// pair and a per-share edge. Clicking one opens the Arb Finder's own static-arb
+// modal, which already renders exactly this row shape.
+function renderLpSuggestions(c) {
+  const rows = _sugRows("lp");
+  if (!rows.length) {
+    c.innerHTML = "<p style='padding:16px;color:var(--muted)'>No static-arb LP suggestions logged yet. The scanner runs the LP on the same snapshot as Direct Match, with short warrants allowed so its reachable set covers both of Direct's directions.</p>";
+    return;
+  }
+  const th = "padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;border-bottom:1px solid var(--border);text-align:left";
+  const td = "padding:7px 10px;border-bottom:1px solid var(--border);font-size:12px;vertical-align:top";
+  const sub = "color:var(--muted);font-size:11px";
+  let h = `<table style="width:100%;border-collapse:collapse"><thead><tr>
+    <th style="${th}">Underlying</th><th style="${th}">Horizon</th><th style="${th}">Structure</th>
+    <th style="${th};text-align:right">Net credit</th><th style="${th};text-align:right">Guaranteed</th>
+    <th style="${th};text-align:right">Return</th><th style="${th}">Found</th><th style="${th}"></th>
+  </tr></thead><tbody>`;
+  rows.forEach(s => {
+    const i = suggestionsData.indexOf(s);
+    const r = s.legs || {};
+    const legs = r.legs || [];
+    const nl = legs.filter(l => l.side === "long").length;
+    const ns = legs.length - nl;
+    // A short warrant leg is the part Direct Match reaches as "Buy Option /
+    // Sell Warrant"; flag it so the two tabs can be lined up by direction.
+    const shortW = r.needs_short_warrant
+      ? `<span style="color:${MARK_SHORT};font-size:11px"> · short warrant</span>` : "";
+    const found = new Date(s.first_seen_at).toLocaleString(undefined,
+      { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    const guar = r.guaranteed_profit, credit = r.net_credit, ret = r.return_pct;
+    h += `<tr style="cursor:pointer" onclick="openStaticArbModal(suggestionsData[${i}].legs)" title="Click for the full breakdown and payoff curve">
+      <td style="${td}">${r.underlying_code || ""}<div style="${sub}">spot ${r.underlying_price ?? "—"}</div></td>
+      <td style="${td}">${r.horizon_dte ?? "—"}d</td>
+      <td style="${td}">${nl} long · ${ns} short${shortW}
+        <div style="${sub}">${legs.slice(0, 3).map(l => l.code).join(", ")}${legs.length > 3 ? ` +${legs.length - 3}` : ""}</div></td>
+      <td style="${td};text-align:right">${credit == null ? "—" : Number(credit).toLocaleString()}</td>
+      <td style="${td};text-align:right"><div class="put" style="font-weight:700">${guar == null ? "—" : Number(guar).toLocaleString()}</div></td>
+      <td style="${td};text-align:right">${ret == null ? "—" : Number(ret).toFixed(2) + "%"}</td>
+      <td style="${td};${sub}">${found}</td>
+      <td style="${td}"><button class="sm" onclick="event.stopPropagation();removeSuggestion('${s.id.replace(/'/g, "\\'")}')">Remove</button></td>
+    </tr>`;
+  });
+  c.innerHTML = h + "</tbody></table>";
+}
+
 async function removeSuggestion(id) {
   try {
     await api("/remove_suggestion", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
@@ -464,7 +542,7 @@ async function removeSuggestion(id) {
 
 async function clearSuggestions() {
   if (!suggestionsData.length) return;
-  if (!confirm(`Delete all ${suggestionsData.length} suggestion(s)? The scanner re-populates still-live arbs on its next run.`)) return;
+  if (!confirm(`Delete all ${suggestionsData.length} suggestion(s), across BOTH scanners? The scanner re-populates still-live arbs on its next run.`)) return;
   try {
     await api("/clear_suggestions", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
   } catch (e) {}
