@@ -5,17 +5,22 @@ Direct Match's vertical should fall out as a weight-restricted special case.
 Ten single-warrant / single-option pairs test that, each a clear buy-warrant /
 sell-option arb.
 
-It holds for calls and fails for puts, and where it fails **Direct is the unsound
-one**: the LP floors a long leg that outlives the horizon at its European lower
-bound, `(K*exp(-r*tau) - S)+`, while Direct compares raw strikes. For a call the
-discount lowers the long strike and only lifts the payoff, so the two agree. For
-a put it lowers the payoff, and Direct certifies `riskless=True,
-max_loss_per_share=0.0` on structures that can lose at expiry.
+It holds for calls unconditionally, and for puts exactly when
+`static_arb.AMERICAN_PUT_INTRINSIC_FLOOR` is on.
 
-The threshold is exact: the LP accepts a put pair only while
-`Kw*exp(-r*tau) >= Ko`, i.e. while the warrant's strike cushion covers the
-discount over the days it outlives the option — 0.15% for 30 days, 0.93% for 180.
-A same-strike put pair with the warrant merely longer-dated never clears it.
+That flag is the whole story. A long leg outliving the horizon is replaced by a
+lower bound there. Warrants are American-exercisable, so the binding bound is
+the immediate exercise value `(K - S)+`; the European bound `(K*exp(-r*tau) -
+S)+` is what you may only assume when early exercise is unavailable. For a CALL
+the discount lowers the long strike and lifts the payoff, so the choice never
+matters. For a PUT it lowers the payoff, and the European bound understates an
+American claim — which shows up as the LP refusing structures Direct correctly
+reports.
+
+With the flag off the LP also rejects same-strike put pairs where the warrant is
+merely longer-dated, which is an ordinary shape in a real chain. The threshold
+is exact: it accepts only while `Kw*exp(-r*tau) >= Ko`, a cushion of 0.15% per
+30 days of extra warrant life.
 """
 import numpy as np
 import pandas as pd
@@ -55,7 +60,7 @@ CASES = [
                               option("C600", "Call", 600.0, 30.0, 30), True),
     ("put_same_expiry",       warrant("W4", "Put", 620.0, 12.0, 30, 0.5),
                               option("P600", "Put", 600.0, 30.0, 30), True),
-    # The one divergence: 335 days of discount against a 0.83% strike cushion.
+    # Splits only when the European bound is applied to this American put.
     ("put_warrant_outlives",  warrant("W5", "Put", 605.0, 5.0, 365, 0.5),
                               option("P600", "Put", 600.0, 12.0, 30), False),
     ("call_ratio_0_05",       warrant("W6", "Call", 580.0, 1.2, 30, 0.05),
@@ -78,16 +83,26 @@ def direct_rows(w, o):
     return [r for r in rows if r["trade"] == "Buy Warrant / Sell Option"]
 
 
-def lp_row(w, o):
-    """The LP's core at the option's expiry — the only horizon a single option offers."""
-    T = int(o["days_to_expiry"])
-    longs, shorts, _ = static_arb._build_legs(
-        pd.DataFrame([w]), pd.DataFrame([o]), T, M, R, allow_short_warrants=False)
-    return static_arb._solve_horizon(longs, shorts, T, min_edge=0.0)
+def lp_row(w, o, american_put_floor=None):
+    """The LP's core at the option's expiry — the only horizon a single option offers.
+
+    `american_put_floor` overrides the module constant for the call, so both
+    settings can be exercised without depending on which one ships.
+    """
+    prev = static_arb.AMERICAN_PUT_INTRINSIC_FLOOR
+    if american_put_floor is not None:
+        static_arb.AMERICAN_PUT_INTRINSIC_FLOOR = american_put_floor
+    try:
+        T = int(o["days_to_expiry"])
+        longs, shorts, _ = static_arb._build_legs(
+            pd.DataFrame([w]), pd.DataFrame([o]), T, M, R, allow_short_warrants=False)
+        return static_arb._solve_horizon(longs, shorts, T, min_edge=0.0)
+    finally:
+        static_arb.AMERICAN_PUT_INTRINSIC_FLOOR = prev
 
 
-@pytest.mark.parametrize("name,w,o,_lp", CASES, ids=[c[0] for c in CASES])
-def test_every_case_is_an_arb_for_direct_match(name, w, o, _lp):
+@pytest.mark.parametrize("name,w,o,_x", CASES, ids=[c[0] for c in CASES])
+def test_every_case_is_an_arb_for_direct_match(name, w, o, _x):
     """All ten are buy-warrant / sell-option arbs by Direct Match's own rule."""
     rows = direct_rows(w, o)
     assert len(rows) == 1, name
@@ -95,32 +110,47 @@ def test_every_case_is_an_arb_for_direct_match(name, w, o, _lp):
     assert rows[0]["riskless"] is True
 
 
-@pytest.mark.parametrize("name,w,o,lp_should_fire", CASES, ids=[c[0] for c in CASES])
-def test_lp_agrees_except_on_the_discounted_put(name, w, o, lp_should_fire):
-    row = lp_row(w, o)
-    assert (row is not None) is lp_should_fire, (
-        f"{name}: LP {'missed' if lp_should_fire else 'accepted'} what Direct reports")
+@pytest.mark.parametrize("name,w,o,_x", CASES, ids=[c[0] for c in CASES])
+def test_lp_captures_every_case_with_the_american_floor(name, w, o, _x):
+    """With the American exercise floor on, the LP reproduces all ten."""
+    assert lp_row(w, o, american_put_floor=True) is not None, name
 
 
-def test_the_divergence_is_direct_being_unsound_not_the_lp():
-    """Direct calls put_warrant_outlives riskless with zero max loss. It isn't:
-    at spot 0 the short put pays the full strike while the long warrant is only
-    provably worth its discounted strike, and the gap exceeds the entry credit."""
-    _, w, o, _ = CASES[4]
-    row = direct_rows(w, o)[0]
-    assert row["riskless"] is True and row["max_loss_per_share"] == 0.0
+@pytest.mark.parametrize("name,w,o,fires_european", CASES, ids=[c[0] for c in CASES])
+def test_european_floor_costs_the_lp_the_outliving_put(name, w, o, fires_european):
+    """With the European bound instead, the one put whose warrant outlives the
+    option drops out — the bound understates a claim you could exercise."""
+    assert (lp_row(w, o, american_put_floor=False) is not None) is fires_european, name
 
-    tau = (w["days_to_expiry"] - o["days_to_expiry"]) / 365.0
-    long_floor_at_zero = w["strike"] * np.exp(-R * tau)
-    worst = long_floor_at_zero - o["strike"]
-    assert worst < 0, "the long put's discounted strike should fall below the short's"
-    assert worst + row["price_diff"] < 0, "the entry credit should not cover it"
+
+def test_the_flag_only_moves_puts():
+    """A call's long strike is discounted downward, which only lifts the payoff,
+    so no call case can depend on the setting however long the warrant runs."""
+    for w_dte in (30, 90, 365, 1000):
+        w = warrant("Wc", "Call", 580.0, 12.0, w_dte, 0.5)
+        o = option("Cc", "Call", 600.0, 30.0, 30)
+        assert direct_rows(w, o)
+        assert lp_row(w, o, american_put_floor=False) is not None
+        assert lp_row(w, o, american_put_floor=True) is not None
+
+
+@pytest.mark.parametrize("outlives_days", [30, 90, 180, 365])
+def test_same_strike_puts_need_the_american_floor(outlives_days):
+    """The shape that matters in a real chain: identical strikes, warrant merely
+    longer-dated. There is no cushion at all, so the European bound always
+    rejects it and the American floor always accepts it."""
+    w = warrant("Wp", "Put", 600.0, 5.0, 30 + outlives_days, 0.5)
+    o = option("Pp", "Put", 600.0, 12.0, 30)
+    assert direct_rows(w, o)
+    assert lp_row(w, o, american_put_floor=False) is None
+    assert lp_row(w, o, american_put_floor=True) is not None
 
 
 @pytest.mark.parametrize("outlives_days", [30, 60, 90, 180, 365])
-def test_put_cushion_threshold_is_the_discount(outlives_days):
-    """A put pair clears the LP exactly while Kw*exp(-r*tau) >= Ko. Straddling
-    that boundary by a hair flips the LP and leaves Direct unchanged."""
+def test_european_bound_threshold_is_the_discount(outlives_days):
+    """Under the European bound the LP accepts a put pair exactly while
+    Kw*exp(-r*tau) >= Ko. Straddling that boundary flips the LP and leaves
+    Direct unchanged — which is what identifies the discount as the cause."""
     Ko, o_dte = 600.0, 30
     w_dte = o_dte + outlives_days
     needed = np.exp(R * outlives_days / 365.0)          # Kw/Ko ratio required
@@ -132,15 +162,7 @@ def test_put_cushion_threshold_is_the_discount(outlives_days):
         w = warrant("Wx", "Put", round(Ko * factor, 4), 5.0, w_dte, 0.5)
         o = option("Px", "Put", Ko, 12.0, o_dte)
         assert direct_rows(w, o), "Direct should fire on both sides of the boundary"
-        assert (lp_row(w, o) is not None) is lp_expected, (
+        assert (lp_row(w, o, american_put_floor=False) is not None) is lp_expected, (
             f"outlives={outlives_days}d cushion_factor={factor:.6f}")
 
 
-@pytest.mark.parametrize("w_dte", [30, 90, 365, 1000])
-def test_calls_never_diverge_however_long_the_warrant_runs(w_dte):
-    """For a call the discount lowers the long strike, which only lifts the
-    payoff — so no amount of extra warrant life can split the two engines."""
-    w = warrant("Wc", "Call", 580.0, 12.0, w_dte, 0.5)
-    o = option("Cc", "Call", 600.0, 30.0, 30)
-    assert direct_rows(w, o)
-    assert lp_row(w, o) is not None
