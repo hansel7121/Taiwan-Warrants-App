@@ -22,14 +22,31 @@ from logic import arb_logic
 from logic import options_logic
 from logic import warrant_logic
 
-# Every long leg is floored at its EUROPEAN lower bound, (S - K*d)+ for calls and
-# (K*d - S)+ for puts. The put case is the whole reason: a European put may trade
+# Long legs are floored at their EUROPEAN lower bound, (S - K*d)+ for calls and
+# (K*d - S)+ for puts — EXCEPT long warrant puts, which get the intrinsic floor
+# (K - S)+ instead. This flag is that exception.
+#
+# The put case is the whole reason the bound matters: a European put may trade
 # BELOW intrinsic, so flooring one at (K - S)+ would certify arbs that do not
-# exist. Warrants are American-exercisable and would justify the intrinsic floor
-# on puts, but they cash-settle against a reference price rather than the
-# instantaneous spot, so the European bound is the only unconditionally provable
-# floor. Flip only if you accept that settlement caveat.
-AMERICAN_PUT_INTRINSIC_FLOOR = False
+# exist. That applies to a long OPTION put, which is European and cannot be
+# exercised before its own expiry, and the flag deliberately does not touch it.
+#
+# A WARRANT is American-exercisable, so at the horizon its holder can simply
+# exercise and take (K - S)+. The European bound is what you may assume only
+# when early exercise is unavailable, and for a put it is strictly smaller — so
+# applying it to a warrant understates the leg and makes the LP refuse
+# structures Direct Match correctly reports. Same-strike pairs with the warrant
+# merely longer-dated have no strike cushion at all and were rejected outright;
+# see tests/logic/test_lp_captures_direct.py.
+#
+# Accepted residual: exercise settles against a reference price rather than the
+# instantaneous spot, and the short option settles against its own final
+# settlement price, so the two legs carry one day of reference-price basis. That
+# is far smaller than the discount it replaces (0.93% per 180 days of extra
+# warrant life), but it is not zero — this is a bounded-basis claim, not an
+# unconditional proof. Calls are unaffected either way: there the discount
+# lowers the long strike and only lifts the payoff.
+AMERICAN_PUT_INTRINSIC_FLOOR = True
 
 # Short warrant legs are CALL-ONLY, and this is a soundness bound, not a filter.
 #
