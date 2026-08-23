@@ -30,22 +30,13 @@ def scenarios():
 def load(name):
     """(frames, params, expected) for one scenario.
 
-    `expected` is the row list, except for the straddle scenarios, where it is
-    `{"rows": [...], "diag": str|None}` — the stage-diagnosis string is the only
-    output of an empty straddle scan, so it is pinned alongside the rows.
+    `expected` is the matcher's returned row list.
     """
     d = ARB_FIXTURES / name
     params = fc.read_json(d / "params.json")
     blob_f = fc.read_json(FRAME_DIR / f"{params['frames']}.json")
     frames = {k: fc.load_frame(v) for k, v in blob_f.items()}
-    blob = fc.read_json(d / "expected.json")
-    if isinstance(blob, dict):
-        return frames, params, {"rows": fc.load_rows(blob["rows"]), "diag": blob["diag"]}
-    return frames, params, fc.load_rows(blob)
-
-
-def expected_rows(expected):
-    return expected["rows"] if isinstance(expected, dict) else expected
+    return frames, params, fc.load_rows(fc.read_json(d / "expected.json"))
 
 
 def row_key(row):
@@ -120,44 +111,4 @@ def run(name, frames, params):
             frames["tw_df"], frames["us_df"], params["tw_contract_shares"],
             params["us_contract_shares"], params["max_strike_diff_pct"],
             params["max_dte_diff"], positive_loose=params["positive_loose"])
-    if m == "straddle_legs":
-        return arb_logic._straddle_legs(
-            frames["warrant_df"], frames["opt_df"],
-            loose=params["loose"], short_warrants=params["short_warrants"])
-    if m == "straddle":
-        return run_straddle(frames, params)
     raise AssertionError(f"unknown matcher {m!r}")
-
-
-def run_straddle(frames, params):
-    """`build_straddle_arb` with both fetches replaced by the fixture frames.
-
-    Mirrors `scripts/capture_arb_fixtures.py::run_straddle` — the orchestrator
-    fetches for itself, so end-to-end coverage of the pairing loop and the
-    diagnosis counters means substituting the reads rather than the frames.
-    """
-    from logic import arb_logic, options_logic, warrant_logic
-    from services import applog
-
-    # _commodity_map is only a membership check here (CONTRACT is hardcoded to
-    # 2000 inside build_straddle_arb), so stubbing it keeps the fixture run off
-    # Supabase without changing a single output value.
-    logged = []
-    orig = (warrant_logic.read_warrant, options_logic.read_tw_option, applog.log,
-            options_logic._commodity_map)
-    warrant_logic.read_warrant = lambda *a, **k: (frames["warrant_df"], None, {})
-    options_logic.read_tw_option = lambda *a, **k: (frames["opt_df"], None, {})
-    options_logic._commodity_map = lambda: {"2330": {"exercise_ratio": 2000}}
-    applog.log = lambda prefix, msg, level="INFO": logged.append(msg)
-    try:
-        df = arb_logic.build_straddle_arb(
-            ["2330"], "All", params["max_strike_diff_pct"], params["max_dte_diff"],
-            min_volume=0, min_iv_edge=params["min_iv_edge"], loose=params["loose"],
-            short_warrants=params["short_warrants"],
-            require_dte_cover=params["require_dte_cover"])
-    finally:
-        (warrant_logic.read_warrant, options_logic.read_tw_option, applog.log,
-         options_logic._commodity_map) = orig
-    diag = next((m for m in logged if m.startswith("No straddle rows.")), None)
-    return {"rows": df.to_dict(orient="records"), "diag": diag}
-

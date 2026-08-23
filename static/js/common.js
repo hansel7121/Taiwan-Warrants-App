@@ -276,11 +276,6 @@ async function initProductSelects() {
     { selectedCodes: sel("ivOptProduct", []), selectFirst: true });
   populateProductSelect(document.getElementById("arbStockSelect"), warrantXTw,
     { selectedCodes: sel("arbStockSelect", ["2330"]) });
-  // Straddle Vol Arb needs BOTH a warrant and a TW option on the underlying —
-  // same warrant∩TW-option overlap as Direct Match, so it stays correct as
-  // products are added (no hardcoded code list).
-  populateProductSelect(document.getElementById("straddleStockSelect"), warrantXTw,
-    { selectedCodes: sel("straddleStockSelect", ["2330"]) });
   // Both static-arb LP tabs need the same warrant∩TW-option overlap.
   populateProductSelect(document.getElementById("expStockSelect"), warrantXTw,
     { selectedCodes: sel("expStockSelect", ["2330"]) });

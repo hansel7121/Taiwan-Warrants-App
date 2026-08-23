@@ -25,10 +25,11 @@ the sake of test data.
 
 `expected.json` records the **private matcher's** return value, before the
 orchestrator's `sort_values`, so the fixture pins the matcher and not pandas'
-sort. The `straddle_*` scenarios are the exception: `build_straddle_arb` fetches
-for itself, so those run it end to end with the reads substituted, and their
-`expected.json` also carries the stage-diagnosis string — on an empty scan that
-string is the entire user-visible output.
+sort.
+
+A scenario is deleted only when the feature it covers is deleted — the
+`straddle_*` set went when the Straddle Vol Arb tab did. That is not the same as
+regenerating one, which is what the next section is about.
 
 ## Regenerating them
 

@@ -18,37 +18,20 @@ SCENARIOS = arb_golden.scenarios()
 def test_matcher_output_matches_fixture(name):
     frames, params, expected = arb_golden.load(name)
     got = arb_golden.run(name, frames, params)
-    arb_golden.assert_rows_match(arb_golden.expected_rows(got),
-                                 arb_golden.expected_rows(expected), name)
+    arb_golden.assert_rows_match(got, expected, name)
 
 
 @pytest.mark.parametrize("name", SCENARIOS)
 def test_matcher_emission_order_unchanged(name):
     frames, params, expected = arb_golden.load(name)
     got = arb_golden.run(name, frames, params)
-    arb_golden.assert_order_match(arb_golden.expected_rows(got),
-                                  arb_golden.expected_rows(expected), name)
-
-
-STRADDLES = [n for n in SCENARIOS if n.startswith("straddle_")
-             and not n.startswith("straddle_legs")]
-
-
-@pytest.mark.parametrize("name", STRADDLES)
-def test_straddle_stage_diagnosis_unchanged(name):
-    """On an empty straddle scan the diagnosis string IS the output the user sees,
-    and its counters are updated at specific points inside the pairing loop —
-    `pairs` and `best_edge` before the min-edge cut, not after."""
-    frames, params, expected = arb_golden.load(name)
-    got = arb_golden.run(name, frames, params)
-    assert got["diag"] == expected["diag"]
+    arb_golden.assert_order_match(got, expected, name)
 
 
 def test_the_corpus_actually_covers_something():
     """A corpus of empty results would pass every test above while proving nothing."""
-    total = sum(len(arb_golden.expected_rows(arb_golden.load(n)[2]))
-                for n in SCENARIOS)
-    assert len(SCENARIOS) >= 15
+    total = sum(len(arb_golden.load(n)[2]) for n in SCENARIOS)
+    assert len(SCENARIOS) >= 12
     assert total > 1000, f"only {total} recorded rows across {len(SCENARIOS)} scenarios"
 
 

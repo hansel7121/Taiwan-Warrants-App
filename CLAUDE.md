@@ -24,7 +24,7 @@ A local Flask web app for scanning Taiwan stock warrants and equity options, com
 1. **Warrant Scanner** — live warrant data from CMoney; computes IV (Black-Scholes via Brent's method on the ask), delta, real leverage, time value / time value %. Filter by type, DTE, min leverage, max time-value %, min volume.
 2. **IV Surface** — Plotly 3D surface of warrant IV across strike and DTE (80×80 grid interpolated with `scipy.griddata`), plus scatter of the raw points.
 3. **Options Scanner** — live TAIFEX equity option data (and US ADR options); IV/delta/leverage per contract; flags whether each quote is a live bid/ask or a settlement-price fallback (`is_live`).
-4. **Arb Finder** — cross-market mispricing between warrants and options. Modes: **Direct Match** (same-type call/put monotonicity: buy warrant / sell option), **PCP Match** (put-call parity via synthetic replication), **Straddle Vol Arb** (long cheapest-IV package vs short dearest-IV option package), plus **Warrant vs US Option** and **TW Option vs US Option** cross-market matches. Clicking a row opens a trade-breakdown modal with per-leg cash flows and a P&L chart (intrinsic-at-expiry + mark-to-market at a slider DTE).
+4. **Arb Finder** — cross-market mispricing between warrants and options. Modes: **Direct Match** (same-type call/put monotonicity: buy warrant / sell option), **PCP Match** (put-call parity via synthetic replication), **Butterfly** (convexity across three strikes), plus **Warrant vs US Option** and **TW Option vs US Option** cross-market matches. Clicking a row opens a trade-breakdown modal with per-leg cash flows and a P&L chart (intrinsic-at-expiry + mark-to-market at a slider DTE).
 
 There is also a **Portfolio** tab (persisted per-user to Supabase) with a **Suggestions** sub-tab fed by an automated scanner (see below).
 
@@ -83,7 +83,7 @@ logic/                 pure market-data + math, no side effects, own in-process 
   warrant_logic.py       CMoney warrant fetch; re-exports the frame builder + IV kernels; cmkey + universe scrape
   options_logic.py       TAIFEX TW option fetch + computation; R (risk-free rate); _commodity_map()
   us_options_logic.py    US ADR option fetch, TWD conversion; R_US; _adr_map(); contract_tw_shares()
-  arb_logic.py           warrant<->option matching, put-call parity, straddle vol-arb, TW/US leg arb
+  arb_logic.py           warrant<->option matching, put-call parity, butterfly, TW/US leg arb
 services/              side-effecting infrastructure
   db.py                  Supabase client (loads root .env; service-role key)
   store.py               per-user portfolio persistence (Supabase + local JSON mirror, tombstone sync)
@@ -122,7 +122,7 @@ scripts/               one-off maintenance/seeding scripts
 
 **Routes worth knowing** (all in `app.py`, all `require_auth` except `/`, `/login`, `/healthz`):
 - Data: `/read_warrant`, `/read_tw_option`, `/read_us_option` (+ `_csv` variants), `/iv_surface`, `/iv_surface_options`, `/adr_premium[_scenario]`.
-- Arb: `/match_warrant_tw_option`, `/match_warrant_us_option`, `/match_tw_us_option`, `/straddle_arbitrage` (+ `_csv`).
+- Arb: `/match_warrant_tw_option`, `/match_warrant_us_option`, `/match_tw_us_option`, `/match_static_arb` (+ `_csv`).
 - Portfolio: `/get_portfolio`, `/save_portfolio`, `/close_quote`.
 - Suggestions: `/list_suggestions`, `/remove_suggestion` (hard delete).
 - Products: `/list|add|remove_warrant_stock`, `/lookup_warrant_stock`, `/list|add|remove_tw_option_product`, `/list|add|remove_us_option_product`.

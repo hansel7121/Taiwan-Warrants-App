@@ -170,57 +170,11 @@ def run_option_legs(f, p):
     )
 
 
-def run_straddle_legs(f, p):
-    return arb_logic._straddle_legs(
-        f["warrant_df"], f["opt_df"],
-        loose=p["loose"], short_warrants=p["short_warrants"],
-    )
-
-
-def run_straddle(f, p):
-    """build_straddle_arb end to end, with both fetches replaced by the fixture frames.
-
-    Captures the stage-diagnosis string too: on an empty scan it is the only
-    user-visible output, and its counters are updated at specific points inside
-    the pairing loop, so a port that reorders them changes what the user reads.
-    """
-    from services import applog
-
-    # _commodity_map is only a membership check here (CONTRACT is hardcoded to
-    # 2000 inside build_straddle_arb), so stubbing it keeps the fixture run off
-    # Supabase without changing a single output value.
-    logged = []
-    orig_read_w = warrant_logic.read_warrant
-    orig_read_o = options_logic.read_tw_option
-    orig_log = applog.log
-    orig_map = options_logic._commodity_map
-    warrant_logic.read_warrant = lambda *a, **k: (f["warrant_df"], None, {})
-    options_logic.read_tw_option = lambda *a, **k: (f["opt_df"], None, {})
-    options_logic._commodity_map = lambda: {"2330": {"exercise_ratio": 2000}}
-    applog.log = lambda prefix, msg, level="INFO": logged.append(msg)
-    try:
-        df = arb_logic.build_straddle_arb(
-            [TW_CODE], "All", p["max_strike_diff_pct"], p["max_dte_diff"],
-            min_volume=0, min_iv_edge=p["min_iv_edge"], loose=p["loose"],
-            short_warrants=p["short_warrants"],
-            require_dte_cover=p["require_dte_cover"],
-        )
-    finally:
-        warrant_logic.read_warrant = orig_read_w
-        options_logic.read_tw_option = orig_read_o
-        applog.log = orig_log
-        options_logic._commodity_map = orig_map
-    diag = next((m for m in logged if m.startswith("No straddle rows.")), None)
-    return {"rows": df.to_dict(orient="records"), "diag": diag}
-
-
 MATCHERS = {
     "same_type": run_same_type,
     "pcp": run_pcp,
     "butterfly": run_butterfly,
     "option_legs": run_option_legs,
-    "straddle_legs": run_straddle_legs,
-    "straddle": run_straddle,
 }
 
 R_TW = None  # _match_warrants_pcp defaults r to options_logic.R
@@ -242,21 +196,10 @@ SCENARIOS = [
     ("pcp_warrant_ask_only", "tw", "option_ask_only", "pcp", {"positive_loose": False}),
     ("butterfly_strict",     "tw", "none",            "butterfly", {"positive_loose": False}),
     ("butterfly_loose",      "tw", "none",            "butterfly", {"positive_loose": True}),
-    ("straddle_legs_strict", "tw", "none",            "straddle_legs",
-     {"loose": False, "short_warrants": False}),
-    ("straddle_legs_loose",  "tw", "none",            "straddle_legs",
-     {"loose": True, "short_warrants": True}),
     ("us_direct_strict",     "us", "none",            "same_type", {"positive_loose": False}),
     ("us_pcp_option",        "us", "none",            "pcp",
      {"positive_loose": False, "synthetic_underlying": "option"}),
     ("tw_us_legs",           "tw_us", "none",         "option_legs", {"positive_loose": False}),
-    ("straddle_full",        "tw", "none",            "straddle",
-     {"min_iv_edge": 1.0, "loose": False, "short_warrants": False, "require_dte_cover": True}),
-    ("straddle_loose_full",  "tw", "none",            "straddle",
-     {"min_iv_edge": 0.5, "loose": True, "short_warrants": True, "require_dte_cover": False}),
-    # Unreachable edge threshold: the only output is the stage-diagnosis string.
-    ("straddle_empty",       "tw", "none",            "straddle",
-     {"min_iv_edge": 9999.0, "loose": False, "short_warrants": False, "require_dte_cover": True}),
 ]
 
 DEFAULTS = {
@@ -321,15 +264,9 @@ def main():
 
         p = _params(base, extra)
         p["frames"] = frames_id
-        out = MATCHERS[matcher](frames, p)
+        rows = MATCHERS[matcher](frames, p)
         fc.write_json(d / "params.json", {"matcher": matcher, **p})
-        if isinstance(out, dict):   # straddle: rows plus the stage-diagnosis string
-            rows = out["rows"]
-            fc.write_json(d / "expected.json",
-                          {"rows": fc.dump_rows(rows), "diag": out["diag"]})
-        else:
-            rows = out
-            fc.write_json(d / "expected.json", fc.dump_rows(rows))
+        fc.write_json(d / "expected.json", fc.dump_rows(rows))
         if not args.offline:
             fc.write_json(d / "provenance.json", {
                 "git_sha": sha,

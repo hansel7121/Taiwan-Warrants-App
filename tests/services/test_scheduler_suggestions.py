@@ -18,7 +18,7 @@ from tests.logic import arb_golden
 def captured(monkeypatch):
     """Run the job against fixture rows with both Supabase calls intercepted."""
     frames, params, expected = arb_golden.load("direct_strict")
-    rows = arb_golden.expected_rows(expected)
+    rows = expected
     df = pd.DataFrame(rows).sort_values(["riskless", "price_diff_pct"],
                                         ascending=[False, False])
 
@@ -60,7 +60,7 @@ def test_ids_are_unique_and_cover_every_row(captured):
 
 def test_already_logged_ids_are_not_reinserted(monkeypatch):
     frames, params, expected = arb_golden.load("direct_strict")
-    df = pd.DataFrame(arb_golden.expected_rows(expected))
+    df = pd.DataFrame(expected)
     written = []
     monkeypatch.setattr(scheduler, "warrant_universe", lambda: ["2330"])
     monkeypatch.setattr(scheduler, "tw_option_codes", lambda: ["2330"])

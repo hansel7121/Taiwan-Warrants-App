@@ -30,7 +30,7 @@ FRAME = pd.DataFrame([
      "volume": 0, "riskless": False},
 ])
 
-# build_straddle_arb is the one frame carrying nested per-leg dicts.
+# match_static_arb is the one frame carrying nested per-leg dicts.
 NESTED = pd.DataFrame([
     {"iv_edge_pts": 4.2,
      "long_call": {"source": "warrant", "id": "031100", "K": 600.0, "dte": 90, "iv": 0.31},
