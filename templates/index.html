@@ -27,29 +27,6 @@
       <span class="badge">TW</span>
     </header>
 
-    {% if show_admin %}
-    <style>
-      #market-clock{position:fixed;right:14px;bottom:14px;z-index:900;background:var(--surface);border:1px solid var(--border);border-radius:0;padding:9px 11px;font-size:11px;color:var(--muted);box-shadow:0 4px 16px rgba(0,0,0,.35);min-width:150px;user-select:none}
-      #market-clock .mc-clocks{display:flex;justify-content:space-between;gap:10px;margin-bottom:7px;padding-bottom:6px;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums}
-      #market-clock .mc-clocks b{color:var(--text);font-size:12px;font-weight:700}
-      #market-clock .mc-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:2px 0}
-      #market-clock .mc-lbl{color:var(--muted)}
-      #market-clock .mc-badge{font-weight:700;font-size:10px;letter-spacing:.3px;text-transform:uppercase;padding:2px 7px;border-radius:0;white-space:nowrap}
-      .mc-open{color:var(--put);background:rgba(74,222,128,.15)}
-      .mc-after{color:var(--accent);background:var(--accent-soft)}
-      .mc-closed{color:var(--muted);background:rgba(123,135,148,.13)}
-    </style>
-    <div id="market-clock" title="Local exchange time + current session">
-      <div class="mc-clocks">
-        <span><b id="mc-pt-time">--:--</b> PT</span>
-        <span><b id="mc-ny-time">--:--</b> ET</span>
-        <span><b id="mc-tw-time">--:--</b> TPE</span>
-      </div>
-      <div class="mc-row" id="mc-row-ny"><span class="mc-lbl">NYSE</span><span class="mc-badge mc-closed" id="mc-ny-st">–</span></div>
-      <div class="mc-row" id="mc-row-tw"><span class="mc-lbl">TWSE</span><span class="mc-badge mc-closed" id="mc-tw-st">–</span></div>
-      <div class="mc-row" id="mc-row-tx"><span class="mc-lbl">TAIFEX opt</span><span class="mc-badge mc-closed" id="mc-tx-st">–</span></div>
-    </div>
-    {% endif %}
 
     <!-- Home is the landing tab in admin mode; user mode starts on Options. -->
     <div class="tab-bar">
@@ -237,18 +214,8 @@
               <option value="Put">Put</option>
             </select>
           </label>
-          <label>Min Days to Expiry
-            <input type="number" id="optMinDays" value="0" min="0" max="365" />
-          </label>
-          <label>Max Days to Expiry
-            <input type="number" id="optMaxDays" value="365" min="0" max="365" />
-          </label>
-          <label>Min Leverage
-            <input type="number" id="optMinLeverage" value="0" step="0.1" min="0" />
-          </label>
-          <label>Min Volume
-            <input type="number" id="optMinVolume" value="0" min="0" />
-          </label>
+          <!-- Mounted by scanners.js from OPTION_FILTER_SPEC. -->
+          <div id="optionFilters"></div>
           <div class="action-group compact">
             <button class="primary" id="readOptionBtn" onclick="readOption()">Read Options</button>
             <button class="sm" id="refreshOptionsBtn" onclick="syncOption()">Sync now</button>
@@ -300,26 +267,13 @@
               <option value="Put">Put</option>
             </select>
           </label>
-          <label>Min Days to Expiry
-            <input type="number" id="minDays" value="0" min="0" max="365" />
-          </label>
-          <label>Max Days to Expiry
-            <input type="number" id="maxDays" value="365" min="0" max="365" />
-          </label>
-          <label>Min Leverage
-            <input type="number" id="minLeverage" value="0" step="0.1" min="0" />
-          </label>
-          <label>Max Time Value %
-            <input type="number" id="maxTvPct" value="100" step="0.1" min="0" />
-          </label>
-          <label>Min Volume
-            <input type="number" id="minVolume" value="0" min="0" />
-          </label>
           <label>Find Warrant Code
             <input type="text" id="warrantSearch" placeholder="e.g. 073074"
                    oninput="applyWarrantSearch()"
                    title="Pins matching warrants to the top of the results below and highlights them. Searches the loaded results only — it does not change the filters." />
           </label>
+          <!-- Mounted by scanners.js from WARRANT_FILTER_SPEC. -->
+          <div id="warrantFilters"></div>
 
           <div class="action-group compact">
             <button class="primary" id="readWarrantBtn" onclick="readWarrant()">Read Warrants</button>
@@ -392,27 +346,8 @@
           </div>
         </div>
 
-        <!-- Shared by both sub-tabs. The dropdown picks which bound pair the two
-             inputs edit; all three filters stay applied, blank meaning unbounded. -->
-        <div class="filters" style="margin-bottom:10px">
-          <label>Filter
-            <select id="ivFilterPick" onchange="setIVFilter(this.value)">
-              <option value="iv">IV (vol pts)</option>
-              <option value="dte">Days to expiry</option>
-              <option value="strike">Strike</option>
-            </select>
-          </label>
-          <label>Min
-            <input type="number" id="ivFilterMin" step="any" placeholder="none" oninput="onIVFilterInput()" />
-          </label>
-          <label>Max
-            <input type="number" id="ivFilterMax" step="any" placeholder="none" oninput="onIVFilterInput()" />
-          </label>
-          <div class="action-group compact">
-            <button class="sm" onclick="resetIVFilters()" title="Back to the default IV band, no DTE or strike bounds">Reset</button>
-          </div>
-          <div id="iv-filter-summary" style="font-size:11px;color:var(--muted);align-self:flex-end;padding-bottom:6px"></div>
-        </div>
+        <!-- Shared by both sub-tabs; mounted by scanners.js from IV_FILTER_SPEC. -->
+        <div id="ivFilters"></div>
 
         <div id="iv-status"></div>
         <!-- One plot per quote side. Separate axes, not two sheets on one set:

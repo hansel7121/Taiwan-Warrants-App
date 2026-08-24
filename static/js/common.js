@@ -287,98 +287,122 @@ async function initProductSelects() {
     { selectedCodes: sel("twusStockSelect", ["2303"]) });
 }
 
-// ── Market session clock (NYSE / TWSE / TAIFEX options) ──────────────
-// NYSE runs in US Eastern; TWSE and TAIFEX in Taipei. Sessions are wall-
-// clock ranges in each exchange's own timezone (minutes past midnight).
-// Holidays are not modeled — weekday hours only.
-function _tzParts(tz) {
-  const f = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour12: false,
-    weekday: "short", hour: "2-digit", minute: "2-digit" });
-  const o = {}; f.formatToParts(new Date()).forEach(p => o[p.type] = p.value);
-  const h = parseInt(o.hour, 10) % 24, m = parseInt(o.minute, 10);
-  return { wd: o.weekday, mins: h * 60 + m, str: String(h).padStart(2, "0") + ":" + o.minute };
-}
-function _mcSet(id, txt, cls) {
-  const e = document.getElementById(id); if (!e) return;
-  e.textContent = txt; e.className = "mc-badge " + cls;
-}
-function updateMarketClock() {
-  // The widget is admin-only, so the elements are absent in user mode.
-  const nyEl = document.getElementById("mc-ny-time");
-  if (!nyEl) return;
-  const et = _tzParts("America/New_York"), tp = _tzParts("Asia/Taipei"),
-        pt = _tzParts("America/Los_Angeles");
-  nyEl.textContent = et.str;
-  document.getElementById("mc-pt-time").textContent = pt.str;
-  document.getElementById("mc-tw-time").textContent = tp.str;
-  const nyWknd = et.wd === "Sat" || et.wd === "Sun", nt = et.mins;
-  // NYSE: pre 04:00–09:30, regular 09:30–16:00, after 16:00–20:00
-  if (!nyWknd && nt >= 570 && nt < 960) _mcSet("mc-ny-st", "Open", "mc-open");
-  else if (!nyWknd && nt >= 960 && nt < 1200) _mcSet("mc-ny-st", "After-hrs", "mc-after");
-  else if (!nyWknd && nt >= 240 && nt < 570) _mcSet("mc-ny-st", "Pre-mkt", "mc-after");
-  else _mcSet("mc-ny-st", "Closed", "mc-closed");
-  // TWSE stocks: 09:00–13:30
-  const twWknd = tp.wd === "Sat" || tp.wd === "Sun", tt = tp.mins;
-  if (!twWknd && tt >= 540 && tt < 810) _mcSet("mc-tw-st", "Open", "mc-open");
-  else _mcSet("mc-tw-st", "Closed", "mc-closed");
-  // TAIFEX options: regular 08:45–13:45; after-hours 15:00–05:00 next day.
-  // Evening leg (15:00–24:00) runs Mon–Fri; morning leg (00:00–05:00) is
-  // the continuation of the prior weekday session, so it's live Tue–Sat.
-  const weekday = !twWknd;
-  if (weekday && tt >= 525 && tt < 825) _mcSet("mc-tx-st", "Regular", "mc-open");
-  else if (weekday && tt >= 900) _mcSet("mc-tx-st", "After-hrs", "mc-after");
-  else if (tt < 300 && tp.wd !== "Sun" && tp.wd !== "Mon") _mcSet("mc-tx-st", "After-hrs", "mc-after");
-  else _mcSet("mc-tx-st", "Closed", "mc-closed");
-}
-// ── Hover tooltips: trading hours per exchange, in the USER's local tz ──
-// Session ranges are wall-clock minutes past midnight in each exchange's own
-// timezone; end < start (e.g. TAIFEX night) is expressed as end + 1440.
-const MC_SESSIONS = {
-  "mc-row-ny": { name: "NYSE", tz: "America/New_York",
-    rows: [["Pre-market", 240, 570], ["Regular", 570, 960], ["After-hours", 960, 1200]] },
-  "mc-row-tw": { name: "TWSE", tz: "Asia/Taipei",
-    rows: [["Regular", 540, 810]] },
-  "mc-row-tx": { name: "TAIFEX opt", tz: "Asia/Taipei",
-    rows: [["Regular", 525, 825], ["After-hours", 900, 1740]] },
-};
-// Minutes a timezone is ahead of UTC at instant `at` (DST-aware).
-function _tzOffset(tz, at) {
-  const f = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour12: false,
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  const p = {}; f.formatToParts(at).forEach(x => p[x.type] = x.value);
-  const asUTC = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second);
-  return Math.round((asUTC - at.getTime()) / 60000);
-}
-const _hm = (min) => { min = ((min % 1440) + 1440) % 1440;
-  return String(Math.floor(min / 60)).padStart(2, "0") + ":" + String(min % 60).padStart(2, "0"); };
-// Convert an exchange-tz wall-clock range to the viewer's local wall-clock,
-// tagging any endpoint that lands on a different local day (+1d / -1d).
-function _mcRange(tz, s, e) {
-  const now = new Date();
-  const delta = (-now.getTimezoneOffset()) - _tzOffset(tz, now);
-  const sa = s + delta, ea = e + delta, base = Math.floor(sa / 1440);
-  const mark = (v) => { const d = Math.floor(v / 1440) - base;
-    return d === 0 ? "" : (d > 0 ? ` (+${d}d)` : ` (${d}d)`); };
-  return _hm(sa) + mark(sa) + "–" + _hm(ea) + mark(ea);
-}
-function mcBuildTips() {
-  for (const id in MC_SESSIONS) {
-    const row = document.getElementById(id); if (!row) continue;
-    let tip = row.querySelector(".mc-tip");
-    if (!tip) { tip = document.createElement("div"); tip.className = "mc-tip"; row.appendChild(tip); }
-    const cfg = MC_SESSIONS[id];
-    let html = '<div class="mc-tip-h">' + cfg.name + " · your local time</div>";
-    for (const [label, s, e] of cfg.rows)
-      html += '<div class="mc-tip-r"><span class="mc-tip-k">' + label +
-        '</span><span class="mc-tip-v">' + _mcRange(cfg.tz, s, e) + "</span></div>";
-    tip.innerHTML = html;
-  }
+// ── Bound-filter panel ───────────────────────────────────────────────
+// One dropdown chooses which filter the Min/Max inputs edit. Every filter stays
+// applied with whatever it holds, so the summary lists ALL of them — a bound set
+// under a different dropdown entry would otherwise shape the results with
+// nothing on screen to explain it. A blank bound is omitted from the request,
+// which leaves the route's own default in force.
+//
+// A spec entry is { key, label, min?, max? }, where each side is
+// { field, value, attrs? } — `field` is the request key, `value` the default.
+// A filter with only one meaningful side declares only that side.
+const _BF = {};
+
+function mountBoundFilters(hostId, spec) {
+  const host = document.getElementById(hostId);
+  if (!host) return null;
+  const state = {};
+  spec.forEach(f => {
+    state[f.key] = { min: f.min ? String(f.min.value ?? "") : "",
+                     max: f.max ? String(f.max.value ?? "") : "" };
+  });
+  _BF[hostId] = { spec, state, kind: spec[0].key };
+  host.classList.add("filters", "bound-filters");
+  host.innerHTML = `
+    <label>Filter
+      <select onchange="bfPick('${hostId}', this.value)">
+        ${spec.map(f => `<option value="${f.key}">${f.label}</option>`).join("")}
+      </select>
+    </label>
+    <label class="bf-side" data-side="min">Min
+      <input type="number" step="any" placeholder="none"
+             oninput="bfInput('${hostId}', 'min', this.value)" /></label>
+    <label class="bf-side" data-side="max">Max
+      <input type="number" step="any" placeholder="none"
+             oninput="bfInput('${hostId}', 'max', this.value)" /></label>
+    <div class="action-group compact">
+      <button class="sm" onclick="bfReset('${hostId}')" title="Back to the default bounds">Reset</button>
+    </div>
+    <div class="bf-summary"></div>`;
+  bfPick(hostId, spec[0].key);
+  return _BF[hostId];
 }
 
-if (can("clock")) {
-  updateMarketClock(); mcBuildTips();
-  setInterval(() => { updateMarketClock(); mcBuildTips(); }, 15000);
+function _bfEntry(hostId) {
+  const c = _BF[hostId];
+  return c ? c.spec.find(f => f.key === c.kind) : null;
+}
+
+function bfPick(hostId, kind) {
+  const c = _BF[hostId];
+  if (!c) return;
+  c.kind = kind;
+  const host = document.getElementById(hostId);
+  const entry = _bfEntry(hostId);
+  host.querySelectorAll(".bf-side").forEach(el => {
+    const side = el.dataset.side;
+    // A one-sided filter hides the slot it does not have, rather than offering
+    // a box whose value would be silently dropped.
+    el.style.display = entry[side] ? "" : "none";
+    const input = el.querySelector("input");
+    input.value = c.state[kind][side];
+    if (entry[side] && entry[side].attrs) {
+      for (const k in entry[side].attrs) input.setAttribute(k, entry[side].attrs[k]);
+    } else {
+      input.removeAttribute("min"); input.removeAttribute("max");
+    }
+  });
+  bfRender(hostId);
+}
+
+function bfInput(hostId, side, value) {
+  const c = _BF[hostId];
+  if (!c) return;
+  c.state[c.kind][side] = value;
+  bfRender(hostId);
+}
+
+function bfReset(hostId) {
+  const c = _BF[hostId];
+  if (!c) return;
+  c.spec.forEach(f => {
+    c.state[f.key] = { min: f.min ? String(f.min.value ?? "") : "",
+                       max: f.max ? String(f.max.value ?? "") : "" };
+  });
+  bfPick(hostId, c.kind);
+}
+
+function bfRender(hostId) {
+  const c = _BF[hostId];
+  const el = document.getElementById(hostId).querySelector(".bf-summary");
+  if (!c || !el) return;
+  const parts = [];
+  for (const f of c.spec) {
+    const { min, max } = c.state[f.key];
+    if (min === "" && max === "") continue;
+    const short = f.short || f.label;
+    if (f.min && f.max) parts.push(`${short} ${min === "" ? "−∞" : min}–${max === "" ? "∞" : max}`);
+    else if (f.min) parts.push(`${short} ≥ ${min}`);
+    else parts.push(`${short} ≤ ${max}`);
+  }
+  el.textContent = parts.length ? parts.join("  ·  ") : "No filters";
+}
+
+// Request fields for every non-blank bound. Blank means "not sent", so the
+// route's own default applies.
+function bfPayload(hostId) {
+  const c = _BF[hostId];
+  const out = {};
+  if (!c) return out;
+  for (const f of c.spec) {
+    for (const side of ["min", "max"]) {
+      const slot = f[side];
+      const v = c.state[f.key][side];
+      if (slot && v !== "") out[slot.field] = v;
+    }
+  }
+  return out;
 }
 
 // ── Boot ─────────────────────────────────────────────────────────────
@@ -405,9 +429,9 @@ async function _boot() {
     });
   }
   await initProductSelects();
-  // Seed the IV-surface filter inputs from their defaults so the band that is
-  // actually applied is visible before the first plot.
-  if (typeof setIVFilter === "function") setIVFilter("iv");
+  // Mount each scanner's filter panel. After initProductSelects so the panels
+  // sit in a fully built filter row rather than shifting it as they appear.
+  if (typeof mountScannerFilters === "function") mountScannerFilters();
   // Portfolio is loaded lazily on first Portfolio-tab click (loadPortfolioOnce),
   // not here — the landing tab doesn't use it. Saves /get_portfolio +
   // /adr_premium_scenario calls on every reload.

@@ -395,6 +395,19 @@ tbody tr.row-pinned td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 #live-orderbook-grid .lv { color: var(--muted); font-size: .75rem; text-align: center; }
 #live-orderbook-grid .live-book-meta { color: var(--muted); font-size: .8rem; margin-top: .3rem; }
 
+/* ── Bound-filter panel ── */
+/* Sits inside a .filters row and inherits its layout; the summary hugs the
+   bottom so it lines up with the input baselines rather than their labels. */
+.bound-filters { gap: 10px; align-items: flex-end; }
+.bound-filters .bf-side input { width: 92px; }
+.bf-summary {
+  font-size: 11px;
+  color: var(--muted);
+  align-self: flex-end;
+  padding-bottom: 6px;
+  white-space: nowrap;
+}
+
 /* ── IV plots ── */
 /* Bid and ask sit side by side so the two surfaces can be read against each
    other; below 1100px they stack rather than shrink into illegibility. */
@@ -427,23 +440,6 @@ tbody tr.row-pinned td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
   flex-basis: auto;
   margin-top: 0;
 }
-
-/* ── Market-session clock widget ── */
-#market-clock{position:fixed;right:14px;bottom:14px;z-index:900;background:var(--surface);border:1px solid var(--border);border-radius:0;padding:9px 11px;font-size:11px;color:var(--muted);box-shadow:0 4px 16px rgba(0,0,0,.35);min-width:190px;user-select:none}
-#market-clock .mc-clocks{display:flex;justify-content:space-between;gap:10px;margin-bottom:7px;padding-bottom:6px;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums}
-#market-clock .mc-clocks b{color:var(--text);font-size:12px;font-weight:700}
-#market-clock .mc-row{position:relative;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:2px 0;cursor:default}
-#market-clock .mc-lbl{color:var(--muted)}
-#market-clock .mc-tip{position:absolute;right:calc(100% + 10px);top:50%;transform:translateY(-50%);background:var(--surface);border:1px solid var(--border);border-radius:0;padding:8px 10px;box-shadow:0 6px 20px rgba(0,0,0,.45);white-space:nowrap;opacity:0;visibility:hidden;transition:opacity .12s;pointer-events:none;z-index:1000;min-width:158px}
-#market-clock .mc-row:hover .mc-tip{opacity:1;visibility:visible}
-#market-clock .mc-tip-h{color:var(--text);font-weight:700;font-size:11px;margin-bottom:5px}
-#market-clock .mc-tip-r{display:flex;justify-content:space-between;gap:14px;padding:1px 0;font-size:11px;font-variant-numeric:tabular-nums}
-#market-clock .mc-tip-k{color:var(--muted)}
-#market-clock .mc-tip-v{color:var(--text)}
-#market-clock .mc-badge{font-weight:700;font-size:10px;letter-spacing:.3px;text-transform:uppercase;padding:2px 7px;border-radius:0;white-space:nowrap}
-.mc-open{color:var(--put);background:rgba(74,222,128,.15)}
-.mc-after{color:var(--accent);background:var(--accent-soft)}
-.mc-closed{color:var(--muted);background:rgba(123,135,148,.13)}
 
 /* ── Home dashboard (landing tab) ───────────────────────────────────── */
 #tab-home { --warn: var(--accent); }

@@ -18,7 +18,6 @@ const FEATURES = {
   portfolio: "admin",
   suggestions: "admin",
   home: "admin",
-  clock: "admin",
   products: "admin",
   syncUniverse: "admin",
 };

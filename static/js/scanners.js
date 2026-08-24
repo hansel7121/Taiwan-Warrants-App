@@ -144,11 +144,7 @@ function getFilters() {
   return {
     stock_codes: Array.from(select.selectedOptions).map(o => o.value),
     option_type: document.getElementById("optionType").value,
-    min_days: document.getElementById("minDays").value,
-    max_days: document.getElementById("maxDays").value,
-    min_leverage: document.getElementById("minLeverage").value,
-    max_tv_pct: document.getElementById("maxTvPct").value,
-    min_volume: document.getElementById("minVolume").value,
+    ...bfPayload("warrantFilters"),
   };
 }
 
@@ -326,55 +322,51 @@ async function downloadCSV() {
   a.click();
 }
 
-// ── Surface filters ────────────────────────────────────────────────────────
-// One control shared by both sub-tabs. The dropdown chooses which bound pair the
-// Min/Max inputs edit; every filter stays applied with whatever it holds, and a
-// blank bound means unbounded. IV is in vol points, the unit the z-axis uses.
-const _IV_FILTER_DEFAULTS = { iv: { min: 20, max: 100 }, dte: { min: "", max: "" }, strike: { min: "", max: "" } };
-const _IV_FILTER_LABEL = { iv: "IV", dte: "DTE", strike: "K" };
-let _ivFilters = JSON.parse(JSON.stringify(_IV_FILTER_DEFAULTS));
-let _ivFilterKind = "iv";
+// ── Filter specs ───────────────────────────────────────────────────────────
+// Each scanner mounts one bound-filter panel (see mountBoundFilters in
+// common.js): a dropdown picks which filter the Min/Max inputs edit, every
+// filter stays applied, and a blank bound is omitted so the route default
+// stands. `field` is the request key, so a spec IS the request contract.
+const DTE_ATTRS = { min: 0, max: 365 };
 
-function setIVFilter(kind) {
-  _ivFilterKind = kind;
-  document.getElementById("ivFilterMin").value = _ivFilters[kind].min;
-  document.getElementById("ivFilterMax").value = _ivFilters[kind].max;
-  renderIVFilterSummary();
-}
+const WARRANT_FILTER_SPEC = [
+  { key: "dte", label: "Days to expiry", short: "DTE",
+    min: { field: "min_days", value: 0, attrs: DTE_ATTRS },
+    max: { field: "max_days", value: 365, attrs: DTE_ATTRS } },
+  { key: "leverage", label: "Leverage", short: "Lev",
+    min: { field: "min_leverage", value: 0, attrs: { min: 0, step: 0.1 } } },
+  { key: "tv", label: "Time value %", short: "TV%",
+    max: { field: "max_tv_pct", value: 100, attrs: { min: 0, step: 0.1 } } },
+  { key: "volume", label: "Volume", short: "Vol",
+    min: { field: "min_volume", value: 0, attrs: { min: 0 } } },
+];
 
-function onIVFilterInput() {
-  _ivFilters[_ivFilterKind] = {
-    min: document.getElementById("ivFilterMin").value,
-    max: document.getElementById("ivFilterMax").value,
-  };
-  renderIVFilterSummary();
-}
+const OPTION_FILTER_SPEC = [
+  { key: "dte", label: "Days to expiry", short: "DTE",
+    min: { field: "min_days", value: 0, attrs: DTE_ATTRS },
+    max: { field: "max_days", value: 365, attrs: DTE_ATTRS } },
+  { key: "leverage", label: "Leverage", short: "Lev",
+    min: { field: "min_leverage", value: 0, attrs: { min: 0, step: 0.1 } } },
+  { key: "volume", label: "Volume", short: "Vol",
+    min: { field: "min_volume", value: 0, attrs: { min: 0 } } },
+];
 
-function resetIVFilters() {
-  _ivFilters = JSON.parse(JSON.stringify(_IV_FILTER_DEFAULTS));
-  setIVFilter(_ivFilterKind);
-}
+// IV is in vol points, the unit the z-axis and these inputs both use; the route
+// converts. DTE and strike ship blank, i.e. unbounded.
+const IV_FILTER_SPEC = [
+  { key: "iv", label: "IV (vol pts)", short: "IV",
+    min: { field: "iv_min", value: 20, attrs: { min: 0, step: 1 } },
+    max: { field: "iv_max", value: 100, attrs: { min: 0, step: 1 } } },
+  { key: "dte", label: "Days to expiry", short: "DTE",
+    min: { field: "dte_min", value: "" }, max: { field: "dte_max", value: "" } },
+  { key: "strike", label: "Strike", short: "K",
+    min: { field: "strike_min", value: "" }, max: { field: "strike_max", value: "" } },
+];
 
-// All three are listed, not just the one being edited — otherwise a bound set
-// under another dropdown entry silently shapes the plot.
-function renderIVFilterSummary() {
-  const parts = [];
-  for (const k of ["iv", "dte", "strike"]) {
-    const { min, max } = _ivFilters[k];
-    if (min === "" && max === "") continue;
-    parts.push(`${_IV_FILTER_LABEL[k]} ${min === "" ? "−∞" : min}–${max === "" ? "∞" : max}`);
-  }
-  const el = document.getElementById("iv-filter-summary");
-  if (el) el.textContent = parts.length ? "Active: " + parts.join("  ·  ") : "No filters";
-}
-
-function ivFilterPayload() {
-  const out = {};
-  for (const k of ["iv", "dte", "strike"]) {
-    out[k + "_min"] = _ivFilters[k].min === "" ? null : Number(_ivFilters[k].min);
-    out[k + "_max"] = _ivFilters[k].max === "" ? null : Number(_ivFilters[k].max);
-  }
-  return out;
+function mountScannerFilters() {
+  mountBoundFilters("warrantFilters", WARRANT_FILTER_SPEC);
+  mountBoundFilters("optionFilters", OPTION_FILTER_SPEC);
+  mountBoundFilters("ivFilters", IV_FILTER_SPEC);
 }
 
 function setIVSource(src) {
@@ -483,7 +475,7 @@ async function fetchIVSurfaceOptions() {
   const payload = {
     stock_codes: [sel.value],
     option_type: document.getElementById("ivOptType").value,
-    ...ivFilterPayload(),
+    ...bfPayload("ivFilters"),
   };
   let data;
   try {
@@ -531,7 +523,7 @@ async function fetchIVSurface() {
     stock_codes,
     option_type: document.getElementById("ivOptionType").value,
     highlight_code: document.getElementById("highlightCode").value.trim(),
-    ...ivFilterPayload(),
+    ...bfPayload("ivFilters"),
   };
 
   let data;
@@ -604,10 +596,7 @@ function getOptionsFilters() {
   return {
     stock_codes: Array.from(select.selectedOptions).map(o => o.value),
     option_type: document.getElementById("optionsType").value,
-    min_days: document.getElementById("optMinDays").value,
-    max_days: document.getElementById("optMaxDays").value,
-    min_leverage: document.getElementById("optMinLeverage").value,
-    min_volume: document.getElementById("optMinVolume").value,
+    ...bfPayload("optionFilters"),
   };
 }
 
