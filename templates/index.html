@@ -214,8 +214,6 @@
               <option value="Put">Put</option>
             </select>
           </label>
-          <!-- Mounted by scanners.js from OPTION_FILTER_SPEC. -->
-          <div id="optionFilters"></div>
           <div class="action-group compact">
             <button class="primary" id="readOptionBtn" onclick="readOption()">Read Options</button>
             <button class="sm" id="refreshOptionsBtn" onclick="syncOption()">Sync now</button>
@@ -224,6 +222,9 @@
             </button>
           </div>
         </div>
+
+        <!-- Its own block below the selection row; mounted by scanners.js. -->
+        <div id="optionFilters"></div>
 
         <div class="sort-btns">
           <button onclick="sortOptionsBy('leverage_calc', false)">Leverage ↓</button>
@@ -272,9 +273,6 @@
                    oninput="applyWarrantSearch()"
                    title="Pins matching warrants to the top of the results below and highlights them. Searches the loaded results only — it does not change the filters." />
           </label>
-          <!-- Mounted by scanners.js from WARRANT_FILTER_SPEC. -->
-          <div id="warrantFilters"></div>
-
           <div class="action-group compact">
             <button class="primary" id="readWarrantBtn" onclick="readWarrant()">Read Warrants</button>
             <button class="sm" id="refreshWarrantsBtn" onclick="syncWarrant()">Sync now</button>
@@ -284,6 +282,9 @@
             </button>
           </div>
         </div>
+
+        <!-- Its own block below the selection row; mounted by scanners.js. -->
+        <div id="warrantFilters"></div>
 
         <div class="sort-btns">
           <button onclick="sortByColumn('leverage_calc', false)">Leverage ↓</button>

@@ -398,8 +398,10 @@ tbody tr.row-pinned td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 /* ── Bound-filter panel ── */
 /* Sits inside a .filters row and inherits its layout; the summary hugs the
    bottom so it lines up with the input baselines rather than their labels. */
-.bound-filters { gap: 10px; align-items: flex-end; }
+.bound-filters { gap: 10px; align-items: flex-end; margin-bottom: 14px; }
 .bound-filters .bf-side input { width: 92px; }
+/* Wide enough for the longest entry ("Days to expiry") without truncating. */
+.bound-filters select { min-width: 150px; }
 .bf-summary {
   font-size: 11px;
   color: var(--muted);
