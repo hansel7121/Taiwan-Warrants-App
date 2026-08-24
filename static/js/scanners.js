@@ -62,16 +62,30 @@ async function addWarrantStock() {
   if (!code) return;
   const resultEl = document.getElementById("warrantLookupResult");
   const name = resultEl.dataset.name || "";
-  await api("/add_warrant_stock", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code, name }),
-  });
+  // apiJson, not api: a rejected add used to clear the form and reload the list
+  // anyway, so a failure was indistinguishable from a success that "did not
+  // persist" — the form emptied either way and nothing new appeared.
+  try {
+    await apiJson("/add_warrant_stock", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, name }),
+    });
+  } catch (e) {
+    resultEl.textContent = "Could not add: " + e.message;
+    resultEl.style.color = "var(--call)";
+    return;
+  }
   codeEl.value = "";
   resultEl.textContent = "";
+  resultEl.style.color = "";
   resultEl.dataset.name = "";
   toggleAddProduct("warrant");
   await initProductSelects();
+  // Select what was just added, so it is visibly there rather than one more
+  // row in a list of hundreds.
+  const sel = document.getElementById("stockSelect");
+  if (sel) setProductSelection(sel, [code], true);
 }
 
 async function addTwOptionProduct() {

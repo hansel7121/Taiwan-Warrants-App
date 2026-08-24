@@ -16,6 +16,18 @@ def add_warrant_stock(code, name=None):
     db._run(lambda c: c.table("warrant_stocks").upsert({"code": code, "name": name}).execute())
 
 
+def upsert_warrant_stocks(rows):
+    """Bulk upsert of [{code, name}] — one round trip instead of one per code.
+
+    Used to seed the picker from the derived underlying list, which is ~600 rows
+    and would otherwise be ~600 requests.
+    """
+    if not rows:
+        return 0
+    db._run(lambda c: c.table("warrant_stocks").upsert(list(rows)).execute())
+    return len(rows)
+
+
 def remove_warrant_stock(code):
     db._run(lambda c: c.table("warrant_stocks").delete().eq("code", code).execute())
 

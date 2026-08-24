@@ -272,6 +272,9 @@ _universe_error = None        # last scrape error message, or None
 # Guards the scrape's progress/in-flight state only; the codes themselves live
 # in _universe_cache, which does its own locking.
 _universe_lock = threading.Lock()
+# Derived from the universe, so it is keyed to the exact universe object it was
+# built from — a scrape swapping that object invalidates it without a TTL race.
+_windex_cache = TTLCache("warrant_index", UNIVERSE_TTL)
 # The ISIN scrape is slow and highly variable (2-6 min per market observed) and
 # twstock's fetch_data passes no timeout, so a stalled socket could pin the
 # in-flight flag forever. Age it out instead of blocking refreshes for good.
@@ -546,53 +549,118 @@ def _universe():
     return twstock.codes
 
 
-def _warrant_codes_for(stock_codes):
-    """Resolve each underlying to its full warrant-code universe (all types).
+# Warrant names are "<underlying><issuer><serial>", e.g. 長榮鋼國票59購01, but
+# they use the underlying's SHORT name: 世芯-KY lists warrants named 世芯…, and
+# 日月光投控 lists 日月光…. Matching on the registered name alone therefore found
+# nothing for either, despite 585 and 252 warrants existing. Strip the corporate
+# suffix and both resolve.
+_NAME_SUFFIX_RE = re.compile(r"(-KY|\*|投控|控股|金控|科技|工業|實業|生技|國際)$")
 
-    Warrant names are "<underlying><issuer><serial>", e.g. 長榮鋼國票59購01.
-    A plain prefix test leaks a longer-named stock's warrants into a shorter
-    one (長榮 vs 長榮鋼). Disambiguate structurally: a warrant belongs to this
-    underlying only if no *longer* real-security name (e.g. 長榮鋼, 長榮航) also
-    prefixes the warrant name. This replaces a hand-maintained issuer-char
-    whitelist that silently dropped every warrant of any issuer not listed.
+
+def _underlying_names(reals):
+    """{name -> underlying code} for every form a warrant might be named after.
+
+    The registered name always counts. A suffix-stripped stem counts only when
+    exactly one security claims it — 4 stems out of 2,356 are shared (聯發, 威健,
+    大洋, 台南) and those would be guesses, so they keep the full name only.
+    """
+    stems = {}
+    for code, name in reals.items():
+        stem = _NAME_SUFFIX_RE.sub("", name)
+        if stem and stem != name:
+            stems.setdefault(stem, set()).add(code)
+
+    out = {name: code for code, name in reals.items()}
+    for stem, owners in stems.items():
+        if len(owners) == 1 and stem not in out:
+            out[stem] = next(iter(owners))
+    return out
+
+
+def _warrant_index():
+    """{underlying code -> [warrant codes]} for the whole universe, computed once.
+
+    One pass replaces the old per-underlying scan, and — more to the point —
+    gives the picker and the scanner a single matcher, so a name the picker
+    offers cannot be one the scanner then finds nothing for.
+
+    A warrant belongs to the LONGEST candidate name that prefixes its own, which
+    is what keeps 長榮鋼's warrants off 長榮. Candidates are bucketed by first
+    character, since only a name starting the same way can claim it.
     """
     codes = _universe()
+    hit = _windex_cache.fresh("all")
+    if hit is not None and hit[1][0] is codes:
+        return hit[1][1]
+
     today = datetime.today()
-    real_names = [v.name for v in codes.values() if "權證" not in v.type]
+    reals = {k: v.name for k, v in codes.items() if "權證" not in v.type and v.name}
+    names = _underlying_names(reals)
 
-    def _make_matcher(name):
-        # Longer real-security names that would also claim this warrant name.
-        longer = [n for n in real_names if len(n) > len(name) and n.startswith(name)]
+    by_first = {}
+    for name, code in names.items():
+        by_first.setdefault(name[0], []).append((name, code))
+    for bucket in by_first.values():
+        bucket.sort(key=lambda p: -len(p[0]))
 
-        def _name_matches(wname):
-            if not wname.startswith(name):
-                return False
-            return not any(wname.startswith(n) for n in longer)
-
-        return _name_matches
-
-    code_map = {}
-    for stock_code in stock_codes:
-        stock_info = codes.get(stock_code, None)
-        if stock_info is None:
-            code_map[stock_code] = []
+    index = {}
+    for wcode, v in codes.items():
+        if "權證" not in v.type or not v.name:
             continue
-        name_matches = _make_matcher(stock_info.name)
-        # Some underlyings appear in warrant names under an abbreviation that is
-        # not the registered security name (e.g. ETF 元大台灣50 -> "台灣50"). The
-        # authoritative CommKey check downstream drops wrong-underlying strays,
-        # so the alias only needs to be permissive enough to fetch them.
-        aliases = WARRANT_NAME_ALIASES.get(stock_code, [])
-        code_map[stock_code] = [
-            k
-            for k, v in codes.items()
-            if "權證" in v.type
-            and (name_matches(v.name)
-                 or v.name.startswith(stock_code)
-                 or any(v.name.startswith(a) for a in aliases))
-            and datetime.strptime(v.start, "%Y/%m/%d") <= today
-        ]
-    return code_map
+        try:
+            if datetime.strptime(v.start, "%Y/%m/%d") > today:
+                continue
+        except (ValueError, TypeError):
+            continue
+        owner = None
+        for name, code in by_first.get(v.name[0], ()):
+            if v.name.startswith(name):
+                owner = code
+                break
+        # Some warrants are named after the underlying's numeric code instead.
+        if owner is None:
+            for code in reals:
+                if v.name.startswith(code):
+                    owner = code
+                    break
+        if owner is not None:
+            index.setdefault(owner, []).append(wcode)
+
+    # Aliases stay a manual escape hatch for names no rule derives (the ETF
+    # 元大台灣50 lists warrants named 台灣50…, which is not a suffix strip).
+    for code, aliases in WARRANT_NAME_ALIASES.items():
+        if code not in reals:
+            continue
+        extra = [k for k, v in codes.items()
+                 if "權證" in v.type and v.name
+                 and any(v.name.startswith(a) for a in aliases)]
+        if extra:
+            index.setdefault(code, [])
+            index[code] = sorted(set(index[code]) | set(extra))
+
+    _windex_cache.set("all", (codes, index))
+    return index
+
+
+def _warrant_codes_for(stock_codes):
+    """Resolve each underlying to its full warrant-code universe (all types)."""
+    index = _warrant_index()
+    return {c: list(index.get(c, ())) for c in stock_codes}
+
+
+def warrant_underlyings():
+    """Every listed security that has at least one listed warrant: [{code, name}].
+
+    The inverse of `_warrant_codes_for`, off the same index — so the picker can
+    only ever offer underlyings the scanner will actually resolve warrants for.
+    No new data source: the daily ISIN scrape already holds both sides.
+    """
+    codes = _universe()
+    index = _warrant_index()
+    return sorted(
+        ({"code": c, "name": codes[c].name} for c in index if c in codes),
+        key=lambda r: r["code"],
+    )
 
 
 def get_warrant_results(stock_codes, force=False, errors_out=None):
