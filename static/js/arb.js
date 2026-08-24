@@ -608,7 +608,7 @@ let arbSortCol = null;
 let arbSortAsc = true;
 
 function setArbMode(mode) {
-  const modes = ["direct", "us", "twus", "experiment", "shortw"];
+  const modes = ["direct", "us", "twus", "experiment"];
   modes.forEach(m => {
     const active = m === mode;
     const btn = document.getElementById("arb-mode-" + m);

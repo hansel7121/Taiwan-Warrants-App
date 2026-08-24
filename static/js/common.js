@@ -357,11 +357,9 @@ async function initProductSelects() {
     { selectedCodes: sel("ivOptProduct", []), selectFirst: true });
   populateProductSelect(document.getElementById("arbStockSelect"), warrantXTw,
     { selectedCodes: sel("arbStockSelect", ["2330"]) });
-  // Both static-arb LP tabs need the same warrant∩TW-option overlap.
+  // The static-arb LP scans the warrant∩TW-option overlap.
   populateProductSelect(document.getElementById("expStockSelect"), warrantXTw,
     { selectedCodes: sel("expStockSelect", ["2330"]) });
-  populateProductSelect(document.getElementById("swStockSelect"), warrantXTw,
-    { selectedCodes: sel("swStockSelect", ["2330"]) });
   populateProductSelect(document.getElementById("usStockSelect"), warrantXUs,
     { selectedCodes: sel("usStockSelect", ["2303"]) });
   populateProductSelect(document.getElementById("twusStockSelect"), twXUs,

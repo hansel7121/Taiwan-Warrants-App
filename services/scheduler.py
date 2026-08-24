@@ -218,10 +218,9 @@ def sync_us_option():
 _SUGGEST_ARB_TYPE = "direct_same_type"
 
 # The static-arb LP's output, logged alongside Direct Match's so the two can be
-# compared on identical market data. Scanned with allow_short_warrants=True: the
-# LP's reachable set then contains BOTH of Direct Match's directions, which is
-# the only setting under which "did the LP find everything Direct did" is a
-# meaningful question. Rows that needed a short warrant are flagged in `legs`.
+# compared on identical market data. The LP is warrants-buy-only, so it reaches
+# only Direct Match's "Buy Warrant" direction; the "Buy Option / Sell Warrant"
+# rows Direct logs have no LP counterpart by construction, not by omission.
 _SUGGEST_LP_ARB_TYPE = "static_lp"
 
 
@@ -242,8 +241,7 @@ def _lp_suggestion_id(row):
 def _scan_lp_suggestions(codes):
     """Static-arb LP rows as suggestion records, or [] when the scan is clean-empty."""
     try:
-        df = static_arb.match_static_arb(
-            codes, min_volume=0, min_edge=0.0, allow_short_warrants=True)
+        df = static_arb.match_static_arb(codes, min_volume=0, min_edge=0.0)
     except arb_logic.NoMatchesError as e:
         print(f"SCHED: lp suggestions no matches: {e}", flush=True)
         return []
@@ -251,8 +249,6 @@ def _scan_lp_suggestions(codes):
     out = {}
     for row in json.loads(df.to_json(orient="records")):
         legs = row.get("legs") or []
-        row["needs_short_warrant"] = any(
-            l.get("side") == "short" and l.get("kind") == "warrant" for l in legs)
         sug_id = _lp_suggestion_id(row)
         out[sug_id] = {
             "id": sug_id,

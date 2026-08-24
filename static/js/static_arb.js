@@ -3,17 +3,14 @@
 // two/three-leg renderers apply — this file owns its own table, modal and
 // payoff-at-horizon chart. Talks to /match_static_arb (logic/static_arb.py).
 //
-// Two sub-tabs share every line of this file and differ only by config:
-// "experiment" is the original buy-only model, "shortw" additionally lets the
-// LP SELL a warrant into its resting bid. They are kept side by side so the two
-// models can be compared against each other and against Direct Match on the
-// same chain. Element ids are prefixed per mode (exp* / sw*).
+// One sub-tab, "experiment": the LP buys warrants and options and sells options
+// only. Warrants are never sold — see logic/static_arb.py. The mode indirection
+// stays because every element id here is prefixed per mode (exp*).
 const STATIC_ARB_MODES = {
-  experiment: { prefix: "exp", shortWarrants: false },
-  shortw: { prefix: "sw", shortWarrants: true },
+  experiment: { prefix: "exp" },
 };
 
-const staticArbData = { experiment: [], shortw: [] };
+const staticArbData = { experiment: [] };
 
 const _sn = (v, d = 2) => v == null ? "—"
   : Number(v).toLocaleString(undefined, { maximumFractionDigits: d });
@@ -22,13 +19,11 @@ const _saEl = (mode, suffix) =>
   document.getElementById(STATIC_ARB_MODES[mode].prefix + suffix);
 
 function getStaticArbFilters(mode) {
-  const cfg = STATIC_ARB_MODES[mode];
   return {
     stock_codes: selectedCodes(_saEl(mode, "StockSelect")),
     min_volume: parseInt(_saEl(mode, "MinVolume").value) || 0,
     min_edge: parseFloat(_saEl(mode, "MinEdge").value) || 0,
     max_horizon_dte: parseInt(_saEl(mode, "MaxHorizon").value) || 0,
-    allow_short_warrants: cfg.shortWarrants,
   };
 }
 
@@ -90,7 +85,7 @@ async function downloadStaticArbCSV(mode) {
   const blob = await res.blob();
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = mode === "shortw" ? "static_arb_short_warrants.csv" : "static_arb.csv";
+  a.download = "static_arb.csv";
   a.click();
 }
 
@@ -130,9 +125,6 @@ function renderStaticArbTable(mode) {
 
   shown.forEach(r => {
     const idx = rows.indexOf(r);
-    // A short warrant is the one leg with early-exercise exposure, so mark the
-    // rows that carry one rather than letting them read like the option-short ones.
-    const shortW = r.legs.filter(l => l.side === "short" && l.kind === "warrant").length;
     h += `<tr style="cursor:pointer" onclick="openStaticArbModal(staticArbData['${mode}'][${idx}])" title="Click for the full breakdown and payoff curve">
       <td style="${td}">
         <div style="font-weight:600">${r.underlying_code}</div>
@@ -140,7 +132,7 @@ function renderStaticArbTable(mode) {
       </td>
       <td style="${td}">
         <div style="font-weight:600">${r.horizon_dte}d</div>
-        <div style="${sub}">${r.n_long}L / ${r.n_short}S${shortW ? ` · ${shortW} short W` : ""}</div>
+        <div style="${sub}">${r.n_long}L / ${r.n_short}S</div>
       </td>
       <td style="${td}">${r.legs.map(_legLine).join("")}</td>
       <td style="${td};text-align:right">
@@ -245,18 +237,13 @@ function openStaticArbModal(r) {
 }
 
 function openStaticArbInfo(mode) {
-  const shortW = STATIC_ARB_MODES[mode].shortWarrants;
   alert(
-(shortW ? "Short Warrant LP — static-arbitrage LP, warrants sellable\n\n"
-        : "Experiment — static-arbitrage LP\n\n") +
+"Experiment — static-arbitrage LP\n\n" +
 "The other tabs hand-code one structure each (vertical, put-call parity, butterfly) and search for instances of it. This one solves for the weights instead.\n\n" +
 "For each underlying and each horizon T*, it builds a linear program:\n" +
 "  maximise   (proceeds from short legs) − (cost of long legs)\n" +
 "  subject to portfolio payoff ≥ 0 at every spot, and depth limits per leg\n\n" +
-(shortW
-? "WARRANTS ARE SELLABLE HERE. This tab adds a sell variable per warrant, bounded by the size resting at its bid, which is what lets the LP reach Direct Match's 'Buy Option / Sell Warrant' direction — structures the Experiment tab cannot express at all. Horizons therefore include warrant expiries, not just option expiries.\n\n" +
-  "CALLS ONLY on the short side. Selling a warrant is shorting an AMERICAN claim: the holder may exercise before T*, which breaks the one-period proof. For a short call on a non-dividend-paying underlying early exercise is never optimal, so the proof survives. For a short put it does not, and this app models no dividends — so short-put legs are refused outright rather than shown as riskless. Note this also means you must be able to SELL the warrant; Taiwan retail generally cannot short one it does not already hold.\n\n"
-: "Warrants get buy variables only, so the long-only constraint is structural — this tab literally cannot express a short warrant, and every 'Buy Option / Sell Warrant' arb is outside its variable set. The Short Warrant LP tab lifts that restriction.\n\n") +
+"WARRANTS ARE BUY-ONLY. A long basket may hold warrants and options; the short basket is options ONLY. Warrants get buy variables and nothing else, so the constraint is structural — this tab cannot express a short warrant at all, and every 'Buy Option / Sell Warrant' arb is outside its variable set by design. Selling a warrant means shorting an AMERICAN claim the holder may exercise before T*, which breaks the one-period proof; that direction is Direct Match's, not the LP's. Horizons are therefore the option expiries only.\n\n" +
 "Short option legs are TW options, which are European and cash-settled, so they carry no early-assignment risk.\n\n" +
 "COMPLETENESS. Every leg payoff is piecewise-linear with one kink, so the portfolio bends only at the leg strikes. A piecewise-linear function is ≥ 0 everywhere if and only if it is ≥ 0 at spot 0, at every kink, and its far-right slope is ≥ 0 — a finite check that is exactly equivalent, not a sampled grid. Within static single-horizon portfolios of quoted instruments the LP therefore finds every arb that exists, and an empty result is a proof that none does. Direct Match, PCP and Butterfly are all weight-restricted special cases.\n\n" +
 "HORIZON. Short legs must expire exactly at T*; one that settled earlier settled against a different spot, which a one-period model cannot represent. Long legs may expire at or after T* and are replaced by their European lower bound there — (S − K·d)+ for calls, (K·d − S)+ for puts. Never intrinsic for puts: a European put can trade below intrinsic, and flooring one at (K − S)+ would certify arbs that do not exist.\n\n" +

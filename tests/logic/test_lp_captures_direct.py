@@ -95,7 +95,7 @@ def lp_row(w, o, american_put_floor=None):
     try:
         T = int(o["days_to_expiry"])
         longs, shorts, _ = static_arb._build_legs(
-            pd.DataFrame([w]), pd.DataFrame([o]), T, M, R, allow_short_warrants=False)
+            pd.DataFrame([w]), pd.DataFrame([o]), T, M, R)
         return static_arb._solve_horizon(longs, shorts, T, min_edge=0.0)
     finally:
         static_arb.AMERICAN_PUT_INTRINSIC_FLOOR = prev

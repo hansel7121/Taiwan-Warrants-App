@@ -138,30 +138,6 @@ def test_lp_id_ignores_lot_sizes(monkeypatch):
     assert scheduler._lp_suggestion_id(relegged) != a
 
 
-def test_short_warrant_rows_are_flagged(monkeypatch):
-    """A short warrant leg is what Direct Match reaches as Buy Option / Sell
-    Warrant; flagging it lets the two tabs be lined up by direction."""
-    import copy
-
-    row = copy.deepcopy(LP_ROW)
-    row["legs"][0]["side"] = "short"
-    written = []
-    monkeypatch.setattr(scheduler, "warrant_universe", lambda: ["2330"])
-    monkeypatch.setattr(scheduler, "tw_option_codes", lambda: ["2330"])
-    monkeypatch.setattr(arb_logic, "match_warrant_tw_option", lambda *a, **k: pd.DataFrame())
-    monkeypatch.setattr(static_arb, "match_static_arb", lambda *a, **k: pd.DataFrame([row]))
-    monkeypatch.setattr(db_suggestions, "existing_ids", lambda ids: set())
-    monkeypatch.setattr(db_suggestions, "insert_suggestions", written.append)
-    scheduler.sync_suggestions()
-    assert written[0][0]["legs"]["needs_short_warrant"] is True
-    assert lp_no_short(LP_ROW) is False
-
-
-def lp_no_short(row):
-    return any(l.get("side") == "short" and l.get("kind") == "warrant"
-               for l in row["legs"])
-
-
 def test_both_scanners_run_on_one_snapshot(monkeypatch):
     """Both must read the same TTL-cached frames — a refresh landing between two
     separate jobs would make a difference in their output timing, not method."""
@@ -178,14 +154,14 @@ def test_both_scanners_run_on_one_snapshot(monkeypatch):
     assert calls == ["direct", "lp"]
 
 
-def test_lp_scan_allows_short_warrants(monkeypatch):
-    """Only with shorts allowed does the LP's reachable set cover both of Direct
-    Match's directions, which is what makes the comparison meaningful."""
+def test_lp_scan_never_asks_for_short_warrants(monkeypatch):
+    """The scheduler must not reintroduce the sell side by the back door: the LP
+    is warrants-buy-only, so no logged row can carry a short warrant leg."""
     seen = {}
     monkeypatch.setattr(static_arb, "match_static_arb",
                         lambda codes, **k: seen.update(k) or pd.DataFrame())
     scheduler._scan_lp_suggestions(["2330"])
-    assert seen["allow_short_warrants"] is True
+    assert "allow_short_warrants" not in seen
     assert seen["min_edge"] == 0.0
 
 

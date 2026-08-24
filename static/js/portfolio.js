@@ -493,7 +493,7 @@ function renderDirectSuggestions(c) {
 function renderLpSuggestions(c) {
   const rows = _sugRows("lp");
   if (!rows.length) {
-    c.innerHTML = "<p style='padding:16px;color:var(--muted)'>No static-arb LP suggestions logged yet. The scanner runs the LP on the same snapshot as Direct Match, with short warrants allowed so its reachable set covers both of Direct's directions.</p>";
+    c.innerHTML = "<p style='padding:16px;color:var(--muted)'>No static-arb LP suggestions logged yet. The scanner runs the LP on the same snapshot as Direct Match. The LP is warrants-buy-only, so it reaches only Direct's Buy Warrant direction.</p>";
     return;
   }
   const th = "padding:7px 10px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;border-bottom:1px solid var(--border);text-align:left";
@@ -510,17 +510,13 @@ function renderLpSuggestions(c) {
     const legs = r.legs || [];
     const nl = legs.filter(l => l.side === "long").length;
     const ns = legs.length - nl;
-    // A short warrant leg is the part Direct Match reaches as "Buy Option /
-    // Sell Warrant"; flag it so the two tabs can be lined up by direction.
-    const shortW = r.needs_short_warrant
-      ? `<span style="color:${MARK_SHORT};font-size:11px"> · short warrant</span>` : "";
     const found = new Date(s.first_seen_at).toLocaleString(undefined,
       { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
     const guar = r.guaranteed_profit, credit = r.net_credit, ret = r.return_pct;
     h += `<tr style="cursor:pointer" onclick="openStaticArbModal(suggestionsData[${i}].legs)" title="Click for the full breakdown and payoff curve">
       <td style="${td}">${r.underlying_code || ""}<div style="${sub}">spot ${r.underlying_price ?? "—"}</div></td>
       <td style="${td}">${r.horizon_dte ?? "—"}d</td>
-      <td style="${td}">${nl} long · ${ns} short${shortW}
+      <td style="${td}">${nl} long · ${ns} short
         <div style="${sub}">${legs.slice(0, 3).map(l => l.code).join(", ")}${legs.length > 3 ? ` +${legs.length - 3}` : ""}</div></td>
       <td style="${td};text-align:right">${credit == null ? "—" : Number(credit).toLocaleString()}</td>
       <td style="${td};text-align:right"><div class="put" style="font-weight:700">${guar == null ? "—" : Number(guar).toLocaleString()}</div></td>
