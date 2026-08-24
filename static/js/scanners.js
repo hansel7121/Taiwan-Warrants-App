@@ -21,9 +21,11 @@ let allSelected = false;
 // options view. Guarded so private-mode / disabled storage can't break nav.
 
 function toggleSelectAll() {
+  // Acts on the rows the search box is currently showing, not the whole list:
+  // with a query active, "all" plainly means "all of these".
   const select = document.getElementById("stockSelect");
   allSelected = !allSelected;
-  for (let opt of select.options) opt.selected = allSelected;
+  setProductSelection(select, Array.from(select.options).map(o => o.value), allSelected);
   document.querySelectorAll(".btn-row .sm")[0].textContent = allSelected ? "Deselect All" : "Select All";
 }
 
@@ -126,7 +128,7 @@ const PRODUCT_REMOVE = {
 async function removeSelectedProduct(kind) {
   const cfg = PRODUCT_REMOVE[kind];
   const select = document.getElementById(cfg.selectId);
-  const codes = Array.from(select.selectedOptions).map(o => o.value);
+  const codes = selectedCodes(select);
   if (!codes.length) return;
   if (!confirm(`Remove ${codes.join(", ")} from the tracked list? This cannot be undone.`)) return;
   for (const code of codes) {
@@ -142,7 +144,7 @@ async function removeSelectedProduct(kind) {
 function getFilters() {
   const select = document.getElementById("stockSelect");
   return {
-    stock_codes: Array.from(select.selectedOptions).map(o => o.value),
+    stock_codes: selectedCodes(select),
     option_type: document.getElementById("optionType").value,
     ...bfPayload("warrantFilters"),
   };
@@ -472,8 +474,9 @@ async function fetchIVSurfaceOptions() {
   document.getElementById("iv-status").textContent = "Building surfaces…";
   ivClearPlots();
   const sel = document.getElementById("ivOptProduct");
+  const picked = selectedCodes(sel);
   const payload = {
-    stock_codes: [sel.value],
+    stock_codes: picked,
     option_type: document.getElementById("ivOptType").value,
     ...bfPayload("ivFilters"),
   };
@@ -493,7 +496,8 @@ async function fetchIVSurfaceOptions() {
     document.getElementById("iv-status").textContent = "Error: " + data.error;
     return;
   }
-  const product = sel.options[sel.selectedIndex].text;
+  const product = (Array.from(sel.options).find(o => o.value === picked[0]) || {}).text
+    || picked[0] || "";
   const callPut = document.getElementById("ivOptType").value;
   const [na, nb] = ivPlottedCount(data);
   document.getElementById("iv-status").textContent =
@@ -504,7 +508,7 @@ async function fetchIVSurfaceOptions() {
 
 async function fetchIVSurface() {
   const select = document.getElementById("ivStockSelect");
-  const stock_codes = Array.from(select.selectedOptions).map(o => o.value);
+  const stock_codes = selectedCodes(select);
   const status = document.getElementById("iv-status");
   if (!stock_codes.length) {
     status.textContent = "Please select an underlying stock.";
@@ -594,7 +598,7 @@ function setOptMarket(m, btn) {
 function getOptionsFilters() {
   const select = document.getElementById(_optMarket === "us" ? "optionUsSelect" : "optionStockSelect");
   return {
-    stock_codes: Array.from(select.selectedOptions).map(o => o.value),
+    stock_codes: selectedCodes(select),
     option_type: document.getElementById("optionsType").value,
     ...bfPayload("optionFilters"),
   };

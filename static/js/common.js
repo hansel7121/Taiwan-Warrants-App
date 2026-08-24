@@ -215,27 +215,108 @@ async function fetchProductList(url) {
 // selected> from before this change); selectFirst pre-selects the first
 // option if nothing else ended up selected (for single-select boxes like
 // ivOptProduct that always need something chosen).
+// Every product picker gets a type-ahead box. The underlying element stays a
+// native <select>, so `selectedOptions`, currentSelection() and the add/remove
+// UI are all untouched — the search only decides which <option>s are rendered.
+//
+// Two rules make filtering safe: the full row list is kept on the element, and
+// anything currently selected is always rendered even when it does not match
+// the query. Without the second, typing would silently deselect what you had
+// already picked, since a removed <option> takes its selection with it.
 function populateProductSelect(selectEl, rows, opts) {
   if (!selectEl) return;
   opts = opts || {};
   const labelFn = opts.labelFn || (r => r.name ? `${r.code} ${r.name}` : r.code);
-  const selectedCodes = opts.selectedCodes || [];
-  selectEl.innerHTML = "";
-  rows.forEach(r => {
-    const option = document.createElement("option");
-    option.value = r.code;
-    option.textContent = labelFn(r);
-    if (selectedCodes.includes(r.code)) option.selected = true;
-    selectEl.appendChild(option);
-  });
-  if (opts.selectFirst && selectEl.options.length && !selectEl.value) {
-    selectEl.options[0].selected = true;
+
+  selectEl._rows = rows;
+  selectEl._labelFn = labelFn;
+  // Selections live here rather than being read back off the DOM, which only
+  // ever shows the filtered subset.
+  selectEl._picked = new Set(opts.selectedCodes || []);
+  _mountProductSearch(selectEl);
+  _renderProductOptions(selectEl);
+
+  if (opts.selectFirst && !selectEl._picked.size && rows.length) {
+    selectEl._picked.add(rows[0].code);
+    _renderProductOptions(selectEl);
   }
 }
 
+function _mountProductSearch(selectEl) {
+  if (selectEl._searchEl) return;
+  const box = document.createElement("input");
+  box.type = "search";
+  box.className = "product-search";
+  box.placeholder = "Search code or name…";
+  box.autocomplete = "off";
+  box.addEventListener("input", () => _renderProductOptions(selectEl));
+  selectEl.parentNode.insertBefore(box, selectEl);
+  selectEl._searchEl = box;
+  // The DOM is the source of truth for a click; mirror it back into the set so
+  // a selection made before typing survives the next filter.
+  selectEl.addEventListener("change", () => {
+    const shown = new Set(Array.from(selectEl.options).map(o => o.value));
+    const picked = new Set(Array.from(selectEl.selectedOptions).map(o => o.value));
+    // Only reconcile what is on screen; a selected row hidden by the filter
+    // keeps its state.
+    selectEl._picked.forEach(c => { if (shown.has(c) && !picked.has(c)) selectEl._picked.delete(c); });
+    picked.forEach(c => selectEl._picked.add(c));
+    _renderProductCount(selectEl);
+  });
+}
+
+function _renderProductOptions(selectEl) {
+  const rows = selectEl._rows || [];
+  const q = (selectEl._searchEl ? selectEl._searchEl.value : "").trim().toLowerCase();
+  const match = r => !q || r.code.toLowerCase().includes(q) ||
+    (r.name || "").toLowerCase().includes(q);
+  selectEl.innerHTML = "";
+  rows.forEach(r => {
+    if (!match(r) && !selectEl._picked.has(r.code)) return;
+    const option = document.createElement("option");
+    option.value = r.code;
+    option.textContent = selectEl._labelFn(r);
+    option.selected = selectEl._picked.has(r.code);
+    selectEl.appendChild(option);
+  });
+  _renderProductCount(selectEl);
+}
+
+// "3 of 24" under the box, so a filter hiding most of the list never reads as
+// an empty product table.
+function _renderProductCount(selectEl) {
+  let el = selectEl._countEl;
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "product-count";
+    selectEl.parentNode.insertBefore(el, selectEl.nextSibling);
+    selectEl._countEl = el;
+  }
+  const total = (selectEl._rows || []).length;
+  const shown = selectEl.options.length;
+  const picked = selectEl._picked ? selectEl._picked.size : 0;
+  el.textContent = (shown === total ? `${total}` : `${shown} of ${total}`) +
+    (picked ? ` · ${picked} selected` : "");
+}
+
+// Reads the picked set, not selectedOptions — the DOM only holds whatever the
+// search box is currently showing.
 function currentSelection(id) {
-  const el = document.getElementById(id);
-  return el ? Array.from(el.selectedOptions).map(o => o.value) : [];
+  return selectedCodes(document.getElementById(id));
+}
+
+// Add or remove `codes` from a picker's selection and re-render.
+function setProductSelection(el, codes, on) {
+  if (!el || !el._picked) return;
+  codes.forEach(c => (on ? el._picked.add(c) : el._picked.delete(c)));
+  _renderProductOptions(el);
+}
+
+// Same, for callers holding the element rather than its id.
+function selectedCodes(el) {
+  if (!el) return [];
+  if (el._picked) return Array.from(el._picked);
+  return Array.from(el.selectedOptions).map(o => o.value);
 }
 
 // Fetch all three product lists and populate every product/stock <select> on

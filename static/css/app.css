@@ -395,6 +395,26 @@ tbody tr.row-pinned td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 #live-orderbook-grid .lv { color: var(--muted); font-size: .75rem; text-align: center; }
 #live-orderbook-grid .live-book-meta { color: var(--muted); font-size: .8rem; margin-top: .3rem; }
 
+/* ── Product picker search ── */
+.product-search {
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 5px 7px;
+  font-family: inherit;
+  font-size: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--text);
+}
+.product-search::placeholder { color: var(--muted); }
+.product-count {
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ── Bound-filter panel ── */
 /* Sits inside a .filters row and inherits its layout; the summary hugs the
    bottom so it lines up with the input baselines rather than their labels. */

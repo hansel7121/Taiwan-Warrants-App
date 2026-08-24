@@ -33,7 +33,7 @@ function openUsInfo() {
 function getUsFilters() {
   const sel = document.getElementById("usStockSelect");
   return {
-    stock_codes: Array.from(sel.selectedOptions).map(o => o.value),
+    stock_codes: selectedCodes(sel),
     option_type: document.getElementById("usOptionType").value,
     max_strike_diff_pct: parseFloat(document.getElementById("usMaxStrikePct").value) || 3,
     max_dte_diff: parseInt(document.getElementById("usMaxDteDiff").value) ?? 5,
@@ -157,7 +157,7 @@ async function downloadUsCSV() {
 function getTwUsFilters() {
   const sel = document.getElementById("twusStockSelect");
   return {
-    stock_codes: Array.from(sel.selectedOptions).map(o => o.value),
+    stock_codes: selectedCodes(sel),
     option_type: document.getElementById("twusOptionType").value,
     max_strike_diff_pct: parseFloat(document.getElementById("twusMaxStrikePct").value) || 2,
     max_dte_diff: parseInt(document.getElementById("twusMaxDteDiff").value) ?? 10,
@@ -624,7 +624,7 @@ function matchWarrantTwOption() {
 function getArbFilters() {
   const sel = document.getElementById("arbStockSelect");
   return {
-    stock_codes: Array.from(sel.selectedOptions).map(o => o.value),
+    stock_codes: selectedCodes(sel),
     option_type: document.getElementById("arbOptionType").value,
     max_strike_diff_pct: parseFloat(document.getElementById("arbMaxStrikePct").value) || 3,
     max_dte_diff: parseInt(document.getElementById("arbMaxDteDiff").value) ?? 5,

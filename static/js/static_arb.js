@@ -24,7 +24,7 @@ const _saEl = (mode, suffix) =>
 function getStaticArbFilters(mode) {
   const cfg = STATIC_ARB_MODES[mode];
   return {
-    stock_codes: Array.from(_saEl(mode, "StockSelect").selectedOptions).map(o => o.value),
+    stock_codes: selectedCodes(_saEl(mode, "StockSelect")),
     min_volume: parseInt(_saEl(mode, "MinVolume").value) || 0,
     min_edge: parseFloat(_saEl(mode, "MinEdge").value) || 0,
     max_horizon_dte: parseInt(_saEl(mode, "MaxHorizon").value) || 0,
