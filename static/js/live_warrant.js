@@ -291,10 +291,13 @@ async function runLiveWarrantScan() {
   const underlying = document.getElementById("live-scan-underlying").value;
   const topN = document.getElementById("live-scan-topn").value;
   const statusEl = document.getElementById("live-scan-status");
-  if (!underlying || !topN) return;
+  // "" is unset; "0" is a deliberate whole-chain scan, so test the string.
+  if (!underlying || topN === "") return;
   const btn = document.getElementById("live-scan-btn");
   btn.disabled = true;
-  if (statusEl) statusEl.textContent = "Scanning…";
+  // A whole-chain scan is ~1,050 REST seeds, so it is tens of seconds, not one.
+  if (statusEl) statusEl.textContent = Number(topN) === 0
+    ? "Subscribing the entire chain — this takes a while…" : "Scanning…";
   try {
     const res = await apiJson("/scan_live_warrant", {
       method: "POST", headers: { "Content-Type": "application/json" },

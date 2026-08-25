@@ -610,7 +610,9 @@ def scan_live_warrant():
     data = request.json or {}
     underlying = (data.get("underlying") or "").strip()
     top_n = data.get("top_n")
-    if not underlying or not top_n:
+    # 0 is a real value here — the whole chain — so only a missing field is an
+    # error. Same "0 = no limit" idiom the scanner filters use.
+    if not underlying or top_n is None:
         return jsonify({"error": "underlying, top_n required"}), 400
     try:
         result = live_warrant.scan_underlying(underlying, int(top_n))

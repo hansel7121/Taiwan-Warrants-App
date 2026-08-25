@@ -614,7 +614,8 @@
               <select id="live-scan-underlying" style="width:160px"></select>
             </label>
             <label>Top N
-              <input type="number" id="live-scan-topn" value="5" min="1" max="50" style="width:70px" />
+              <input type="number" id="live-scan-topn" value="0" min="0" max="2100"
+                     title="Warrants to subscribe, ranked by traded volume. 0 = the ENTIRE chain for this underlying (TSMC is ~1,050 books — over half the 2,100-subscription account cap)." style="width:70px" />
             </label>
             <button class="sm" id="live-scan-btn" onclick="runLiveWarrantScan()">Run Scan</button>
             <span id="live-scan-status" style="font-size:12px;color:var(--muted)"></span>

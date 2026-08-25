@@ -37,6 +37,27 @@ def check_capacity(current_total, net_change, max_total=MAX_TOTAL_SUBS):
             f"cap (currently {current_total})")
 
 
+def scan_codes(codes, volumes, top_n):
+    """The codes a liquidity scan should subscribe, ranked by traded volume.
+
+    ``top_n`` of 0 (or None) means EVERY warrant on the underlying — the whole
+    chain, not a slice. That is what makes a full-chain stress subscribe
+    expressible; the account-wide cap in `check_capacity` is still the only
+    thing that bounds it. Falls back to listing order when MIS returned no
+    volume at all (pre-open, or the endpoint down), so a scan never silently
+    subscribes nothing.
+    """
+    ranked = sorted(volumes.items(), key=lambda kv: kv[1], reverse=True)
+    if not top_n:
+        ordered = [c for c, _v in ranked] if ranked and ranked[0][1] else list(codes)
+        # Ranking only covers codes MIS answered for; append the rest so "all"
+        # really is all.
+        seen = set(ordered)
+        return ordered + [c for c in codes if c not in seen]
+    ranked = ranked[:top_n]
+    return [c for c, _v in ranked] if ranked and ranked[0][1] else list(codes[:top_n])
+
+
 def scan_replace(existing, underlying, new_codes):
     """Codes to add/remove for a liquidity-scan replace: only this underlying's own scan rows are ever removed."""
     existing_codes = {row["code"] for row in existing}

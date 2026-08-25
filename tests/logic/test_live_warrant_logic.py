@@ -49,6 +49,48 @@ def test_check_capacity_allows_negative_net_change():
     lwl.check_capacity(2100, -50, max_total=2100)  # a net removal never rejects
 
 
+# ── scan_codes ───────────────────────────────────────────────────────────────
+
+CHAIN = ["A1", "A2", "A3", "A4"]
+VOLS = {"A1": 10, "A2": 400, "A3": 0, "A4": 70}
+
+
+def test_scan_codes_ranks_by_volume_and_takes_top_n():
+    assert lwl.scan_codes(CHAIN, VOLS, 2) == ["A2", "A4"]
+
+
+def test_scan_codes_top_n_zero_takes_the_entire_chain():
+    """The whole-chain stress case: every code, still ordered by volume."""
+    assert sorted(lwl.scan_codes(CHAIN, VOLS, 0)) == sorted(CHAIN)
+    assert lwl.scan_codes(CHAIN, VOLS, 0)[0] == "A2"
+
+
+def test_scan_codes_top_n_none_is_also_the_entire_chain():
+    assert sorted(lwl.scan_codes(CHAIN, VOLS, None)) == sorted(CHAIN)
+
+
+def test_scan_codes_all_includes_codes_mis_had_no_volume_for():
+    """MIS answers for a subset; the rest must still be subscribed, not dropped."""
+    partial = {"A2": 400}
+    assert sorted(lwl.scan_codes(CHAIN, partial, 0)) == sorted(CHAIN)
+
+
+def test_scan_codes_falls_back_to_listing_order_when_all_volumes_are_zero():
+    """Pre-open, or MIS down: rank by nothing, but never subscribe nothing."""
+    zero = {c: 0 for c in CHAIN}
+    assert lwl.scan_codes(CHAIN, zero, 2) == ["A1", "A2"]
+    assert sorted(lwl.scan_codes(CHAIN, zero, 0)) == sorted(CHAIN)
+
+
+def test_scan_codes_all_is_still_bounded_by_the_account_cap():
+    """scan_codes itself does not cap — plan_scan_replace is what rejects."""
+    big = [f"W{i}" for i in range(2200)]
+    codes = lwl.scan_codes(big, {}, 0)
+    assert len(codes) == 2200
+    with pytest.raises(lwl.CapacityExceededError):
+        lwl.plan_scan_replace([], "2330", codes, 0)
+
+
 # ── scan_replace ─────────────────────────────────────────────────────────────
 
 def _row(code, source, underlying=None):

@@ -22,6 +22,15 @@ def upsert_tracked(code, name, source, underlying=None):
     }).execute())
 
 
+def upsert_tracked_many(rows):
+    """Bulk upsert, for a scan that adds a whole chain at once — a no-op on an
+    empty list. One round-trip instead of one per code, which is what keeps a
+    full-chain scan inside the request timeout."""
+    if not rows:
+        return
+    db._run(lambda c: c.table("live_warrant_tracked").upsert(rows).execute())
+
+
 def remove_tracked(code):
     db._run(lambda c: c.table("live_warrant_tracked").delete().eq("code", code).execute())
 

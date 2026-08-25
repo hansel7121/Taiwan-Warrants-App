@@ -36,6 +36,10 @@ RECONNECT_BACKOFF_S = 5
 MIS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 MIS_BATCH = 100
 MIS_WORKERS = 6
+# Parallel REST book seeds during a bulk scan. Bounded well under the per-second
+# quota the Fugle REST endpoint enforces; raising it trades scan latency for a
+# higher chance of being throttled mid-scan.
+SEED_WORKERS = 8
 MIS_HEADERS = {"User-Agent": "Mozilla/5.0",
                "Referer": "https://mis.twse.com.tw/stock/index.jsp"}
 
@@ -247,8 +251,15 @@ def _seed_from_rest(sdk, code):
         _books.setdefault(code, {"bids": bids, "asks": asks, "ts": ts, "src": "rest"})
 
 
-def _track_one(code):
-    """Subscribe one code to whichever pool connection has room, opening one if needed."""
+def _subscribe_one(code):
+    """Place one code on whichever pool connection has room, opening one if needed.
+
+    Slot assignment stays single-threaded on purpose: `assign_slot` reads the
+    per-connection counts and the caller then fills that slot, so running two of
+    these concurrently could hand the same slot out twice and overfill a
+    connection. The websocket subscribe itself is a local send with no
+    round-trip, so serialising this costs almost nothing even for a whole chain.
+    """
     with _lock:
         counts = [len(c["codes"]) for c in _connections]
     idx = live_warrant_logic.assign_slot(counts)
@@ -256,7 +267,28 @@ def _track_one(code):
     conn["ws"].subscribe({"channel": BOOKS_CHANNEL, "symbol": code})
     with _lock:
         conn["codes"].add(code)
+    return conn
+
+
+def _track_one(code):
+    """Subscribe one code and seed its first book."""
+    conn = _subscribe_one(code)
     _seed_from_rest(conn["sdk"], code)
+
+
+def _track_many(codes):
+    """Subscribe a batch, then seed the books in parallel.
+
+    The REST seed is one round-trip per code and is the whole cost of a large
+    scan — a full TSMC chain is ~1,050 of them, which sequentially overruns
+    gunicorn's request timeout and leaves the scan half-applied. Subscribing is
+    still serial (see `_subscribe_one`); only the seeding fans out.
+    """
+    conns = [(code, _subscribe_one(code)) for code in codes]
+    if not conns:
+        return
+    with ThreadPoolExecutor(max_workers=SEED_WORKERS) as pool:
+        list(pool.map(lambda pair: _seed_from_rest(pair[1]["sdk"], pair[0]), conns))
 
 
 def _untrack_one(code):
@@ -378,15 +410,35 @@ def remove_code(code):
     _untrack_one(code)
 
 
+def _remove_many(codes):
+    """Drop a batch of codes: one bulk delete, then unsubscribe each."""
+    if not codes:
+        return
+    db_live_warrant.remove_tracked_many(codes)
+    with _lock:
+        for code in codes:
+            if code in _tracked:
+                _tracked.remove(code)
+            _names.pop(code, None)
+    for code in codes:
+        _untrack_one(code)
+
+
 def scan_underlying(underlying, top_n):
-    """Rank `underlying`'s warrants by traded volume and replace its previous scan rows with the top N."""
+    """Rank `underlying`'s warrants by traded volume and replace its previous
+    scan rows with the top N — or with the WHOLE chain when `top_n` is 0.
+
+    The bulk paths (batched upsert, parallel seeding) are what make the
+    full-chain case finish inside one request; the account-wide subscription cap
+    is still enforced by `plan_scan_replace` before anything is subscribed, so an
+    oversized scan is rejected outright rather than partially applied.
+    """
     _name, codes = _warrant_codes_for(underlying)
     if not codes:
         raise RuntimeError(f"no warrants found for {underlying}")
 
     vols = _mis_volumes(codes)
-    ranked = sorted(vols.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
-    ranked_codes = [c for c, _v in ranked] if ranked and ranked[0][1] else codes[:top_n]
+    ranked_codes = live_warrant_logic.scan_codes(codes, vols, top_n)
 
     existing_rows = db_live_warrant.list_tracked()
     with _lock:
@@ -394,15 +446,18 @@ def scan_underlying(underlying, top_n):
     to_add, to_remove = live_warrant_logic.plan_scan_replace(
         existing_rows, underlying, ranked_codes, current_total)
 
-    for code in to_remove:
-        remove_code(code)
-    for code in to_add:
-        _track_one(code)
-        with _lock:
-            name = _names.get(code) or code
+    _remove_many(to_remove)
+    _track_many(to_add)
+    with _lock:
+        rows = []
+        for code in to_add:
             _tracked.append(code)
-        db_live_warrant.upsert_tracked(code, name, source="scan", underlying=underlying)
+            rows.append({"code": code, "name": _names.get(code) or code,
+                         "source": "scan", "underlying": underlying})
+    db_live_warrant.upsert_tracked_many(rows)
 
+    print(f"LIVEWARRANT: scan {underlying} top_n={top_n or 'all'} "
+          f"+{len(to_add)} -{len(to_remove)} tracked={len(_tracked)}", flush=True)
     return {"added": to_add, "removed": to_remove}
 
 
