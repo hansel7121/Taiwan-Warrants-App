@@ -610,17 +610,35 @@ def scan_live_warrant():
     data = request.json or {}
     underlying = (data.get("underlying") or "").strip()
     top_n = data.get("top_n")
+    force = bool(data.get("force"))
     # 0 is a real value here — the whole chain — so only a missing field is an
     # error. Same "0 = no limit" idiom the scanner filters use.
     if not underlying or top_n is None:
         return jsonify({"error": "underlying, top_n required"}), 400
     try:
-        result = live_warrant.scan_underlying(underlying, int(top_n))
+        result = live_warrant.scan_underlying(underlying, int(top_n), force=force)
+    except live_warrant_logic.ChainShrinkError as e:
+        # 409, not 400: the request was well formed and nothing was changed —
+        # the resolved chain just looked too small to trust. The client offers
+        # the force re-run rather than retrying blind.
+        return jsonify({"error": str(e), "needs_force": True}), 409
     except live_warrant_logic.CapacityExceededError as e:
         return jsonify({"error": str(e)}), 400
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 400
     return jsonify({"ok": True, **result})
+
+
+@app.route("/retry_live_warrant", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def retry_live_warrant():
+    """Re-attempt every tracked code that isn't streaming yet, on demand.
+
+    The scheduler already does this each trading-hour tick; this is the button
+    for when a scan was throttled and you don't want to wait for the next one.
+    """
+    return jsonify({"ok": True, **live_warrant.retry_pending()})
 
 
 @app.route("/reconnect_live_warrant", methods=["POST"])

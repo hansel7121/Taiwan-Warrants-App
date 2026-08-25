@@ -228,3 +228,128 @@ Warrant), so the stress test can't disrupt it.
 
 Credentials come from the `fubon_credentials` table via `services/broker/`
 (Fernet-encrypted) · script is `scripts/fubon_quote_viewer.py`
+
+## Live Warrant tab: pending codes and REST seed errors
+
+The tab used to render a warrant's name as `(FugleAPIError)`. That string was
+never a Fubon field — `services/live_warrant.py::_seed_from_rest` caught any
+exception from `rest_client.stock.intraday.quote(symbol=...)` and wrote the
+exception's *class name* into the name cache, which was then persisted into
+`live_warrant_tracked.name`. One throttled REST call renamed the warrant
+permanently. Quotes kept arriving because prices come from the websocket
+`books` channel, which is a completely separate path from the REST seed.
+
+`FugleAPIError` itself is the SDK's catch-all (`fugle_marketdata/rest/base_rest.py`):
+any HTTP status ≥ 400, a response that won't parse as JSON, or any
+`requests` transport error. The SDK issues its `requests.get` with no timeout,
+so a stalled socket surfaces here too.
+
+### The measured REST quota
+
+Probed against the live account on 2026-08-25 (market closed; REST still
+serves the last session):
+
+| Test | Result |
+|---|---|
+| 800 quotes, 8 workers, unpaced (~62/s) | **299 ok, 501 × `429 Rate limit exceeded`** |
+| 300 quotes paced at 5/s for 60s | 300 ok, 0 errors |
+| Idle recovery after the storm | ~1s once the window rolls |
+| 800 quotes, 8 workers, through the limiter | **799 ok, 0 × 429**, 126s |
+
+So the quota is **300 requests per rolling minute, shared across every REST
+endpoint on the account** — once a seed burst drains it, even
+`intraday/tickers` comes back 429. That is the whole story behind
+`(FugleAPIError)`: `SEED_WORKERS = 8` unpaced burns a full chain's budget in
+about five seconds and every seed after the 300th failed.
+
+`services/live_warrant.py::_RestQuota` now sits in front of every REST call as
+a sliding window (`REST_QUOTA = 300`, `REST_QUOTA_WINDOW_S = 60`), so calls
+queue instead of failing. A call that cannot get a slot within
+`REST_ACQUIRE_TIMEOUT_S` (20s) is recorded and left for `retry_pending()`
+rather than blocking a web request. Because a full chain is ~3.5 minutes of
+seeding at that rate, `SEED_BUDGET_PER_SCAN` caps what one scan seeds inline
+(200) and the rest drains in the background — those codes are already
+subscribed, so their books fill from the websocket on the first requote either
+way.
+
+`quota_used` / `quota_limit` in `/live_warrant_data` show the current window.
+
+What the tab does now:
+
+- Every REST call is paced by the shared quota above, so a seed burst no longer
+  produces 429s at all.
+- Names on the scan path come from the ticker catalog
+  (`intraday.tickers(type="WARRANT", …)`), which already carries `name` per
+  symbol, so labelling a chain costs zero extra REST calls. The per-code seed
+  only fills the first book and backfills a name the catalog lacked.
+- A failed seed is retried (`SEED_RETRIES`), then recorded in `_seed_errors`
+  and surfaced in the status line as `N with errors` with the real message
+  (`FugleAPIError 429 Too Many Requests`), never written into the name.
+- Every code is written to `live_warrant_tracked` **before** it is subscribed
+  and before any removal, and a per-code subscribe failure is collected instead
+  of raised. A scan that dies halfway can no longer leave codes deleted and
+  unreplaced.
+- Whatever didn't subscribe stays in `_pending`, shows dimmed in the table with
+  the reason in its tooltip, and is retried by `retry_pending()` on each
+  trading-hour scheduler tick or from the **Retry Pending** button
+  (`POST /retry_live_warrant`).
+- A whole-chain rescan that would drop more than
+  `live_warrant_logic.MAX_SCAN_SHRINK` (20%) of what is already tracked for
+  that underlying is refused with HTTP 409 rather than applied — a truncated
+  catalog response looks exactly like a chain that shrank overnight. The client
+  offers a force re-run; nothing is changed until you confirm it.
+
+Triage from the `/live_warrant_data` payload:
+
+```bash
+curl -s http://127.0.0.1:5000/live_warrant_data | python -c "
+import json,sys
+d=json.load(sys.stdin)
+print('tracked=',d['tracked'],'subs=',d['subs'],'pending=',d['pending'],'errors=',d['errors'])
+print('kinds=',d['error_kinds'])
+"
+```
+
+`tracked > subs` is expected while a backlog drains and is not data loss — the
+rows are in the table either way. `errors` full of `429` means lower
+`SEED_WORKERS`; `errors` full of `subscribe failed` points at the websocket or
+the subscription cap, not at Fugle.
+
+## What Fubon returns per warrant
+
+`intraday/tickers` (the bulk catalog) carries only `symbol`, `name`,
+`industry` — no underlying, which is why `_warrant_codes_for` has to match
+warrants to their underlying by name prefix.
+
+`intraday/ticker/{symbol}` (per symbol) **does** carry the contract terms.
+Probed live, `03001T`:
+
+```json
+{
+  "type": "WARRANT",     "name": "啟碁台新5A售02",
+  "exercisePrice": 206.52,        // strike
+  "exerciseRatio": 0.051,         // 行使比例
+  "maturityDate": "20261016",     // -> DTE
+  "knockInPrice": 0, "knockOutPrice": 0,   // 0 = vanilla, non-zero = barrier
+  "remainingVolume": 1950, "exercisedVolume": 0, "cancelledVolume": 0,
+  "limitUpPrice": 2.09, "limitDownPrice": 0.01,
+  "previousClose": 0.92, "referencePrice": 0.92,
+  "boardLot": 1000, "securityStatus": "NORMAL", "exchange": "TWSE"
+}
+```
+
+Note what is *not* there: no `underlyingSymbol`. Name matching is still the
+only link from a warrant to its underlying.
+
+`intraday/quote/{symbol}` — the call the seed path makes — does **not**
+include any of these terms, so strike/DTE would cost a second call per code
+(another ~1,050 for a full chain, i.e. 3.5 minutes of quota). `snapshot/quotes`
+is equities only (1,536 rows vs 31,731 listed warrants) and carries no terms
+either.
+
+The app currently sources these from CMoney + the TWSE/TPEx ISIN listings
+(`logic/warrant_logic.py`). Fubon is a viable replacement for `strike`,
+`exercise_ratio` and `days_to_expiry` — same data, first-party, no scraping
+— but only within the 300/min budget, so it would want a persisted cache
+keyed by code (terms are static for a warrant's life) rather than a per-scan
+fetch.

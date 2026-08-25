@@ -91,6 +91,79 @@ def test_scan_codes_all_is_still_bounded_by_the_account_cap():
         lwl.plan_scan_replace([], "2330", codes, 0)
 
 
+def test_scan_codes_tops_up_from_listing_order_when_mis_answered_for_too_few():
+    """A throttled MIS batch must cost the ranking its confidence, not cost the
+    scan its size — top_n codes were asked for, top_n codes come back."""
+    partial = {"A2": 400}
+    assert lwl.scan_codes(CHAIN, partial, 3) == ["A2", "A1", "A3"]
+
+
+def test_scan_codes_top_up_never_exceeds_the_chain():
+    assert lwl.scan_codes(["A1", "A2"], {"A2": 5}, 10) == ["A2", "A1"]
+
+
+def test_scan_codes_ignores_volumes_for_codes_outside_the_chain():
+    """MIS is keyed independently; a stray code must not be subscribed."""
+    assert lwl.scan_codes(CHAIN, {"ZZ": 9999, "A2": 400}, 1) == ["A2"]
+
+
+# ── scan_shrink_ratio / guard_chain_shrink ───────────────────────────────────
+
+def _scan_rows(codes, underlying="2330"):
+    return [{"code": c, "source": "scan", "underlying": underlying} for c in codes]
+
+
+def test_scan_shrink_ratio_counts_only_this_underlyings_scan_rows():
+    existing = _scan_rows(["A1", "A2", "A3", "A4"]) + [
+        {"code": "M1", "source": "manual", "underlying": None},
+        {"code": "B1", "source": "scan", "underlying": "2317"},
+    ]
+    assert lwl.scan_shrink_ratio(existing, "2330", ["A1", "A2", "A3"]) == 0.25
+
+
+def test_scan_shrink_ratio_zero_when_nothing_tracked_yet():
+    assert lwl.scan_shrink_ratio([], "2330", ["A1"]) == 0.0
+
+
+def test_guard_allows_a_whole_chain_rescan_that_barely_shrinks():
+    existing = _scan_rows([f"A{i}" for i in range(10)])
+    kept = [f"A{i}" for i in range(9)]  # 10% shrink, under the 20% limit
+    assert lwl.guard_chain_shrink(existing, "2330", kept, 0) == pytest.approx(0.1)
+
+
+def test_guard_rejects_a_whole_chain_rescan_that_collapses():
+    """The truncated-catalog case: half the chain missing is not a delisting."""
+    existing = _scan_rows([f"A{i}" for i in range(10)])
+    with pytest.raises(lwl.ChainShrinkError):
+        lwl.guard_chain_shrink(existing, "2330", ["A0", "A1", "A2", "A3", "A4"], 0)
+
+
+def test_guard_force_applies_the_shrink_anyway():
+    existing = _scan_rows([f"A{i}" for i in range(10)])
+    assert lwl.guard_chain_shrink(existing, "2330", ["A0"], 0, force=True) == 0.0
+
+
+def test_guard_does_not_gate_a_ranked_top_n_scan():
+    """A top-N scan is meant to drop codes that fell out of the ranking."""
+    existing = _scan_rows([f"A{i}" for i in range(10)])
+    assert lwl.guard_chain_shrink(existing, "2330", ["A0"], 5) == pytest.approx(0.9)
+
+
+def test_guard_gates_a_top_n_scan_when_the_catalog_came_back_incomplete():
+    """An incomplete catalog means the codes that 'fell out' may just be the
+    ones the catalog failed to list, so no shrink at all is allowed."""
+    existing = _scan_rows([f"A{i}" for i in range(10)])
+    with pytest.raises(lwl.ChainShrinkError):
+        lwl.guard_chain_shrink(existing, "2330", [f"A{i}" for i in range(9)], 5,
+                               catalog_complete=False)
+
+
+def test_guard_allows_an_incomplete_catalog_that_drops_nothing():
+    existing = _scan_rows(["A1", "A2"])
+    assert lwl.guard_chain_shrink(existing, "2330", ["A1", "A2", "A3"], 0,
+                                  catalog_complete=False) == 0.0
+
+
 # ── scan_replace ─────────────────────────────────────────────────────────────
 
 def _row(code, source, underlying=None):

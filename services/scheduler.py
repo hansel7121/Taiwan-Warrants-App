@@ -330,8 +330,16 @@ def _scan_direct_suggestions(codes):
 
 
 def sync_live_warrant():
-    """Open the shared Fubon session if it isn't already (start_session is idempotent)."""
+    """Open the shared Fubon session if it isn't already (start_session is idempotent),
+    then work through whatever the last scan or add could not subscribe.
+
+    retry_pending() is the second half of the no-loss guarantee: codes are
+    written to live_warrant_tracked before they are subscribed, so a throttled
+    scan leaves them tracked-but-pending, and this tick is what eventually gets
+    them streaming instead of leaving them dark until the next manual scan.
+    """
     live_warrant.start_session()
+    live_warrant.retry_pending()
 
 
 # ---------------------------------------------------------------------------

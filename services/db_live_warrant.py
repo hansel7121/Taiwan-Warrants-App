@@ -22,6 +22,17 @@ def upsert_tracked(code, name, source, underlying=None):
     }).execute())
 
 
+def update_name(code, name):
+    """Backfill one row's cached name without touching source/underlying.
+
+    A code is persisted before it is subscribed, so its row is first written
+    with the code itself as a placeholder name; this is how the real name lands
+    once the REST quote that was throttled during the scan finally succeeds.
+    """
+    db._run(lambda c: c.table("live_warrant_tracked")
+            .update({"name": name}).eq("code", code).execute())
+
+
 def upsert_tracked_many(rows):
     """Bulk upsert, for a scan that adds a whole chain at once — a no-op on an
     empty list. One round-trip instead of one per code, which is what keeps a

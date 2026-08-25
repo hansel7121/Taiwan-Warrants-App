@@ -374,6 +374,13 @@ tbody tr.row-pinned td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 #tab-live .dot.ok { background: var(--put); }
 #tab-live .dot.warn { background: var(--accent); }
 #tab-live .down { color: var(--call); }
+#tab-live .muted { color: var(--muted); }
+/* Tracked but not streaming yet — dimmed rather than hidden, because the row is
+   still a real tracked code and the reason sits in its title attribute. */
+#tab-live .live-degraded { opacity: .55; }
+#tab-live tr.live-degraded td:first-child { border-left: 2px solid var(--accent); }
+#tab-live .live-term { color: var(--muted); white-space: nowrap; text-align: right; }
+#tab-live .live-dte-near { color: var(--accent); font-weight: 600; }
 #tab-live .live-updated { min-width: 6.5em; color: var(--muted); }
 #tab-live .live-vol { color: var(--muted); font-size: .9em; }
 #tab-live .live-view-toggle { display: inline-flex; gap: 4px; }

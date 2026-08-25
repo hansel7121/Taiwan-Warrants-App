@@ -629,6 +629,10 @@
                     title="Close every open connection and log out. The tracked list is kept — Connect resumes it.">
               Disconnect
             </button>
+            <button class="sm" id="live-retry-btn" onclick="retryLiveWarrant()"
+                    title="Re-subscribe every tracked code that isn't streaming yet, and re-fetch the names a throttled scan couldn't. Nothing is added or removed. The scheduler already does this each trading-hour tick.">
+              Retry Pending
+            </button>
             <button class="sm" id="live-reconnect-btn" onclick="reconnectLiveWarrant()"
                     title="Hard restart: re-logs in and reopens however many connections the tracked list needs. Reserved for error recovery — the session connects automatically during TW-equity trading hours.">
               Reconnect
@@ -649,6 +653,9 @@
             <thead>
               <tr>
                 <th>Code</th><th>Name</th>
+                <th title="Exercise price (履約價), from Fubon's intraday/ticker">Strike</th>
+                <th title="Calendar days to maturity (到期日), Taipei date">DTE</th>
+                <th title="Exercise ratio (行使比例)">Ratio</th>
                 <th>Bid 5</th><th>Bid 4</th><th>Bid 3</th><th>Bid 2</th><th>Bid 1</th>
                 <th>Ask 1</th><th>Ask 2</th><th>Ask 3</th><th>Ask 4</th><th>Ask 5</th>
                 <th>Updated</th><th></th>

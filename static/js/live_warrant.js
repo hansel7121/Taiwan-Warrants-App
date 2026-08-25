@@ -66,6 +66,16 @@ function _lwBuildRow(code) {
   const nameTd = document.createElement("td");
   tr.appendChild(nameTd);
 
+  // Contract terms. These arrive on a slower path than the book — they are one
+  // REST call per code, backfilled in the background — so they render as "—"
+  // until retry_pending() has worked through the tracked list.
+  const termTds = ["strike", "dte", "ratio"].map(k => {
+    const td = document.createElement("td");
+    td.className = "live-term live-term-" + k;
+    tr.appendChild(td);
+    return td;
+  });
+
   // Displayed lowest bid -> highest bid, then lowest ask -> highest ask,
   // i.e. level 5..1 for bids (best bid is level 1) then level 1..5 for asks.
   const bidTds = [4, 3, 2, 1, 0].map(() => {
@@ -93,11 +103,43 @@ function _lwBuildRow(code) {
   removeTd.appendChild(removeBtn);
   tr.appendChild(removeTd);
 
-  return { tr, cells: { name: nameTd, bid: bidTds, ask: askTds, age: ageTd } };
+  return { tr, cells: { name: nameTd, strike: termTds[0], dte: termTds[1],
+                        ratio: termTds[2], bid: bidTds, ask: askTds, age: ageTd } };
+}
+
+// A row the backend could not fully set up: still tracked, still listed, just
+// not streaming yet. The reason goes in the title attribute — never in the name,
+// which is what used to render as "(FugleAPIError)".
+function _lwDegraded(b) {
+  if (b.pending) return b.error ? `pending — ${b.error}` : "pending — not subscribed yet";
+  return b.error || "";
+}
+
+// Strike prints to 2dp; the exercise ratio is a small fraction (0.051) so it
+// needs more, but trailing zeros on a round ratio are noise.
+function _lwNum(v, dp) {
+  if (v === null || v === undefined) return "—";
+  return Number(v).toFixed(dp).replace(/\.?0+$/, "") || "0";
+}
+
+function _lwDte(v) {
+  if (v === null || v === undefined) return "—";
+  return v < 0 ? `${v}d (expired)` : `${v}d`;
 }
 
 function _lwPatchRow(el, b) {
-  _lwSetText(el.cells.name, b.name || "-");
+  _lwSetText(el.cells.name, b.name || b.code);
+  _lwSetText(el.cells.strike, _lwNum(b.strike, 2));
+  _lwSetText(el.cells.dte, _lwDte(b.dte));
+  _lwSetText(el.cells.ratio, _lwNum(b.exercise_ratio, 4));
+  // Near-dated warrants are the ones worth spotting at a glance.
+  el.cells.dte.classList.toggle("live-dte-near", b.dte !== null && b.dte !== undefined && b.dte <= 30);
+  const degraded = _lwDegraded(b);
+  if (el.degraded !== degraded) {
+    el.tr.classList.toggle("live-degraded", !!degraded);
+    el.tr.title = degraded;
+    el.degraded = degraded;
+  }
   // rows[i] is level i+1 (0 = best). bidTds[0] = level 5 (lowest, worst) ... bidTds[4] = level 1 (best).
   [4, 3, 2, 1, 0].forEach((lvl, i) => {
     const r = b.rows[lvl] || {};
@@ -150,7 +192,13 @@ function _lwBuildBook(code) {
 }
 
 function _lwPatchBook(el, b) {
-  const title = `${b.code}  ${b.name || "-"}`;
+  const title = `${b.code}  ${b.name || b.code}`;
+  const degraded = _lwDegraded(b);
+  if (el.degraded !== degraded) {
+    el.root.classList.toggle("live-degraded", !!degraded);
+    el.root.title = degraded;
+    el.degraded = degraded;
+  }
   if (el.title !== title) { el.h3.textContent = title; el.title = title; }
 
   for (let i = 0; i < el.rows.length; i++) {
@@ -162,7 +210,7 @@ function _lwPatchBook(el, b) {
     _lwSetText(slot.as, _lwCell(r ? r.ask_size : null));
   }
 
-  const metaStr = b.age === null ? "no data yet" : _lwAge(b);
+  const metaStr = degraded || (b.age === null ? "no data yet" : _lwAge(b));
   if (el.meta.data !== metaStr) el.meta.data = metaStr;
 }
 
@@ -178,6 +226,15 @@ function _lwStatusLine(d) {
   let html = `<span class="dot ${dot}"></span><b>${d.connected ? "connected" : "not connected"}</b>`
     + ` &nbsp;|&nbsp; subscriptions <b>${d.subs}/${d.max_subs}</b>`
     + (connSummary ? ` &nbsp;|&nbsp; ${connSummary}` : "");
+  if (d.pending) html += ` &nbsp;|&nbsp; <span class="down">${d.pending} pending</span>`;
+  if (d.terms_missing) html += ` &nbsp;|&nbsp; <span class="muted">${d.terms_missing} awaiting terms</span>`;
+  if (d.errors) {
+    // One line per distinct message, not per code: a throttled scan reports the
+    // same error a thousand times.
+    const kinds = (d.error_kinds || []).join("; ");
+    html += ` &nbsp;|&nbsp; <span class="down" title="${kinds}">${d.errors} with errors</span>`;
+    if (kinds) html += ` <span class="muted">(${kinds})</span>`;
+  }
   if (d.session_error) html += ` &nbsp;|&nbsp; <span class="down">${d.session_error}</span>`;
   return html;
 }
@@ -299,13 +356,56 @@ async function runLiveWarrantScan() {
   if (statusEl) statusEl.textContent = Number(topN) === 0
     ? "Subscribing the entire chain — this takes a while…" : "Scanning…";
   try {
-    const res = await apiJson("/scan_live_warrant", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ underlying, top_n: Number(topN) }),
-    });
-    if (statusEl) statusEl.textContent = `+${res.added.length} added, -${res.removed.length} removed`;
+    const res = await _lwScanRequest(underlying, Number(topN), false);
+    if (statusEl) statusEl.textContent = _lwScanSummary(res);
   } catch (e) {
     if (statusEl) statusEl.textContent = e.message || String(e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// A refused scan (409) means nothing was changed — the resolved chain was so
+// much smaller than what is tracked that a truncated catalog response is the
+// likelier explanation. Deleting on that basis is how codes go missing, so the
+// re-run is an explicit confirmation rather than an automatic retry.
+async function _lwScanRequest(underlying, topN, force) {
+  try {
+    return await apiJson("/scan_live_warrant", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ underlying, top_n: topN, force }),
+    });
+  } catch (e) {
+    const msg = e && e.message ? e.message : String(e);
+    if (!force && /force/i.test(msg) && confirm(msg + "\n\nApply it anyway?")) {
+      return _lwScanRequest(underlying, topN, true);
+    }
+    throw e;
+  }
+}
+
+function _lwScanSummary(res) {
+  const parts = [`+${res.added.length} added, -${res.removed.length} removed`];
+  if (res.chain) parts.push(`chain ${res.chain}`);
+  if (res.failed && res.failed.length) parts.push(`${res.failed.length} pending retry`);
+  if (res.catalog_complete === false) parts.push("catalog incomplete");
+  if (res.volume_missing) parts.push(`${res.volume_missing} ranked without volume`);
+  return parts.join(" · ");
+}
+
+async function retryLiveWarrant() {
+  const statusEl = document.getElementById("live-status");
+  const btn = document.getElementById("live-retry-btn");
+  btn.disabled = true;
+  try {
+    const r = await apiJson("/retry_live_warrant", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+    });
+    if (statusEl) statusEl.textContent =
+      `retried: ${r.subscribed} subscribed, ${r.reseeded} re-seeded, ${r.terms} terms fetched, `
+      + `${r.pending} pending, ${r.terms_missing} still awaiting terms`;
+  } catch (e) {
+    if (statusEl) statusEl.textContent = "retry failed: " + (e.message || e);
   } finally {
     btn.disabled = false;
   }

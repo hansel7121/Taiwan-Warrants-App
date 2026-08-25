@@ -13,9 +13,22 @@ MAX_CONNECTIONS = 7
 MAX_TOTAL_SUBS = MAX_SUBS_PER_CONN * MAX_CONNECTIONS
 LEVELS = 5
 
+# How much of an underlying's tracked scan set a whole-chain rescan is allowed to
+# delete before it is treated as a bad catalog response rather than a real
+# delisting. Warrants do expire in batches, so this is deliberately loose; it
+# only has to catch the case where `intraday.tickers` answered with a fraction
+# of the chain.
+MAX_SCAN_SHRINK = 0.20
+
 
 class CapacityExceededError(RuntimeError):
     """Raised when an add/scan would push total subscriptions past the account cap."""
+
+
+class ChainShrinkError(RuntimeError):
+    """Raised when a scan's resolved chain is so much smaller than what is already
+    tracked for that underlying that a truncated catalog response is the likelier
+    explanation — the replace step would delete the difference."""
 
 
 def assign_slot(conn_counts, max_per_conn=MAX_SUBS_PER_CONN, max_connections=MAX_CONNECTIONS):
@@ -47,15 +60,31 @@ def scan_codes(codes, volumes, top_n):
     volume at all (pre-open, or the endpoint down), so a scan never silently
     subscribes nothing.
     """
-    ranked = sorted(volumes.items(), key=lambda kv: kv[1], reverse=True)
+    chain = set(codes)
+    # MIS is keyed independently of our chain lookup; anything it answers for
+    # that is not actually on this underlying must not be subscribed.
+    ranked = sorted(((c, v) for c, v in volumes.items() if c in chain),
+                    key=lambda kv: kv[1], reverse=True)
+    has_volume = bool(ranked and ranked[0][1])
+
     if not top_n:
-        ordered = [c for c, _v in ranked] if ranked and ranked[0][1] else list(codes)
+        ordered = [c for c, _v in ranked] if has_volume else list(codes)
         # Ranking only covers codes MIS answered for; append the rest so "all"
         # really is all.
         seen = set(ordered)
         return ordered + [c for c in codes if c not in seen]
-    ranked = ranked[:top_n]
-    return [c for c, _v in ranked] if ranked and ranked[0][1] else list(codes[:top_n])
+
+    if not has_volume:
+        return list(codes[:top_n])
+    picked = [c for c, _v in ranked[:top_n]]
+    # Top up from listing order when MIS answered for fewer than top_n codes: a
+    # throttled or failed volume batch has to cost the ranking its confidence,
+    # not cost the scan its size. Without this a half-failed MIS call silently
+    # subscribes fewer warrants than asked for.
+    if len(picked) < top_n:
+        seen = set(picked)
+        picked += [c for c in codes if c not in seen][:top_n - len(picked)]
+    return picked
 
 
 def scan_replace(existing, underlying, new_codes):
@@ -76,6 +105,47 @@ def plan_scan_replace(existing, underlying, new_codes, current_total, max_total=
     to_add, to_remove = scan_replace(existing, underlying, new_codes)
     check_capacity(current_total, len(to_add) - len(to_remove), max_total=max_total)
     return to_add, to_remove
+
+
+def scan_shrink_ratio(existing, underlying, new_codes):
+    """Fraction of this underlying's tracked scan rows the new chain would drop."""
+    tracked = {row["code"] for row in existing
+               if row.get("source") == "scan" and row.get("underlying") == underlying}
+    if not tracked:
+        return 0.0
+    return len(tracked - set(new_codes)) / len(tracked)
+
+
+def guard_chain_shrink(existing, underlying, new_codes, top_n, catalog_complete=True,
+                       max_shrink=MAX_SCAN_SHRINK, force=False):
+    """Refuse a replace that would delete too much of what is already tracked.
+
+    A truncated `intraday.tickers` response looks exactly like a chain that
+    shrank overnight, and `scan_replace` deletes the difference — so the
+    destructive half of a scan is gated on the new chain being about as large as
+    the old one. A ranked top-N scan is *meant* to drop codes that fell out of
+    the ranking, so it is only gated when the catalog itself came back
+    incomplete; in that case no shrink at all is allowed, because the codes that
+    "fell out" may simply be the ones the catalog failed to list.
+
+    Returns the shrink ratio when it lets the scan through, so the caller can
+    report it.
+    """
+    if force:
+        return 0.0
+    ratio = scan_shrink_ratio(existing, underlying, new_codes)
+    if not ratio:
+        return 0.0
+    if top_n and catalog_complete:
+        return ratio
+    limit = max_shrink if catalog_complete else 0.0
+    if ratio > limit:
+        reason = ("" if catalog_complete
+                  else " and the warrant catalog came back incomplete")
+        raise ChainShrinkError(
+            f"scan of {underlying} would drop {ratio:.0%} of the codes already tracked "
+            f"for it{reason} — nothing was changed. Re-run with force to apply anyway.")
+    return ratio
 
 
 def plan_manual_add(existing_codes, code, current_total, max_total=MAX_TOTAL_SUBS):

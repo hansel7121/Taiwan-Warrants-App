@@ -12,12 +12,14 @@ delegated to logic/live_warrant_logic.py (pure, unit tested); this module is
 the impure glue around them and is verified manually against the real Fubon
 connection during trading hours, not by the test suite.
 """
+import collections
 import os
 import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -40,6 +42,43 @@ MIS_WORKERS = 6
 # quota the Fugle REST endpoint enforces; raising it trades scan latency for a
 # higher chance of being throttled mid-scan.
 SEED_WORKERS = 8
+# The REST seed is the one call that gets throttled in bulk, and a throttled
+# seed used to be permanent: the code kept whatever placeholder name the failure
+# wrote and was never asked again. Retry it, then hand the leftovers to
+# retry_pending().
+SEED_RETRIES = 3
+SEED_BACKOFF_S = 0.6
+# Measured against this account on 2026-08-25: the Fugle REST quota is ~300
+# requests per rolling minute, shared across EVERY endpoint — once quotes
+# exhaust it, `intraday/tickers` 429s too. 800 quotes at 8 unbounded workers got
+# 299 through and then failed every remaining call with
+# "FugleAPIError 429 Rate limit exceeded"; the same 300 requests paced at 5/s
+# ran clean with zero errors. This is the ceiling every REST call now waits for
+# rather than discovers.
+REST_QUOTA = 300
+REST_QUOTA_WINDOW_S = 60.0
+# Longest a single call will block waiting for a slot before giving up. A scan
+# leaves what it can't seed for retry_pending(), so waiting out a whole window
+# inside a web request is never worth it.
+REST_ACQUIRE_TIMEOUT_S = 20.0
+# REST seeds a single scan request will spend inline. At 300/min a full TSMC
+# chain (~1,050 books) is 3.5 minutes of seeding — well past gunicorn's request
+# timeout — so the scan seeds what fits and retry_pending() drains the rest.
+SEED_BUDGET_PER_SCAN = 200
+# Contract terms come from intraday/ticker, which is a second call per code on
+# top of the book seed. They are static for a warrant's whole life, so they are
+# fetched once, cached, and never refreshed — and never fetched inline during a
+# scan, where they would double an already quota-bound request.
+TERMS_RETRY_BATCH = 60
+TW_TZ = ZoneInfo("Asia/Taipei")
+MIS_RETRIES = 3
+MIS_BACKOFF_S = 1.0
+# Codes re-attempted per retry_pending() call. Bounded so a scheduler tick that
+# inherits a fully failed 1,000-code scan still finishes promptly.
+PENDING_RETRY_BATCH = 100
+# Warrants are listed on both boards; scanning only TSE silently misses the
+# OTC-listed half of some chains.
+WARRANT_MARKETS = ("TSE", "OTC")
 MIS_HEADERS = {"User-Agent": "Mozilla/5.0",
                "Referer": "https://mis.twse.com.tw/stock/index.jsp"}
 
@@ -48,8 +87,118 @@ _books = {}       # code -> {"bids": [...], "asks": [...], "ts": datetime, "src"
 _names = {}       # code -> name
 _tracked = []     # codes, add order — mirrors live_warrant_tracked
 _connections = [] # each: {"sdk", "ws", "codes": set(), "sub_ids": {}, "state", "last_error"}
+_seeded = set()   # codes whose REST seed completed (an empty book still counts)
+_terms = {}       # code -> {"strike", "exercise_ratio", "maturity"}; static, fetched once
+_seed_errors = {}  # code -> last REST seed/subscribe error, cleared once it succeeds
+_pending = set()  # tracked codes with no live subscription — retried by retry_pending()
 _session_error = None  # set when the session can't even start (e.g. no credentials)
 _stopped_by_user = False  # set by stop_session(); blocks scheduler/add_code from silently reopening it
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REST quota
+# ─────────────────────────────────────────────────────────────────────────────
+class _RestQuota:
+    """Sliding-window limiter in front of every Fugle REST call.
+
+    The SDK does nothing to pace requests, so the seed fan-out used to find the
+    quota by hitting it: the first ~300 calls succeeded and every one after that
+    came back 429 until the window rolled. Waiting for a slot turns that into
+    latency instead of into a wall of failed seeds — which is what was showing
+    up in the name column.
+
+    A sliding window rather than a token bucket because that is what the server
+    enforces: the budget refills as individual requests age out, not in one lump.
+    """
+
+    def __init__(self, limit=REST_QUOTA, window=REST_QUOTA_WINDOW_S):
+        self._limit = limit
+        self._window = window
+        self._hits = collections.deque()
+        self._lock = threading.Lock()
+
+    def acquire(self, timeout=None):
+        """Claim one request slot. False if `timeout` elapsed without one."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                while self._hits and now - self._hits[0] >= self._window:
+                    self._hits.popleft()
+                if len(self._hits) < self._limit:
+                    self._hits.append(now)
+                    return True
+                wait = self._window - (now - self._hits[0])
+            if deadline is not None:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                wait = min(wait, left)
+            # Short slices so freed slots are picked up promptly and the waiting
+            # threads don't all wake on the same instant.
+            time.sleep(min(wait, 0.25) + 0.01)
+
+    def used(self):
+        with self._lock:
+            now = time.monotonic()
+            while self._hits and now - self._hits[0] >= self._window:
+                self._hits.popleft()
+            return len(self._hits)
+
+
+_rest_quota = _RestQuota()
+
+
+def _rest_call(label, fn, **params):
+    """Run one REST call against the shared quota."""
+    if not _rest_quota.acquire(timeout=REST_ACQUIRE_TIMEOUT_S):
+        raise RuntimeError(
+            f"REST quota exhausted: no slot for {label} within {REST_ACQUIRE_TIMEOUT_S:.0f}s "
+            f"({REST_QUOTA}/{REST_QUOTA_WINDOW_S:.0f}s)")
+    return fn(**params)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Diagnostics helpers
+# ─────────────────────────────────────────────────────────────────────────────
+def _error_detail(e):
+    """One readable line for an SDK error.
+
+    FugleAPIError's str() is a multi-line block carrying the URL, the params and
+    a 200-character dump of the response body; the status code and message are
+    the only parts worth putting in a log line or the status bar. Keeping them
+    is the difference between "(FugleAPIError)" — which says nothing — and
+    "FugleAPIError 429 Too Many Requests", which names the fix.
+    """
+    status = getattr(e, "status_code", None)
+    message = getattr(e, "message", None)
+    if status or message:
+        return " ".join(str(x) for x in (type(e).__name__, status, message) if x)
+    return f"{type(e).__name__}: {e}"
+
+
+def _is_placeholder_name(name):
+    """Whether a persisted name is one of the old exception placeholders.
+
+    Rows written before the seed path stopped renaming instruments still carry
+    "(FugleAPIError)" (or "(ConnectionError)", …) in live_warrant_tracked.name.
+    Treating those as "no name" is what lets retry_pending() re-fetch the real
+    one and update_name() overwrite the row — the pollution repairs itself on
+    the next trading-hour tick instead of needing a manual backfill.
+    """
+    name = (name or "").strip()
+    return name.startswith("(") and name.endswith(")")
+
+
+def _display_name(code):
+    """Cached name, falling back to the code itself.
+
+    Never returns a placeholder built from an exception class: that string used
+    to be written into `_names` and from there persisted into
+    live_warrant_tracked.name, so one throttled REST call renamed the warrant
+    permanently.
+    """
+    return _names.get(code) or code
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -222,25 +371,46 @@ def _reconnect_connection(conn):
 # Per-code subscribe/unsubscribe
 # ─────────────────────────────────────────────────────────────────────────────
 def _seed_from_rest(sdk, code):
-    """One REST quote per added code: names the instrument and fills its first book.
+    """One REST quote per added code: fills its first book and backfills the name.
 
     The books channel is update-only (pushes on change, no snapshot on
     subscribe), so a book with no recent activity would stay blank until a
     market maker requotes without this.
+
+    Failure is retried, then recorded in `_seed_errors` and left to
+    retry_pending() — it never touches `_names` and never removes the code. The
+    name is only a nicety: it also arrives in bulk from the ticker catalog on
+    the scan path, and the live prices come over the websocket regardless.
+    Returns True when the quote came back.
     """
-    try:
-        q = sdk.marketdata.rest_client.stock.intraday.quote(symbol=code)
-    except Exception as e:
-        with _lock:
-            _names.setdefault(code, f"({type(e).__name__})")
-        return
+    for attempt in range(1, SEED_RETRIES + 1):
+        try:
+            q = _rest_call(f"quote {code}",
+                           sdk.marketdata.rest_client.stock.intraday.quote, symbol=code)
+            break
+        except Exception as e:
+            detail = _error_detail(e)
+            if attempt == SEED_RETRIES:
+                with _lock:
+                    _seed_errors[code] = detail
+                print(f"LIVEWARRANT: seed {code} failed after {attempt} attempts: {detail}",
+                      flush=True)
+                return False
+            # Linear backoff: the common failure is a per-second REST quota, so
+            # waiting out the current second is usually enough.
+            time.sleep(SEED_BACKOFF_S * attempt)
 
     with _lock:
-        _names[code] = q.get("name") or _names.get(code) or "-"
+        _seed_errors.pop(code, None)
+        # Seeded means "the REST quote came back", not "the book had depth" — a
+        # genuinely empty book must not be re-seeded on every tick forever.
+        _seeded.add(code)
+        if q.get("name"):
+            _names[code] = q["name"]
 
     bids, asks = q.get("bids") or [], q.get("asks") or []
     if not bids and not asks:
-        return
+        return True
 
     stamp = q.get("lastUpdated")
     try:
@@ -249,6 +419,59 @@ def _seed_from_rest(sdk, code):
         ts = datetime.now(timezone.utc)
     with _lock:
         _books.setdefault(code, {"bids": bids, "asks": asks, "ts": ts, "src": "rest"})
+    return True
+
+
+def _parse_maturity(raw):
+    """Fugle's "20261016" -> a date. None for anything unparseable."""
+    try:
+        return datetime.strptime(str(raw), "%Y%m%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _days_to_expiry(maturity):
+    """Calendar days from today (Taipei) to maturity — negative once expired.
+
+    Recomputed on every read rather than stored: the strike and the ratio are
+    fixed for the warrant's life, but the DTE is only true for one day.
+    """
+    if maturity is None:
+        return None
+    return (maturity - datetime.now(TW_TZ).date()).days
+
+
+def _fetch_terms(sdk, code):
+    """Strike, exercise ratio and maturity for one code, from intraday/ticker.
+
+    intraday/quote — the call the book seed makes — carries none of these, so
+    this is a separate round trip. Cached permanently on success; a failure is
+    left uncached so the next retry_pending() pass picks it up again, and is
+    deliberately NOT written to `_seed_errors`, which tracks the streaming path.
+    """
+    try:
+        t = _rest_call(f"ticker {code}",
+                       sdk.marketdata.rest_client.stock.intraday.ticker, symbol=code) or {}
+    except Exception as e:
+        print(f"LIVEWARRANT: terms {code} failed: {_error_detail(e)}", flush=True)
+        return False
+
+    def num(key):
+        try:
+            v = float(t.get(key))
+        except (TypeError, ValueError):
+            return None
+        return v or None  # 0 means "not applicable" in this payload, not a real 0
+
+    with _lock:
+        _terms[code] = {
+            "strike": num("exercisePrice"),
+            "exercise_ratio": num("exerciseRatio"),
+            "maturity": _parse_maturity(t.get("maturityDate")),
+        }
+        if t.get("name"):
+            _names.setdefault(code, t["name"])
+    return True
 
 
 def _subscribe_one(code):
@@ -271,29 +494,71 @@ def _subscribe_one(code):
 
 
 def _track_one(code):
-    """Subscribe one code and seed its first book."""
+    """Subscribe one code and seed its first book.
+
+    Raises if the subscribe itself fails (the caller decides what that means);
+    a failed REST seed is recorded, not raised.
+    """
     conn = _subscribe_one(code)
+    with _lock:
+        _pending.discard(code)
     _seed_from_rest(conn["sdk"], code)
 
 
-def _track_many(codes):
+def _track_many(codes, seed_budget=None):
     """Subscribe a batch, then seed the books in parallel.
 
     The REST seed is one round-trip per code and is the whole cost of a large
     scan — a full TSMC chain is ~1,050 of them, which sequentially overruns
     gunicorn's request timeout and leaves the scan half-applied. Subscribing is
     still serial (see `_subscribe_one`); only the seeding fans out.
+
+    A per-code subscribe failure is collected and returned, never raised: this
+    used to abort the whole batch, which left the codes it had already reached
+    subscribed-but-unpersisted and the codes it never reached missing outright.
+    Anything that fails here stays in `_pending` and is picked up by
+    retry_pending() on the next scheduler tick.
     """
-    conns = [(code, _subscribe_one(code)) for code in codes]
-    if not conns:
-        return
-    with ThreadPoolExecutor(max_workers=SEED_WORKERS) as pool:
-        list(pool.map(lambda pair: _seed_from_rest(pair[1]["sdk"], pair[0]), conns))
+    conns, failed = [], []
+    for code in codes:
+        try:
+            conns.append((code, _subscribe_one(code)))
+        except Exception as e:
+            detail = _error_detail(e)
+            failed.append(code)
+            with _lock:
+                _pending.add(code)
+                _seed_errors[code] = f"subscribe failed: {detail}"
+            print(f"LIVEWARRANT: subscribe {code} failed: {detail}", flush=True)
+    with _lock:
+        for code, _conn in conns:
+            _pending.discard(code)
+    # Seeding is quota-bound (REST_QUOTA/minute), so a whole-chain scan cannot
+    # seed everything inside one web request. Spend the budget, leave the rest
+    # unseeded — those codes are subscribed and will fill from the websocket on
+    # the first requote, and retry_pending() seeds them at leisure.
+    to_seed = conns if seed_budget is None else conns[:seed_budget]
+    if to_seed:
+        with ThreadPoolExecutor(max_workers=SEED_WORKERS) as pool:
+            list(pool.map(lambda pair: _seed_from_rest(pair[1]["sdk"], pair[0]), to_seed))
+    if len(to_seed) < len(conns):
+        print(f"LIVEWARRANT: seeded {len(to_seed)}/{len(conns)} inline, "
+              f"{len(conns) - len(to_seed)} left for retry_pending", flush=True)
+    return failed
 
 
 def _untrack_one(code):
-    """Unsubscribe one code from whichever connection holds it."""
+    """Unsubscribe one code from whichever connection holds it.
+
+    The diagnostics state is cleared first: a code that never got subscribed at
+    all is only ever in `_pending`, so clearing it after the `conn is None`
+    early-return would leak it into the pending count forever.
+    """
     with _lock:
+        _pending.discard(code)
+        _seeded.discard(code)
+        _terms.pop(code, None)
+        _seed_errors.pop(code, None)
         conn = next((c for c in _connections if code in c["codes"]), None)
         sub_id = conn["sub_ids"].get(code) if conn else None
     if conn is None:
@@ -329,16 +594,111 @@ def start_session():
 
     with _lock:
         _tracked.clear()
+        _pending.clear()
+        _seeded.clear()
+        _seed_errors.clear()
+        # `_terms` deliberately survives a restart of the session: a warrant's
+        # strike, ratio and maturity never change, and re-fetching them would
+        # spend a full quota window on data we already have.
     for row in rows:
         code = row["code"]
+        stored = row.get("name")
+        usable = bool(stored) and not _is_placeholder_name(stored)
         with _lock:
-            _names[code] = row.get("name") or "-"
+            if usable:
+                _names[code] = stored
             _tracked.append(code)
+            _pending.add(code)
         try:
             _track_one(code)
+            # The seed above may have produced the first real name for a row
+            # written before it was subscribed, or for one still carrying an
+            # old "(FugleAPIError)" placeholder. Write it back so the pollution
+            # clears on its own rather than being re-read every restart.
+            with _lock:
+                fresh = _names.get(code)
+            if fresh and fresh != stored:
+                try:
+                    db_live_warrant.update_name(code, fresh)
+                except Exception as db_e:
+                    print(f"LIVEWARRANT: name backfill {code} failed: {db_e}", flush=True)
         except Exception as e:
-            _session_error = f"{code}: {type(e).__name__}: {e}"
-            print(f"LIVEWARRANT: track {code} failed: {e}", flush=True)
+            detail = _error_detail(e)
+            _session_error = f"{code}: {detail}"
+            with _lock:
+                _seed_errors[code] = detail
+            print(f"LIVEWARRANT: track {code} failed: {detail}", flush=True)
+
+
+def retry_pending(limit=PENDING_RETRY_BATCH):
+    """Re-attempt whatever the last scan/add could not finish.
+
+    This is what makes a throttled scan lossless rather than merely survivable:
+    every code is written to live_warrant_tracked before it is subscribed, so a
+    failure only ever leaves the code *pending*, and this pass — driven by the
+    scheduler's trading-hour tick — keeps working through the backlog until the
+    subscription and the name are both there. Nothing here is destructive; a
+    code is only dropped by an explicit remove or a scan replace.
+
+    Also backfills the contract terms (strike / exercise ratio / maturity) the
+    table shows, a bounded batch at a time — those are one REST call per code
+    and never change, so the work runs down to nothing.
+
+    Returns {"subscribed", "reseeded", "terms", "pending", "terms_missing"}.
+    """
+    with _lock:
+        if _stopped_by_user or not _connections:
+            return {"subscribed": 0, "reseeded": 0, "pending": len(_pending)}
+        todo = [c for c in _tracked if c in _pending][:limit]
+        # Subscribed but never successfully seeded — either the scan spent its
+        # inline budget before reaching it, or its quote failed. Both want the
+        # same thing: one more REST quote, paced by the quota.
+        reseed = [c for c in _tracked
+                  if c not in _pending and c not in _seeded][:limit]
+        # Terms are one-shot per code and never expire, so this list empties for
+        # good once every tracked warrant has been looked up.
+        need_terms = [c for c in _tracked if c not in _terms][:TERMS_RETRY_BATCH]
+
+    subscribed = 0
+    for code in todo:
+        try:
+            _track_one(code)
+            subscribed += 1
+        except Exception as e:
+            detail = _error_detail(e)
+            with _lock:
+                _seed_errors[code] = f"subscribe failed: {detail}"
+            print(f"LIVEWARRANT: retry subscribe {code} failed: {detail}", flush=True)
+
+    reseeded = 0
+    for code in reseed:
+        with _lock:
+            conn = next((c for c in _connections if code in c["codes"]), None)
+        if conn and _seed_from_rest(conn["sdk"], code):
+            reseeded += 1
+            with _lock:
+                name = _names.get(code)
+            if name:
+                try:
+                    db_live_warrant.update_name(code, name)
+                except Exception as e:
+                    print(f"LIVEWARRANT: name backfill {code} failed: {e}", flush=True)
+
+    termed = 0
+    for code in need_terms:
+        with _lock:
+            conn = _connections[0] if _connections else None
+        if conn and _fetch_terms(conn["sdk"], code):
+            termed += 1
+
+    with _lock:
+        still = len(_pending)
+        missing_terms = sum(1 for c in _tracked if c not in _terms)
+    if subscribed or reseeded or termed:
+        print(f"LIVEWARRANT: retry_pending subscribed={subscribed} reseeded={reseeded} "
+              f"terms={termed} pending={still} terms_missing={missing_terms}", flush=True)
+    return {"subscribed": subscribed, "reseeded": reseeded, "terms": termed,
+            "pending": still, "terms_missing": missing_terms}
 
 
 def _teardown():
@@ -350,6 +710,9 @@ def _teardown():
         _connections.clear()
         for conn in conns:
             conn["state"] = "closing"
+        # Nothing is subscribed any more, so every tracked code is pending again.
+        # The rows themselves are untouched — a teardown never drops a code.
+        _pending.update(_tracked)
     for conn in conns:
         try:
             conn["ws"].disconnect()
@@ -394,11 +757,28 @@ def add_code(code):
     if not live_warrant_logic.plan_manual_add(existing, code, current_total):
         return
 
-    _track_one(code)
+    # Persist first, subscribe second. The row is the record of what the user
+    # asked for; the subscription is best-effort and retried by retry_pending().
+    # Doing it the other way round meant a throttled or failed subscribe left
+    # nothing behind at all.
     with _lock:
-        name = _names.get(code) or code
         _tracked.append(code)
-    db_live_warrant.upsert_tracked(code, name, source="manual")
+        _pending.add(code)
+    db_live_warrant.upsert_tracked(code, _display_name(code), source="manual")
+
+    try:
+        _track_one(code)
+    except Exception as e:
+        detail = _error_detail(e)
+        with _lock:
+            _seed_errors[code] = f"subscribe failed: {detail}"
+        print(f"LIVEWARRANT: add {code} subscribe failed: {detail}", flush=True)
+        return
+
+    with _lock:
+        name = _names.get(code)
+    if name:
+        db_live_warrant.update_name(code, name)
 
 
 def remove_code(code):
@@ -424,7 +804,7 @@ def _remove_many(codes):
         _untrack_one(code)
 
 
-def scan_underlying(underlying, top_n):
+def scan_underlying(underlying, top_n, force=False):
     """Rank `underlying`'s warrants by traded volume and replace its previous
     scan rows with the top N — or with the WHOLE chain when `top_n` is 0.
 
@@ -432,12 +812,20 @@ def scan_underlying(underlying, top_n):
     full-chain case finish inside one request; the account-wide subscription cap
     is still enforced by `plan_scan_replace` before anything is subscribed, so an
     oversized scan is rejected outright rather than partially applied.
+
+    Nothing here can lose a code. The additions are persisted before any
+    subscribe is attempted and before any removal, per-code subscribe failures
+    are collected rather than raised, and `guard_chain_shrink` refuses the
+    destructive half outright when the resolved chain is suspiciously smaller
+    than what is already tracked (`force=True` overrides that, and is the only
+    way past it).
     """
-    _name, codes = _warrant_codes_for(underlying)
+    chain = _warrant_codes_for(underlying)
+    codes, catalog = chain["codes"], chain["names"]
     if not codes:
         raise RuntimeError(f"no warrants found for {underlying}")
 
-    vols = _mis_volumes(codes)
+    vols, vol_missing = _mis_volumes(codes)
     ranked_codes = live_warrant_logic.scan_codes(codes, vols, top_n)
 
     existing_rows = db_live_warrant.list_tracked()
@@ -445,20 +833,46 @@ def scan_underlying(underlying, top_n):
         current_total = len(_tracked)
     to_add, to_remove = live_warrant_logic.plan_scan_replace(
         existing_rows, underlying, ranked_codes, current_total)
+    shrink = live_warrant_logic.guard_chain_shrink(
+        existing_rows, underlying, ranked_codes, top_n,
+        catalog_complete=chain["complete"], force=force)
 
-    _remove_many(to_remove)
-    _track_many(to_add)
+    # Persist the additions BEFORE subscribing and BEFORE removing anything.
+    # The old order (remove, subscribe, then persist) lost codes outright: a
+    # subscribe that threw halfway left the deletions already committed and the
+    # additions never written. Now the tracked table is always a superset of
+    # what is live, and the subscriptions catch up.
+    rows = []
     with _lock:
-        rows = []
         for code in to_add:
-            _tracked.append(code)
-            rows.append({"code": code, "name": _names.get(code) or code,
+            if catalog.get(code):
+                _names[code] = catalog[code]
+            if code not in _tracked:
+                _tracked.append(code)
+            _pending.add(code)
+            rows.append({"code": code, "name": _display_name(code),
                          "source": "scan", "underlying": underlying})
     db_live_warrant.upsert_tracked_many(rows)
 
-    print(f"LIVEWARRANT: scan {underlying} top_n={top_n or 'all'} "
-          f"+{len(to_add)} -{len(to_remove)} tracked={len(_tracked)}", flush=True)
-    return {"added": to_add, "removed": to_remove}
+    failed = _track_many(to_add, seed_budget=SEED_BUDGET_PER_SCAN)
+    _remove_many(to_remove)
+
+    with _lock:
+        tracked_now, pending_now = len(_tracked), len(_pending)
+    print(f"LIVEWARRANT: scan {underlying} top_n={top_n or 'all'} chain={len(codes)} "
+          f"+{len(to_add)} -{len(to_remove)} failed={len(failed)} "
+          f"tracked={tracked_now} pending={pending_now} "
+          f"catalog_complete={chain['complete']} vol_missing={len(vol_missing)}", flush=True)
+    return {
+        "added": to_add,
+        "removed": to_remove,
+        "failed": failed,
+        "chain": len(codes),
+        "catalog_complete": chain["complete"],
+        "volume_missing": len(vol_missing),
+        "shrink": round(shrink, 4),
+        "pending": pending_now,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -471,41 +885,96 @@ def _rest_client():
     return conn["sdk"].marketdata.rest_client.stock
 
 
+def _tickers(rest, **params):
+    """One ticker-catalog page, as (rows, ok).
+
+    `ok` is False when the call failed or answered with nothing. The catalog is
+    the only thing that decides which codes exist, so a truncated answer is not
+    an empty chain — the caller has to be able to tell the two apart before it
+    lets a scan delete anything.
+    """
+    try:
+        rows = (_rest_call(f"tickers {params}", rest.intraday.tickers, **params) or {}).get("data") or []
+    except Exception as e:
+        print(f"LIVEWARRANT: ticker catalog {params} failed: {_error_detail(e)}", flush=True)
+        return [], False
+    if not rows:
+        print(f"LIVEWARRANT: ticker catalog {params} came back empty", flush=True)
+        return [], False
+    return rows, True
+
+
 def _warrant_codes_for(stock_code):
     """Every listed warrant on one underlying, matched by name (see the fuller
     docstring on the original in scripts/fubon_quote_viewer.py::_warrant_codes_for
-    for why this can't be a plain prefix test)."""
-    rest = _rest_client()
-    name = (rest.intraday.ticker(symbol=stock_code) or {}).get("name")
-    if not name:
-        return name, []
+    for why this can't be a plain prefix test).
 
-    warrants = (rest.intraday.tickers(type="WARRANT", market="TSE") or {}).get("data") or []
+    Returns {"name", "codes", "names", "complete"}. `names` is the catalog's own
+    symbol -> name map, which is what lets the scan path label every warrant
+    without a single per-code REST quote — the call that gets throttled in bulk
+    and used to leave "(FugleAPIError)" as the instrument's name. `complete` is
+    False when any catalog page failed or came back empty, and gates the
+    destructive half of a scan.
+    """
+    rest = _rest_client()
+    name = (_rest_call(f"ticker {stock_code}", rest.intraday.ticker, symbol=stock_code)
+            or {}).get("name")
+    if not name:
+        return {"name": name, "codes": [], "names": {}, "complete": False}
+
+    complete = True
+    warrants = []
+    for market in WARRANT_MARKETS:
+        rows, ok = _tickers(rest, type="WARRANT", market=market)
+        complete = complete and ok
+        warrants.extend(rows)
+    if not warrants:
+        raise RuntimeError(
+            f"warrant catalog came back empty for every market — refusing to scan "
+            f"{stock_code} against nothing")
+
     real = []
     for market in ("TSE", "OTC"):
-        rows = (rest.intraday.tickers(type="EQUITY", market=market) or {}).get("data") or []
+        rows, ok = _tickers(rest, type="EQUITY", market=market)
+        complete = complete and ok
         real.extend(r.get("name") or "" for r in rows)
 
     longer = [n for n in real if len(n) > len(name) and n.startswith(name)]
-    codes = [w["symbol"] for w in warrants
-             if (w.get("name") or "").startswith(name)
-             and not any((w.get("name") or "").startswith(n) for n in longer)]
-    return name, codes
+    matched = [w for w in warrants
+               if (w.get("name") or "").startswith(name)
+               and not any((w.get("name") or "").startswith(n) for n in longer)]
+    codes = [w["symbol"] for w in matched]
+    names = {w["symbol"]: w.get("name") for w in matched if w.get("name")}
+    return {"name": name, "codes": codes, "names": names, "complete": complete}
 
 
 def _mis_volumes(codes):
-    """Accumulated traded volume (張) per code, from TWSE MIS in bulk."""
+    """Accumulated traded volume (張) per code, from TWSE MIS in bulk.
+
+    Returns (volumes, missing). A code MIS never answered for and a code that
+    genuinely traded zero are indistinguishable once they are both absent from
+    the ranking, so a dropped batch would quietly demote real warrants out of a
+    top-N scan. Batches are retried, and whatever is still missing is reported
+    so the caller can say so instead of silently ranking on a hole.
+    """
     batches = [codes[i:i + MIS_BATCH] for i in range(0, len(codes), MIS_BATCH)]
 
     def one(batch):
-        try:
-            r = requests.get(MIS_URL, timeout=15, headers=MIS_HEADERS, params={
-                "ex_ch": "|".join(f"tse_{c}.tw" for c in batch),
-                "json": "1", "delay": "0"})
-            return r.json().get("msgArray") or []
-        except Exception as e:
-            print(f"LIVEWARRANT: MIS batch failed: {e}", flush=True)
-            return []
+        for attempt in range(1, MIS_RETRIES + 1):
+            try:
+                r = requests.get(MIS_URL, timeout=15, headers=MIS_HEADERS, params={
+                    "ex_ch": "|".join(f"tse_{c}.tw" for c in batch),
+                    "json": "1", "delay": "0"})
+                rows = r.json().get("msgArray") or []
+                if rows:
+                    return rows
+            except Exception as e:
+                if attempt == MIS_RETRIES:
+                    print(f"LIVEWARRANT: MIS batch failed after {attempt} attempts: {e}",
+                          flush=True)
+                    return []
+            time.sleep(MIS_BACKOFF_S * attempt)
+        return []
 
     out = {}
     with ThreadPoolExecutor(max_workers=MIS_WORKERS) as pool:
@@ -515,7 +984,12 @@ def _mis_volumes(codes):
                     out[row.get("c")] = int(row.get("v") or 0)
                 except (TypeError, ValueError):
                     continue
-    return out
+
+    missing = [c for c in codes if c not in out]
+    if missing:
+        print(f"LIVEWARRANT: MIS answered for {len(out)}/{len(codes)} codes — "
+              f"{len(missing)} ranked without volume", flush=True)
+    return out, missing
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -529,6 +1003,13 @@ def get_data():
             for i, c in enumerate(_connections)
         ]
         tracked_snapshot = list(_tracked)
+        pending_count = len(_pending)
+        # The distinct failure strings, not one per code: a throttled scan
+        # produces the same message a thousand times over.
+        error_kinds = sorted(set(_seed_errors.values()))
+        error_count = len(_seed_errors)
+        unseeded = sum(1 for c in tracked_snapshot if c not in _seeded)
+        terms_missing = sum(1 for c in tracked_snapshot if c not in _terms)
     return {
         "connected": any(c["state"] == "connected" for c in conn_snapshot),
         "session_error": _session_error,
@@ -536,19 +1017,41 @@ def get_data():
         "subs": sum(c["subs"] for c in conn_snapshot),
         "max_subs": live_warrant_logic.MAX_TOTAL_SUBS,
         "max_connections": live_warrant_logic.MAX_CONNECTIONS,
+        "tracked": len(tracked_snapshot),
+        "pending": pending_count,
+        "unseeded": unseeded,
+        "terms_missing": terms_missing,
+        "quota_used": _rest_quota.used(),
+        "quota_limit": REST_QUOTA,
+        "errors": error_count,
+        "error_kinds": error_kinds[:5],
         "books": [_ladder_payload(code) for code in tracked_snapshot],
     }
 
 
 def _ladder_payload(code):
+    """One tracked code's row.
+
+    `pending` and `error` are carried per code so a degraded row is visibly
+    degraded — the name column shows the code, and the reason lives in its own
+    field. Writing the reason into the name is what produced "(FugleAPIError)".
+    """
     with _lock:
         book = _books.get(code)
-        name = _names.get(code, "-")
+        name = _display_name(code)
+        pending = code in _pending
+        error = _seed_errors.get(code)
+        terms = _terms.get(code) or {}
+    base = {
+        "code": code, "name": name, "pending": pending, "error": error,
+        "strike": terms.get("strike"),
+        "exercise_ratio": terms.get("exercise_ratio"),
+        "dte": _days_to_expiry(terms.get("maturity")),
+    }
     if book is None:
-        return {"code": code, "name": name, "rows": [], "age": None, "src": None}
+        return {**base, "rows": [], "age": None, "src": None}
     return {
-        "code": code,
-        "name": name,
+        **base,
         "rows": live_warrant_logic.ladder_rows(book["bids"], book["asks"]),
         "age": round((datetime.now(timezone.utc) - book["ts"]).total_seconds(), 1),
         "src": book.get("src"),
