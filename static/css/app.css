@@ -380,27 +380,24 @@ tbody tr.row-pinned td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 #tab-live .live-degraded { opacity: .55; }
 #tab-live tr.live-degraded td:first-child { border-left: 2px solid var(--accent); }
 #tab-live .live-term { color: var(--muted); white-space: nowrap; text-align: right; }
+/* Best Bid/Ask carry both .live-term (spacing/alignment) and .bid/.ask (color);
+   these need the extra specificity so the color wins over .live-term's muted grey. */
+#tab-live .live-term.bid { color: var(--put); }
+#tab-live .live-term.ask { color: var(--call); }
 #tab-live .live-dte-near { color: var(--accent); font-weight: 600; }
 #tab-live .live-updated { min-width: 6.5em; color: var(--muted); }
 #tab-live .live-vol { color: var(--muted); font-size: .9em; }
-#tab-live .live-view-toggle { display: inline-flex; gap: 4px; }
-#tab-live .live-view-toggle button.active { background: var(--accent-soft); border-color: var(--accent); }
 
-/* Orderbook card grid, mirrors scripts/fubon_quote_viewer.py's layout */
-#live-orderbook-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
-                        gap: 1rem 1.5rem; align-items: start; }
-#live-orderbook-grid .live-book { border: 1px solid var(--border); border-radius: 6px; padding: .6rem .8rem;
-                                   min-height: 15rem; display: flex; flex-direction: column;
-                                   min-width: 0; box-sizing: border-box; overflow-x: auto; }
-#live-orderbook-grid .live-book h3 { margin: 0 0 .4rem; font-size: .85rem; line-height: 1.25;
-                                      min-height: 3.75em; white-space: normal; overflow-wrap: break-word; }
-#live-orderbook-grid table { border-collapse: collapse; font-variant-numeric: tabular-nums; width: 100%; }
-#live-orderbook-grid th, #live-orderbook-grid td { padding: .25rem .5rem; text-align: right;
-                                                    border-bottom: 1px solid var(--border); white-space: nowrap; }
-#live-orderbook-grid th { font-size: .7rem; text-transform: uppercase; color: var(--muted); font-weight: 500; }
-#live-orderbook-grid tr.best td { font-weight: 700; }
-#live-orderbook-grid .lv { color: var(--muted); font-size: .75rem; text-align: center; }
-#live-orderbook-grid .live-book-meta { color: var(--muted); font-size: .8rem; margin-top: .3rem; }
+/* Collapsible book-change log at the bottom of the tab — <details>/<summary>
+   gives the expand/collapse triangle natively, no custom toggle JS needed. */
+#live-console-log { margin-top: 14px; border: 1px solid var(--border); border-radius: 6px; }
+#live-console-log summary { cursor: pointer; padding: 6px 10px; font-size: 12px;
+                             color: var(--muted); user-select: none; }
+#live-console-log[open] summary { border-bottom: 1px solid var(--border); }
+#live-console-log-body { max-height: 260px; overflow-y: auto; padding: 6px 10px;
+                          font-family: monospace; font-size: 11px; color: var(--muted);
+                          white-space: pre-wrap; }
+#live-console-log-body > div:hover { color: var(--text); }
 
 /* ── Product picker search ── */
 .product-search {

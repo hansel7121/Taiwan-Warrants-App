@@ -47,6 +47,39 @@ def calc_real_leverage(S, delta, ask):
     return S * delta / ask
 
 
+def _pct_of_spot(value, S):
+    """`value` as a % of spot; NaN in, NaN out. Mirrors `warrant_frame_py._pct_of_spot`."""
+    if value is None or not np.isfinite(value):
+        return np.nan
+    return round(value / S * 100, 4)
+
+
+def solve_tick(S, K, ratio, is_put, bid, ask):
+    """Live Warrant tab tick kernel: time-value columns only, for one warrant's
+    current best bid/ask. Deliberately does NOT solve IV, delta or leverage —
+    those are never computed for this feature, not even as an unexposed
+    intermediate — so this needs no T/r input at all. Mirrors the time-value
+    block of `warrant_frame_py.build_warrant_df` (and Rust's `tick.rs`) exactly,
+    minus `intrinsic` (only `time_value_am` needed it, and that column is
+    dropped). Returns (time_value, bid_time_value_pct, ask_time_value_pct).
+    """
+    distance_to_strike = (S - K) if is_put else (K - S)
+
+    # A live tick must never raise on a bad ratio — degrade that one field to
+    # NaN (rendered "—") rather than crash the tick pipeline.
+    def _div(x, y):
+        return x / y if y != 0 else np.nan
+
+    time_value = _div(ask, ratio) + distance_to_strike if ask > 0 else np.nan
+    bid_time_value = _div(bid, ratio) + distance_to_strike if bid > 0 else np.nan
+
+    return (
+        round(time_value, 4) if np.isfinite(time_value) else np.nan,
+        _pct_of_spot(bid_time_value, S),
+        _pct_of_spot(time_value, S),
+    )
+
+
 def implied_vol(price, S, K, T, r, ratio, is_put=False):
     if price <= 0 or T <= 0:
         return np.nan

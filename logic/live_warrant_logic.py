@@ -170,3 +170,74 @@ def ladder_rows(bids, asks, levels=LEVELS):
             "ask_size": ask["size"] if ask else None,
         })
     return rows
+
+
+def best_level(bids, asks):
+    """Best (level-1) bid/ask price+size only — the collapsed display, replacing
+    ladder_rows for a table that no longer shows the full 5-level depth."""
+    bid = bids[0] if bids else None
+    ask = asks[0] if asks else None
+    return {
+        "bid": bid["price"] if bid else None,
+        "bid_size": bid["size"] if bid else None,
+        "ask": ask["price"] if ask else None,
+        "ask_size": ask["size"] if ask else None,
+    }
+
+
+def _best(levels):
+    return levels[0] if levels else None
+
+
+def best_level_changed(old_book, new_bids, new_asks):
+    """Whether the top of book moved — the dirty gate for a tick-driven recompute.
+
+    True on the first tick (`old_book is None`) or when the best bid/ask price
+    or size differs from before. A level-2..5 requote that leaves the best
+    level untouched must NOT dirty the code: every displayed/derived column
+    depends only on the best level, so recomputing for a deep-book-only change
+    would waste exactly the compute this design exists to avoid.
+    """
+    if old_book is None:
+        return True
+    old_bid = _best(old_book.get("bids") or [])
+    old_ask = _best(old_book.get("asks") or [])
+    new_bid = _best(new_bids)
+    new_ask = _best(new_asks)
+    return old_bid != new_bid or old_ask != new_ask
+
+
+def _fmt_level(level):
+    return f"{level['price']}x{level['size']}" if level else "—"
+
+
+def describe_book_change(old_book, new_bids, new_asks):
+    """Human-readable summary of what moved at the top of book, for the console log."""
+    new_bid = _best(new_bids)
+    new_ask = _best(new_asks)
+    if old_book is None:
+        return f"seeded: bid {_fmt_level(new_bid)}, ask {_fmt_level(new_ask)}"
+
+    old_bid = _best(old_book.get("bids") or [])
+    old_ask = _best(old_book.get("asks") or [])
+
+    parts = []
+    if old_bid != new_bid:
+        parts.append(f"bid {_fmt_level(old_bid)} -> {_fmt_level(new_bid)}")
+    if old_ask != new_ask:
+        parts.append(f"ask {_fmt_level(old_ask)} -> {_fmt_level(new_ask)}")
+    return "; ".join(parts) if parts else "no change"
+
+
+def parse_warrant_type(name):
+    """"Call"/"Put"/None from the standard 購(call)/售(put) character in a
+    warrant's Chinese name. Fubon's contract-terms payload carries no explicit
+    call/put flag (confirmed against a live probe), so this is the only
+    self-contained source available without joining a second data feed."""
+    if not name:
+        return None
+    if "購" in name:
+        return "Call"
+    if "售" in name:
+        return "Put"
+    return None

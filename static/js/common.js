@@ -484,6 +484,23 @@ function bfPayload(hostId) {
   return out;
 }
 
+// Numeric bounds keyed by spec key, for a consumer that filters already-loaded
+// rows client-side instead of sending a server request (the Live Warrant tab
+// streams continuously, so there is no per-filter-change request to build).
+function bfBounds(hostId) {
+  const c = _BF[hostId];
+  const out = {};
+  if (!c) return out;
+  for (const f of c.spec) {
+    const s = c.state[f.key];
+    out[f.key] = {
+      min: f.min && s.min !== "" ? Number(s.min) : null,
+      max: f.max && s.max !== "" ? Number(s.max) : null,
+    };
+  }
+  return out;
+}
+
 // ── Boot ─────────────────────────────────────────────────────────────
 // Auth gate + first render. Lives here, not in portfolio.js, because user mode
 // never loads portfolio.js and would otherwise boot without a session check.

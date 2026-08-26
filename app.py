@@ -574,6 +574,16 @@ def live_warrant_data():
     return jsonify(live_warrant.get_data())
 
 
+@app.route("/live_warrant_log")
+@require_auth
+@require_role(ADMIN)
+def live_warrant_log():
+    """Book-change console log entries newer than `since`, for the Live
+    Warrant tab's collapsible log panel."""
+    since = request.args.get("since", type=int, default=0)
+    return jsonify(live_warrant.get_console_log(since))
+
+
 @app.route("/add_live_warrant", methods=["POST"])
 @require_auth
 @require_role(ADMIN)

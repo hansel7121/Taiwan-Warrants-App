@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from logic import live_warrant_logic
+from logic import iv_engine, live_warrant_logic
 from services import db_live_warrant
 from services.broker import credentials as broker_credentials
 
@@ -93,6 +93,29 @@ _seed_errors = {}  # code -> last REST seed/subscribe error, cleared once it suc
 _pending = set()  # tracked codes with no live subscription — retried by retry_pending()
 _session_error = None  # set when the session can't even start (e.g. no credentials)
 _stopped_by_user = False  # set by stop_session(); blocks scheduler/add_code from silently reopening it
+
+# ── Live Warrant tab analytics: tick-driven dirty tracking ─────────────────
+# A warrant's derived columns are only ever recomputed when ITS OWN best bid/
+# ask moves (see _handle_message/_recompute_if_dirty) — never on a timer, and
+# never because the underlying or a sibling warrant ticked. This is what keeps
+# an illiquid warrant from burning compute it never asked for.
+_book_seq = {}        # code -> int, bumped only when the code's best level changes
+_computed = {}         # code -> {"seq", "time_value", "bid_time_value_pct", "ask_time_value_pct"}
+_pending_log = {}      # code -> deque of {"seq","ts","diff"} awaiting a recompute to log against
+_underlying_of = {}    # code -> underlying stock code, mirrors live_warrant_tracked.underlying
+_underlying_books = {}  # underlying code -> {"price", "ts", "src"} — best-bid/best-ask midpoint
+_underlying_codes = set()  # underlying codes currently subscribed on the same connection pool
+_volumes = {}           # code -> int, MIS-sourced, refreshed on the retry_pending() cadence
+_console_log = collections.deque(maxlen=1000)
+_console_log_next_id = 0
+CONSOLE_LOG_PER_CODE = 20  # queued-but-not-yet-recomputed diffs kept per code before the oldest drops
+VOLUME_RETRY_BATCH = 300   # tracked codes refreshed per retry_pending() call — cheap, bypasses the Fugle quota
+# Underlyings whose own price is subscribed live (books-channel midpoint) for
+# tick-driven recompute. Scoped to TSMC only for initial validation against a
+# real, highly liquid symbol before any wider rollout — see
+# docs/fubon_connection_runbook.md and the plan this shipped under. Trivially
+# widened once confirmed correct.
+UNDERLYING_LIVE_PRICE_ALLOWLIST = {"2330"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -288,13 +311,49 @@ def _handle_message(conn, raw):
     code = data.get("symbol")
     if not code:
         return
+
+    new_bids, new_asks = data.get("bids") or [], data.get("asks") or []
     with _lock:
+        if code in _underlying_codes:
+            _fold_underlying_tick_locked(code, new_bids, new_asks)
+            return
+        old_book = _books.get(code)
+        dirty = live_warrant_logic.best_level_changed(old_book, new_bids, new_asks)
         _books[code] = {
-            "bids": data.get("bids") or [],
-            "asks": data.get("asks") or [],
+            "bids": new_bids,
+            "asks": new_asks,
             "ts": datetime.now(timezone.utc),
             "src": "ws",
         }
+        # A level-2..5-only requote does not dirty the code: every displayed
+        # column depends solely on the best level, so recomputing here would
+        # burn exactly the compute this design exists to avoid.
+        if dirty:
+            _book_seq[code] = _book_seq.get(code, 0) + 1
+            diff = live_warrant_logic.describe_book_change(old_book, new_bids, new_asks)
+            _pending_log.setdefault(code, collections.deque(maxlen=CONSOLE_LOG_PER_CODE)).append(
+                {"seq": _book_seq[code], "ts": datetime.now(timezone.utc), "diff": diff})
+
+
+def _fold_underlying_tick_locked(code, bids, asks):
+    """Best-bid/best-ask midpoint into `_underlying_books`. Assumes `_lock` is
+    already held (safe re-entry — `_lock` is a `threading.RLock`).
+
+    Falls back to the one side available when the book is one-sided, and
+    leaves the last known price untouched when the tick carries neither side
+    (a warrant's own next tick just uses whatever price is currently cached).
+    """
+    best = live_warrant_logic.best_level(bids, asks)
+    bid, ask = best.get("bid"), best.get("ask")
+    if bid is not None and ask is not None:
+        price = (bid + ask) / 2
+    elif bid is not None:
+        price = bid
+    elif ask is not None:
+        price = ask
+    else:
+        return
+    _underlying_books[code] = {"price": price, "ts": datetime.now(timezone.utc), "src": "ws"}
 
 
 def _handle_control(conn, event, message):
@@ -441,6 +500,20 @@ def _days_to_expiry(maturity):
     return (maturity - datetime.now(TW_TZ).date()).days
 
 
+def _nan_to_none(v):
+    """A bare NaN literal from `jsonify` breaks `JSON.parse` client-side (see
+    app.py's `_rows_json` docstring for the same trap on the Scanner path,
+    worked around there via `to_json`'s NaN->null instead — this path has no
+    dataframe to reach for that). `iv_engine.solve_tick` returns `np.nan` for
+    a missing side."""
+    try:
+        if v != v:  # NaN is the only float that is not equal to itself
+            return None
+    except TypeError:
+        pass
+    return v
+
+
 def _fetch_terms(sdk, code):
     """Strike, exercise ratio and maturity for one code, from intraday/ticker.
 
@@ -505,6 +578,30 @@ def _track_one(code):
     _seed_from_rest(conn["sdk"], code)
 
 
+def _subscribe_underlying(code):
+    """Idempotent: subscribe one underlying stock to the same books channel
+    the warrant codes use, for a live tick-driven price (see
+    `_fold_underlying_tick_locked`). Reuses the existing connection pool
+    exactly as a warrant subscribe does — capacity is negligible, one extra
+    subscription per allow-listed underlying against the 2,100 cap.
+
+    Non-fatal on failure, same pattern as `_track_many`'s per-code handling:
+    an underlying that fails to subscribe just means that underlying's
+    warrants keep degrading to "—" on the price-dependent columns, not that
+    the whole session breaks.
+    """
+    with _lock:
+        if code in _underlying_codes:
+            return
+        _underlying_codes.add(code)
+    try:
+        _subscribe_one(code)
+    except Exception as e:
+        with _lock:
+            _underlying_codes.discard(code)
+        print(f"LIVEWARRANT: underlying subscribe {code} failed: {_error_detail(e)}", flush=True)
+
+
 def _track_many(codes, seed_budget=None):
     """Subscribe a batch, then seed the books in parallel.
 
@@ -559,6 +656,11 @@ def _untrack_one(code):
         _seeded.discard(code)
         _terms.pop(code, None)
         _seed_errors.pop(code, None)
+        _book_seq.pop(code, None)
+        _computed.pop(code, None)
+        _pending_log.pop(code, None)
+        _volumes.pop(code, None)
+        _underlying_of.pop(code, None)
         conn = next((c for c in _connections if code in c["codes"]), None)
         sub_id = conn["sub_ids"].get(code) if conn else None
     if conn is None:
@@ -597,6 +699,7 @@ def start_session():
         _pending.clear()
         _seeded.clear()
         _seed_errors.clear()
+        _underlying_of.clear()
         # `_terms` deliberately survives a restart of the session: a warrant's
         # strike, ratio and maturity never change, and re-fetching them would
         # spend a full quota window on data we already have.
@@ -609,6 +712,7 @@ def start_session():
                 _names[code] = stored
             _tracked.append(code)
             _pending.add(code)
+            _underlying_of[code] = row.get("underlying")
         try:
             _track_one(code)
             # The seed above may have produced the first real name for a row
@@ -629,6 +733,14 @@ def start_session():
                 _seed_errors[code] = detail
             print(f"LIVEWARRANT: track {code} failed: {detail}", flush=True)
 
+    # Underlying-price subscriptions are not persisted anywhere — re-derived
+    # from the tracked list's own `underlying` column every (re)start, same as
+    # the warrant subscriptions themselves.
+    with _lock:
+        underlyings = {u for u in _underlying_of.values() if u in UNDERLYING_LIVE_PRICE_ALLOWLIST}
+    for underlying in underlyings:
+        _subscribe_underlying(underlying)
+
 
 def retry_pending(limit=PENDING_RETRY_BATCH):
     """Re-attempt whatever the last scan/add could not finish.
@@ -642,7 +754,11 @@ def retry_pending(limit=PENDING_RETRY_BATCH):
 
     Also backfills the contract terms (strike / exercise ratio / maturity) the
     table shows, a bounded batch at a time — those are one REST call per code
-    and never change, so the work runs down to nothing.
+    and never change, so the work runs down to nothing. And refreshes the
+    Live Warrant tab's Volume column via `_mis_volumes()` for the whole
+    tracked list every call — safe to do every tick since that call goes
+    straight to TWSE MIS (`requests.get`), bypassing the Fugle REST quota
+    entirely, unlike everything else in this function.
 
     Returns {"subscribed", "reseeded", "terms", "pending", "terms_missing"}.
     """
@@ -658,6 +774,12 @@ def retry_pending(limit=PENDING_RETRY_BATCH):
         # Terms are one-shot per code and never expire, so this list empties for
         # good once every tracked warrant has been looked up.
         need_terms = [c for c in _tracked if c not in _terms][:TERMS_RETRY_BATCH]
+        volume_batch = list(_tracked)[:VOLUME_RETRY_BATCH]
+
+    if volume_batch:
+        vols, _missing = _mis_volumes(volume_batch)
+        with _lock:
+            _volumes.update(vols)
 
     subscribed = 0
     for code in todo:
@@ -825,6 +947,9 @@ def scan_underlying(underlying, top_n, force=False):
     if not codes:
         raise RuntimeError(f"no warrants found for {underlying}")
 
+    if underlying in UNDERLYING_LIVE_PRICE_ALLOWLIST:
+        _subscribe_underlying(underlying)
+
     vols, vol_missing = _mis_volumes(codes)
     ranked_codes = live_warrant_logic.scan_codes(codes, vols, top_n)
 
@@ -850,6 +975,7 @@ def scan_underlying(underlying, top_n, force=False):
             if code not in _tracked:
                 _tracked.append(code)
             _pending.add(code)
+            _underlying_of[code] = underlying
             rows.append({"code": code, "name": _display_name(code),
                          "source": "scan", "underlying": underlying})
     db_live_warrant.upsert_tracked_many(rows)
@@ -1010,6 +1136,7 @@ def get_data():
         error_count = len(_seed_errors)
         unseeded = sum(1 for c in tracked_snapshot if c not in _seeded)
         terms_missing = sum(1 for c in tracked_snapshot if c not in _terms)
+        console_log_id = _console_log_next_id
     return {
         "connected": any(c["state"] == "connected" for c in conn_snapshot),
         "session_error": _session_error,
@@ -1025,8 +1152,87 @@ def get_data():
         "quota_limit": REST_QUOTA,
         "errors": error_count,
         "error_kinds": error_kinds[:5],
+        "console_log_id": console_log_id,
         "books": [_ladder_payload(code) for code in tracked_snapshot],
     }
+
+
+def _recompute_if_dirty(code):
+    """Recompute one code's derived (tick-kernel) columns, but only when its
+    best level has actually moved since the last computed value — the gate
+    that keeps an illiquid warrant's columns from being recomputed on every
+    500ms poll. Missing inputs (terms not backfilled yet, underlying not
+    priced yet — only TSMC is live-priced today, expired) leave whatever is
+    cached untouched, same degrade-to-"—" pattern the tab already uses for
+    strike/DTE; the queued console-log diffs stay pending until the inputs
+    do show up, rather than being dropped.
+    """
+    with _lock:
+        seq = _book_seq.get(code)
+        if seq is None:
+            return  # never ticked yet
+        cached = _computed.get(code)
+        if cached is not None and cached["seq"] == seq:
+            return  # already current
+
+        book = _books.get(code)
+        terms = _terms.get(code) or {}
+        strike = terms.get("strike")
+        ratio = terms.get("exercise_ratio")
+        dte = _days_to_expiry(terms.get("maturity"))
+        underlying = _underlying_of.get(code)
+        underlying_price = (
+            _underlying_books.get(underlying, {}).get("price") if underlying else None
+        )
+        type_label = live_warrant_logic.parse_warrant_type(_display_name(code))
+
+        if (book is None or strike is None or ratio is None or underlying_price is None
+                or type_label is None or (dte is not None and dte <= 0)):
+            return
+
+        bids, asks = book["bids"], book["asks"]
+        pending_diffs = list(_pending_log.get(code) or [])
+        _pending_log.pop(code, None)
+
+    best = live_warrant_logic.best_level(bids, asks)
+    bid, ask = best.get("bid") or 0.0, best.get("ask") or 0.0
+    is_put = type_label == "Put"
+
+    t0 = time.perf_counter()
+    time_value, bid_pct, ask_pct = iv_engine.solve_tick(
+        underlying_price, strike, ratio, is_put, bid, ask)
+    duration_s = round(time.perf_counter() - t0, 4)
+
+    global _console_log_next_id
+    with _lock:
+        _computed[code] = {
+            "seq": seq,
+            # NaN -> None: a bare NaN literal from jsonify breaks JSON.parse
+            # (the same trap /read_warrant works around with to_json instead
+            # of jsonify — this path has no dataframe to reach for that, so
+            # it sanitizes by hand).
+            "time_value": _nan_to_none(time_value),
+            "bid_time_value_pct": _nan_to_none(bid_pct),
+            "ask_time_value_pct": _nan_to_none(ask_pct),
+        }
+        for entry in pending_diffs:
+            _console_log_next_id += 1
+            _console_log.append({
+                "id": _console_log_next_id,
+                "ts": entry["ts"].isoformat(),
+                "code": code,
+                "diff": entry["diff"],
+                "recalculated": "time_value, bid_time_value_pct, ask_time_value_pct",
+                "duration_s": duration_s,
+            })
+
+
+def get_console_log(since=0, limit=200):
+    """Book-change log entries with id > `since`, oldest first, capped at `limit`."""
+    with _lock:
+        entries = [e for e in _console_log if e["id"] > since][-limit:]
+        latest_id = _console_log_next_id
+    return {"entries": entries, "latest_id": latest_id}
 
 
 def _ladder_payload(code):
@@ -1036,23 +1242,37 @@ def _ladder_payload(code):
     degraded — the name column shows the code, and the reason lives in its own
     field. Writing the reason into the name is what produced "(FugleAPIError)".
     """
+    _recompute_if_dirty(code)
     with _lock:
         book = _books.get(code)
         name = _display_name(code)
         pending = code in _pending
         error = _seed_errors.get(code)
         terms = _terms.get(code) or {}
+        underlying = _underlying_of.get(code)
+        underlying_price = (
+            _underlying_books.get(underlying, {}).get("price") if underlying else None
+        )
+        computed = _computed.get(code) or {}
+        volume = _volumes.get(code)
     base = {
         "code": code, "name": name, "pending": pending, "error": error,
+        "type": live_warrant_logic.parse_warrant_type(name),
+        "underlying_code": underlying,
+        "underlying_price": underlying_price,
         "strike": terms.get("strike"),
         "exercise_ratio": terms.get("exercise_ratio"),
         "dte": _days_to_expiry(terms.get("maturity")),
+        "volume": volume,
+        "time_value": computed.get("time_value"),
+        "bid_time_value_pct": computed.get("bid_time_value_pct"),
+        "ask_time_value_pct": computed.get("ask_time_value_pct"),
     }
     if book is None:
-        return {**base, "rows": [], "age": None, "src": None}
+        return {**base, "best": live_warrant_logic.best_level([], []), "age": None, "src": None}
     return {
         **base,
-        "rows": live_warrant_logic.ladder_rows(book["bids"], book["asks"]),
+        "best": live_warrant_logic.best_level(book["bids"], book["asks"]),
         "age": round((datetime.now(timezone.utc) - book["ts"]).total_seconds(), 1),
         "src": book.get("src"),
     }

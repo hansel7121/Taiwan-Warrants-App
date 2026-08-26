@@ -3,17 +3,31 @@
 // the DOM-rebuild cost was the actual bottleneck in scripts/fubon_quote_viewer.py
 // at a few hundred tracked codes, not the websocket or Python-side cost (issue #69).
 //
-// Two views share the same poll/data: a flat table (one row per warrant, all
-// 5 book levels inline) and an orderbook card grid (mirrors the layout of
-// scripts/fubon_quote_viewer.py, one card per warrant with its own 5-row ladder).
+// Derived columns (time value, TV%) are recomputed server-side only when a
+// warrant's own best bid/ask actually moves (services/live_warrant.py's
+// _recompute_if_dirty) — this file just renders whatever the payload carries,
+// same 500ms poll either way.
 
 let _lwLoaded = false;
 let _lwPollTimer = null;
+let _lwLogPollTimer = null;
 let _lwInFlight = false;
 let _lwRows = {};           // code -> table row els, keyed by _lwBuildRow()
-let _lwBooks = {};          // code -> orderbook card els, keyed by _lwBuildBook()
-let _lwView = "table";      // "table" | "orderbook"
+let _lwLogLastId = 0;
 const _lwLastText = new WeakMap();
+
+// Same three bounds as the Warrant Scanner's WARRANT_FILTER_SPEC (scanners.js),
+// minus Leverage — this tab never computes leverage (that would need IV/delta,
+// which are deliberately never solved here, not even internally).
+const LIVE_WARRANT_FILTER_SPEC = [
+  { key: "dte", label: "Days to expiry", short: "DTE",
+    min: { field: "min_days", value: 0, attrs: { min: 0, step: 1 } },
+    max: { field: "max_days", value: 365, attrs: { min: 0, step: 1 } } },
+  { key: "tv", label: "Time value %", short: "TV%",
+    max: { field: "max_tv_pct", value: 100, attrs: { min: 0, step: 0.1 } } },
+  { key: "volume", label: "Volume", short: "Vol",
+    min: { field: "min_volume", value: 0, attrs: { min: 0 } } },
+];
 
 function _lwSetText(el, s) {
   if (!el) return;
@@ -41,20 +55,13 @@ async function loadLiveWarrantOnce() {
   _lwLoaded = true;
   const stocks = await fetchProductList("/list_warrant_stocks");
   populateProductSelect(document.getElementById("live-scan-underlying"), stocks, { selectFirst: true });
+  mountBoundFilters("liveFilters", LIVE_WARRANT_FILTER_SPEC);
   _lwPollTimer = setInterval(_lwPoll, 500);
+  _lwLogPollTimer = setInterval(_lwPollLog, 1000);
   _lwPoll();
 }
 
-function setLiveView(view) {
-  _lwView = view;
-  document.getElementById("live-table-view").style.display = view === "table" ? "" : "none";
-  document.getElementById("live-orderbook-view").style.display = view === "orderbook" ? "" : "none";
-  document.getElementById("live-view-table-btn").classList.toggle("active", view === "table");
-  document.getElementById("live-view-orderbook-btn").classList.toggle("active", view === "orderbook");
-  if (_lwLastData) _lwRender(_lwLastData);
-}
-
-// ── Table view: one row per warrant, 5 bid + 5 ask levels inline ──────────
+// ── Table view: one row per warrant ────────────────────────────────────────
 function _lwBuildRow(code) {
   const tr = document.createElement("tr");
   tr.className = "live-row";
@@ -66,29 +73,22 @@ function _lwBuildRow(code) {
   const nameTd = document.createElement("td");
   tr.appendChild(nameTd);
 
-  // Contract terms. These arrive on a slower path than the book — they are one
-  // REST call per code, backfilled in the background — so they render as "—"
-  // until retry_pending() has worked through the tracked list.
-  const termTds = ["strike", "dte", "ratio"].map(k => {
+  // Contract terms (strike/dte/ratio) and the tick-kernel columns (time_value,
+  // *_time_value_pct) all arrive on slower/async paths than the raw book — the
+  // first is a one-shot REST call backfilled in the background, the second only
+  // updates once the code's own best level has ticked — so they render as "—"
+  // until the backend has something for them.
+  const cols = ["underlying_code", "type", "underlying_price", "best_bid", "best_ask",
+                "strike", "dte", "ratio", "volume",
+                "time_value", "bid_time_value_pct", "ask_time_value_pct"];
+  // Best Bid/Ask keep the same red/green coloring the old 10-column ladder used.
+  const colorClass = { best_bid: "bid", best_ask: "ask" };
+  const tds = {};
+  cols.forEach(k => {
     const td = document.createElement("td");
-    td.className = "live-term live-term-" + k;
+    td.className = "live-term live-term-" + k + (colorClass[k] ? " " + colorClass[k] : "");
     tr.appendChild(td);
-    return td;
-  });
-
-  // Displayed lowest bid -> highest bid, then lowest ask -> highest ask,
-  // i.e. level 5..1 for bids (best bid is level 1) then level 1..5 for asks.
-  const bidTds = [4, 3, 2, 1, 0].map(() => {
-    const td = document.createElement("td");
-    td.className = "bid";
-    tr.appendChild(td);
-    return td;
-  });
-  const askTds = [0, 1, 2, 3, 4].map(() => {
-    const td = document.createElement("td");
-    td.className = "ask";
-    tr.appendChild(td);
-    return td;
+    tds[k] = td;
   });
 
   const ageTd = document.createElement("td");
@@ -103,8 +103,7 @@ function _lwBuildRow(code) {
   removeTd.appendChild(removeBtn);
   tr.appendChild(removeTd);
 
-  return { tr, cells: { name: nameTd, strike: termTds[0], dte: termTds[1],
-                        ratio: termTds[2], bid: bidTds, ask: askTds, age: ageTd } };
+  return { tr, cells: { name: nameTd, age: ageTd, ...tds } };
 }
 
 // A row the backend could not fully set up: still tracked, still listed, just
@@ -115,11 +114,20 @@ function _lwDegraded(b) {
   return b.error || "";
 }
 
-// Strike prints to 2dp; the exercise ratio is a small fraction (0.051) so it
-// needs more, but trailing zeros on a round ratio are noise.
+// Strike/ratio/time-value print to a fixed dp; trailing zeros on a round
+// number are noise.
 function _lwNum(v, dp) {
   if (v === null || v === undefined) return "—";
   return Number(v).toFixed(dp).replace(/\.?0+$/, "") || "0";
+}
+
+function _lwPct(v, dp) {
+  if (v === null || v === undefined) return "—";
+  return `${_lwNum(v, dp)}%`;
+}
+
+function _lwInt(v) {
+  return v === null || v === undefined ? "—" : Number(v).toLocaleString();
 }
 
 function _lwDte(v) {
@@ -129,9 +137,19 @@ function _lwDte(v) {
 
 function _lwPatchRow(el, b) {
   _lwSetText(el.cells.name, b.name || b.code);
+  _lwSetText(el.cells.underlying_code, b.underlying_code || "—");
+  _lwSetText(el.cells.type, b.type || "—");
+  _lwSetText(el.cells.underlying_price, _lwNum(b.underlying_price, 2));
+  const best = b.best || {};
+  _lwSetText(el.cells.best_bid, _lwLevelText(best.bid, best.bid_size));
+  _lwSetText(el.cells.best_ask, _lwLevelText(best.ask, best.ask_size));
   _lwSetText(el.cells.strike, _lwNum(b.strike, 2));
   _lwSetText(el.cells.dte, _lwDte(b.dte));
   _lwSetText(el.cells.ratio, _lwNum(b.exercise_ratio, 4));
+  _lwSetText(el.cells.volume, _lwInt(b.volume));
+  _lwSetText(el.cells.time_value, _lwNum(b.time_value, 2));
+  _lwSetText(el.cells.bid_time_value_pct, _lwPct(b.bid_time_value_pct, 2));
+  _lwSetText(el.cells.ask_time_value_pct, _lwPct(b.ask_time_value_pct, 2));
   // Near-dated warrants are the ones worth spotting at a glance.
   el.cells.dte.classList.toggle("live-dte-near", b.dte !== null && b.dte !== undefined && b.dte <= 30);
   const degraded = _lwDegraded(b);
@@ -140,81 +158,29 @@ function _lwPatchRow(el, b) {
     el.tr.title = degraded;
     el.degraded = degraded;
   }
-  // rows[i] is level i+1 (0 = best). bidTds[0] = level 5 (lowest, worst) ... bidTds[4] = level 1 (best).
-  [4, 3, 2, 1, 0].forEach((lvl, i) => {
-    const r = b.rows[lvl] || {};
-    _lwSetText(el.cells.bid[i], _lwLevelText(r.bid, r.bid_size));
-  });
-  [0, 1, 2, 3, 4].forEach((lvl, i) => {
-    const r = b.rows[lvl] || {};
-    _lwSetText(el.cells.ask[i], _lwLevelText(r.ask, r.ask_size));
-  });
   _lwSetText(el.cells.age, _lwAge(b));
 }
 
-// ── Orderbook view: one card per warrant, 5-row bid/ask ladder ────────────
-function _lwBuildBook(code) {
-  const root = document.createElement("div");
-  root.className = "live-book";
+// Bound semantics copied exactly from logic/warrant_logic.py::_apply_warrant_filters:
+// - DTE: min <= dte <= max, inclusive.
+// - Time-value%: ask_time_value_pct <= max, with null/missing PASSING (a max
+//   cap can't judge a warrant with no ask, so it isn't filtered out).
+// - Volume: volume >= min.
+function _lwPassesFilter(b, bounds) {
+  const dte = bounds.dte || {};
+  if (dte.min !== null && dte.min !== undefined && (b.dte === null || b.dte < dte.min)) return false;
+  if (dte.max !== null && dte.max !== undefined && (b.dte === null || b.dte > dte.max)) return false;
 
-  const h3 = document.createElement("h3");
-  root.appendChild(h3);
+  const tv = bounds.tv || {};
+  if (tv.max !== null && tv.max !== undefined
+      && b.ask_time_value_pct !== null && b.ask_time_value_pct !== undefined
+      && b.ask_time_value_pct > tv.max) return false;
 
-  const table = document.createElement("table");
-  table.innerHTML = "<tr><th>Bid Vol</th><th>Bid</th><th></th><th>Ask</th><th>Ask Vol</th></tr>";
-  const rows = [];
-  for (let i = 0; i < 5; i++) {
-    const tr = document.createElement("tr");
-    const bs = document.createElement("td"); bs.className = "bid";
-    const bp = document.createElement("td"); bp.className = "bid";
-    const lv = document.createElement("td"); lv.className = "lv"; lv.textContent = i + 1;
-    const ap = document.createElement("td"); ap.className = "ask";
-    const as = document.createElement("td"); as.className = "ask";
-    [bs, bp, lv, ap, as].forEach(td => tr.appendChild(td));
-    table.appendChild(tr);
-    rows.push({ tr, bs, bp, ap, as });
-  }
-  root.appendChild(table);
+  const vol = bounds.volume || {};
+  if (vol.min !== null && vol.min !== undefined && (b.volume === null || b.volume < vol.min)) return false;
 
-  const meta = document.createElement("div");
-  meta.className = "live-book-meta";
-  const metaText = document.createTextNode("");
-  const removeLink = document.createElement("a");
-  removeLink.textContent = "remove";
-  removeLink.href = "#";
-  removeLink.onclick = (e) => { e.preventDefault(); removeLiveWarrant(code); };
-  meta.appendChild(metaText);
-  meta.appendChild(document.createTextNode("  "));
-  meta.appendChild(removeLink);
-  root.appendChild(meta);
-
-  return { root, h3, rows, meta: metaText, title: null };
+  return true;
 }
-
-function _lwPatchBook(el, b) {
-  const title = `${b.code}  ${b.name || b.code}`;
-  const degraded = _lwDegraded(b);
-  if (el.degraded !== degraded) {
-    el.root.classList.toggle("live-degraded", !!degraded);
-    el.root.title = degraded;
-    el.degraded = degraded;
-  }
-  if (el.title !== title) { el.h3.textContent = title; el.title = title; }
-
-  for (let i = 0; i < el.rows.length; i++) {
-    const r = b.rows[i], slot = el.rows[i];
-    slot.tr.className = r && r.level === 1 ? "best" : "";
-    _lwSetText(slot.bs, _lwCell(r ? r.bid_size : null));
-    _lwSetText(slot.bp, _lwCell(r ? r.bid : null));
-    _lwSetText(slot.ap, _lwCell(r ? r.ask : null));
-    _lwSetText(slot.as, _lwCell(r ? r.ask_size : null));
-  }
-
-  const metaStr = degraded || (b.age === null ? "no data yet" : _lwAge(b));
-  if (el.meta.data !== metaStr) el.meta.data = metaStr;
-}
-
-function _lwCell(v) { return v === null || v === undefined ? "—" : v.toLocaleString(); }
 
 let _lwLastData = null;
 
@@ -244,8 +210,7 @@ function _lwRender(d) {
   const statusEl = document.getElementById("live-status");
   if (statusEl) statusEl.innerHTML = _lwStatusLine(d);
 
-  if (_lwView === "table") _lwRenderTable(d);
-  else _lwRenderOrderbook(d);
+  _lwRenderTable(d);
 
   const emptyEl = document.getElementById("live-empty");
   if (emptyEl) emptyEl.style.display = d.books.length === 0 ? "block" : "none";
@@ -255,6 +220,7 @@ function _lwRenderTable(d) {
   const tbody = document.getElementById("live-tbody");
   if (!tbody) return;
 
+  const bounds = bfBounds("liveFilters");
   const seen = {};
   d.books.forEach(b => {
     seen[b.code] = true;
@@ -264,6 +230,7 @@ function _lwRenderTable(d) {
       tbody.appendChild(el.tr);
     }
     _lwPatchRow(el, b);
+    el.tr.style.display = _lwPassesFilter(b, bounds) ? "" : "none";
   });
 
   Object.keys(_lwRows).forEach(code => {
@@ -274,31 +241,6 @@ function _lwRenderTable(d) {
   });
 
   if (d.books.length === 0) tbody.innerHTML = "";
-}
-
-function _lwRenderOrderbook(d) {
-  const container = document.getElementById("live-orderbook-grid");
-  if (!container) return;
-
-  const seen = {};
-  d.books.forEach(b => {
-    seen[b.code] = true;
-    let el = _lwBooks[b.code];
-    if (!el) {
-      el = _lwBooks[b.code] = _lwBuildBook(b.code);
-      container.appendChild(el.root);
-    }
-    _lwPatchBook(el, b);
-  });
-
-  Object.keys(_lwBooks).forEach(code => {
-    if (!seen[code]) {
-      _lwBooks[code].root.remove();
-      delete _lwBooks[code];
-    }
-  });
-
-  if (d.books.length === 0) container.innerHTML = "";
 }
 
 function _lwPoll() {
@@ -313,6 +255,35 @@ function _lwPoll() {
       const statusEl = document.getElementById("live-status");
       if (statusEl) statusEl.textContent = "server unreachable: " + (e && e.message ? e.message : e);
     });
+}
+
+// ── Console log: book-change diffs, collapsed by default ───────────────────
+// Only polls while the panel is open — no point paying for it collapsed.
+const LW_LOG_MAX_LINES = 500;
+
+function _lwPollLog() {
+  const details = document.getElementById("live-console-log");
+  if (!details || !details.open) return;
+  apiJson(`/live_warrant_log?since=${_lwLogLastId}`)
+    .then(d => {
+      _lwLogLastId = d.latest_id;
+      if (!d.entries || !d.entries.length) return;
+      const body = document.getElementById("live-console-log-body");
+      if (!body) return;
+      const frag = document.createDocumentFragment();
+      d.entries.forEach(e => {
+        const line = document.createElement("div");
+        line.textContent =
+          `[${e.ts}] ${e.code} "${e.diff}" - "${e.recalculated}" - took +${e.duration_s}s`;
+        frag.appendChild(line);
+      });
+      body.appendChild(frag);
+      while (body.childElementCount > LW_LOG_MAX_LINES) {
+        body.removeChild(body.firstChild);
+      }
+      body.scrollTop = body.scrollHeight;
+    })
+    .catch(() => {});  // transient — next tick retries
 }
 
 async function addLiveWarrant() {

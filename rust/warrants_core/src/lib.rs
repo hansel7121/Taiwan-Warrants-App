@@ -8,6 +8,7 @@
 mod arb;
 mod bs;
 mod frame;
+mod tick;
 
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
@@ -367,6 +368,14 @@ fn round_py(x: f64, nd: usize) -> f64 {
     arb::round_py(x, nd)
 }
 
+/// Live Warrant tab tick kernel: time-value columns only for one warrant's
+/// current best bid/ask. No IV/delta/leverage solve — see `tick.rs`.
+#[pyfunction]
+fn solve_tick(s: f64, k: f64, ratio: f64, is_put: bool, bid: f64, ask: f64) -> (f64, f64, f64) {
+    let r = tick::solve_tick(s, k, ratio, is_put, bid, ask);
+    (r.time_value, r.bid_time_value_pct, r.ask_time_value_pct)
+}
+
 #[pymodule]
 fn warrants_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -383,5 +392,6 @@ fn warrants_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(direct_pairs, m)?)?;
     m.add_function(wrap_pyfunction!(round_py, m)?)?;
     m.add_function(wrap_pyfunction!(build_warrant_columns, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_tick, m)?)?;
     Ok(())
 }

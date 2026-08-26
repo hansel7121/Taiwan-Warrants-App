@@ -642,22 +642,28 @@
 
         <div style="display:flex;align-items:center;gap:14px;margin:10px 0">
           <div id="live-status" style="font-size:12px;color:var(--muted)"></div>
-          <div class="live-view-toggle">
-            <button class="sm active" id="live-view-table-btn" onclick="setLiveView('table')">Table</button>
-            <button class="sm" id="live-view-orderbook-btn" onclick="setLiveView('orderbook')">Orderbook</button>
-          </div>
         </div>
+
+        <!-- Mounted by live_warrant.js, same bound-filter widget as the Warrant
+             Scanner tab (minus Leverage — this tab never computes it). -->
+        <div id="liveFilters"></div>
 
         <div id="live-table-view">
           <table>
             <thead>
               <tr>
                 <th>Code</th><th>Name</th>
+                <th title="Underlying stock code (from the tracked list's own scan record; blank for individually-added codes)">Underlying</th>
+                <th title="Call/Put, parsed from the warrant's Chinese name (購/售)">Type</th>
+                <th title="Underlying's live best-bid/best-ask midpoint (TSMC only, for now)">Underlying Px</th>
+                <th>Best Bid</th><th>Best Ask</th>
                 <th title="Exercise price (履約價), from Fubon's intraday/ticker">Strike</th>
                 <th title="Calendar days to maturity (到期日), Taipei date">DTE</th>
                 <th title="Exercise ratio (行使比例)">Ratio</th>
-                <th>Bid 5</th><th>Bid 4</th><th>Bid 3</th><th>Bid 2</th><th>Bid 1</th>
-                <th>Ask 1</th><th>Ask 2</th><th>Ask 3</th><th>Ask 4</th><th>Ask 5</th>
+                <th title="Accumulated traded volume (張), from TWSE MIS">Volume</th>
+                <th title="Ask-side time value: ask/ratio + distance to strike">Time Value</th>
+                <th title="Bid-side time value as a % of the underlying's price">Bid TV%</th>
+                <th title="Ask-side time value as a % of the underlying's price">Ask TV%</th>
                 <th>Updated</th><th></th>
               </tr>
             </thead>
@@ -665,13 +671,14 @@
           </table>
         </div>
 
-        <div id="live-orderbook-view" style="display:none">
-          <div id="live-orderbook-grid"></div>
-        </div>
-
         <p id="live-empty" style="display:none;padding:16px;color:var(--muted)">
           No warrants tracked yet — add one by code or run a Liquidity Scan.
         </p>
+
+        <details id="live-console-log">
+          <summary>Console log</summary>
+          <div id="live-console-log-body"></div>
+        </details>
       </main>
     </div>
 

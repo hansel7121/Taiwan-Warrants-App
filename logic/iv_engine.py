@@ -115,6 +115,13 @@ if RUST_AVAILABLE and use_rust("iv"):
             return _rust.bs_vega(_F(S), _F(K), _F(T), _F(r), _F(sigma), _F(ratio))
         return bs_python.bs_vega(S, K, T, r, sigma, ratio)
 
+    def solve_tick(S, K, ratio, is_put, bid, ask):
+        """Live Warrant tab tick kernel — time-value columns only, no IV/delta/
+        leverage. See `bs_python.solve_tick` / `rust/warrants_core/src/tick.rs`."""
+        if _is_scalar(S, K, ratio, is_put, bid, ask):
+            return _rust.solve_tick(_F(S), _F(K), _F(ratio), _B(is_put), _F(bid), _F(ask))
+        return bs_python.solve_tick(S, K, ratio, is_put, bid, ask)
+
     def implied_vol(price, S, K, T, r, ratio, is_put=False):
         if _is_scalar(price, S, K, T, r, ratio, is_put):
             return _rust.implied_vol(_F(price), _F(S), _F(K), _F(T), _F(r), _F(ratio), _B(is_put))
@@ -161,6 +168,7 @@ else:  # pragma: no cover - exercised only when the extension is missing
     implied_vol_vec = bs_python.implied_vol_vec
     bs_delta_vec = bs_python.bs_delta_vec
     _refine_iv_for_rounding = bs_python._refine_iv_for_rounding
+    solve_tick = bs_python.solve_tick
 
 
 # ── arb kernels ─────────────────────────────────────────────────────────────
@@ -244,5 +252,6 @@ __all__ = [
     "FEATURES", "use_rust", "feature_engines",
     "bs_price", "bs_delta", "bs_vega", "calc_real_leverage",
     "implied_vol", "implied_vol_vec", "bs_delta_vec", "_refine_iv_for_rounding",
+    "solve_tick",
     "butterfly_pairs", "direct_pairs", "build_warrant_df",
 ]

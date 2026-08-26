@@ -264,3 +264,82 @@ def test_ladder_rows_truncates_extra_depth_beyond_levels():
 def test_ladder_rows_empty_book_is_all_none():
     rows = lwl.ladder_rows(bids=[], asks=[], levels=5)
     assert all(r["bid"] is None and r["ask"] is None for r in rows)
+
+
+# ── best_level ───────────────────────────────────────────────────────────────
+
+def test_best_level_reads_only_level_one():
+    bids = [{"price": 10, "size": 5}, {"price": 9, "size": 99}]
+    asks = [{"price": 11, "size": 3}, {"price": 12, "size": 99}]
+    assert lwl.best_level(bids, asks) == {"bid": 10, "bid_size": 5, "ask": 11, "ask_size": 3}
+
+
+def test_best_level_empty_side_is_none():
+    assert lwl.best_level([], []) == {"bid": None, "bid_size": None, "ask": None, "ask_size": None}
+
+
+# ── best_level_changed ──────────────────────────────────────────────────────
+
+def test_best_level_changed_true_on_first_tick():
+    assert lwl.best_level_changed(None, [{"price": 10, "size": 5}], []) is True
+
+
+def test_best_level_changed_true_when_best_price_moves():
+    old = {"bids": [{"price": 10, "size": 5}], "asks": []}
+    assert lwl.best_level_changed(old, [{"price": 10.5, "size": 5}], []) is True
+
+
+def test_best_level_changed_true_when_best_size_moves():
+    old = {"bids": [{"price": 10, "size": 5}], "asks": []}
+    assert lwl.best_level_changed(old, [{"price": 10, "size": 6}], []) is True
+
+
+def test_best_level_changed_false_when_only_deep_levels_move():
+    old = {"bids": [{"price": 10, "size": 5}, {"price": 9, "size": 1}], "asks": []}
+    new_bids = [{"price": 10, "size": 5}, {"price": 8.5, "size": 40}]
+    assert lwl.best_level_changed(old, new_bids, []) is False
+
+
+def test_best_level_changed_false_when_nothing_moves():
+    old = {"bids": [{"price": 10, "size": 5}], "asks": [{"price": 11, "size": 2}]}
+    assert lwl.best_level_changed(
+        old, [{"price": 10, "size": 5}], [{"price": 11, "size": 2}]) is False
+
+
+# ── describe_book_change ─────────────────────────────────────────────────────
+
+def test_describe_book_change_seeded_on_first_tick():
+    diff = lwl.describe_book_change(None, [{"price": 10, "size": 5}], [])
+    assert diff == "seeded: bid 10x5, ask —"
+
+
+def test_describe_book_change_reports_bid_and_ask_moves():
+    old = {"bids": [{"price": 10, "size": 5}], "asks": [{"price": 11, "size": 2}]}
+    diff = lwl.describe_book_change(
+        old, [{"price": 10.5, "size": 5}], [{"price": 11, "size": 2}])
+    assert diff == "bid 10x5 -> 10.5x5"
+
+
+def test_describe_book_change_no_change_text_when_deep_only():
+    old = {"bids": [{"price": 10, "size": 5}], "asks": []}
+    diff = lwl.describe_book_change(old, [{"price": 10, "size": 5}], [])
+    assert diff == "no change"
+
+
+# ── parse_warrant_type ───────────────────────────────────────────────────────
+
+def test_parse_warrant_type_call():
+    assert lwl.parse_warrant_type("台積電元大11購01") == "Call"
+
+
+def test_parse_warrant_type_put():
+    assert lwl.parse_warrant_type("啟碁台新5A售02") == "Put"
+
+
+def test_parse_warrant_type_unknown_when_neither_char_present():
+    assert lwl.parse_warrant_type("some other name") is None
+
+
+def test_parse_warrant_type_none_when_name_missing():
+    assert lwl.parse_warrant_type(None) is None
+    assert lwl.parse_warrant_type("") is None
