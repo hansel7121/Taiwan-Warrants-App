@@ -24,14 +24,16 @@ def _clean_state():
     """Every test starts from empty module state and leaves it empty after —
     these are process-wide globals, not per-instance."""
     for d in (lw._books, lw._book_seq, lw._computed, lw._pending_log,
-              lw._terms, lw._underlying_of, lw._underlying_books, lw._volumes):
+              lw._terms, lw._underlying_of, lw._underlying_books, lw._underlying_names,
+              lw._volumes):
         d.clear()
     lw._underlying_codes.clear()
     lw._console_log.clear()
     lw._console_log_next_id = 0
     yield
     for d in (lw._books, lw._book_seq, lw._computed, lw._pending_log,
-              lw._terms, lw._underlying_of, lw._underlying_books, lw._volumes):
+              lw._terms, lw._underlying_of, lw._underlying_books, lw._underlying_names,
+              lw._volumes):
         d.clear()
     lw._underlying_codes.clear()
     lw._console_log.clear()
@@ -78,8 +80,58 @@ def test_underlying_tick_routes_to_underlying_books_not_warrant_books():
         [{"price": 600.0, "size": 10}], [{"price": 600.5, "size": 8}], code=UNDERLYING))
     assert UNDERLYING in lw._underlying_books
     assert lw._underlying_books[UNDERLYING]["price"] == pytest.approx(600.25)
+    assert lw._underlying_books[UNDERLYING]["best"] == {
+        "bid": 600.0, "bid_size": 10, "ask": 600.5, "ask_size": 8}
     assert UNDERLYING not in lw._books
     assert UNDERLYING not in lw._book_seq
+
+
+# ── underlying display row (appears at the top, before its warrant chain) ──
+
+def test_underlying_row_payload_pending_before_first_tick():
+    lw._underlying_codes.add(UNDERLYING)
+    lw._underlying_names[UNDERLYING] = "台積電"
+    row = lw._underlying_row_payload(UNDERLYING)
+    assert row["code"] == UNDERLYING
+    assert row["name"] == "台積電"
+    assert row["pending"] is True
+    assert row["type"] == "Underlying"
+    assert row["underlying_price"] is None
+    # Warrant-only fields must degrade to None/"—", never raise or fabricate a value.
+    assert row["strike"] is None and row["dte"] is None and row["volume"] is None
+
+
+def test_underlying_row_payload_fills_in_after_a_tick():
+    lw._underlying_codes.add(UNDERLYING)
+    lw._underlying_names[UNDERLYING] = "台積電"
+    lw._handle_message({}, _frame(
+        [{"price": 600.0, "size": 10}], [{"price": 600.5, "size": 8}], code=UNDERLYING))
+    row = lw._underlying_row_payload(UNDERLYING)
+    assert row["pending"] is False
+    assert row["underlying_price"] == pytest.approx(600.25)
+    assert row["best"] == {"bid": 600.0, "bid_size": 10, "ask": 600.5, "ask_size": 8}
+
+
+def test_underlying_row_falls_back_to_code_when_name_unknown():
+    lw._underlying_codes.add(UNDERLYING)
+    row = lw._underlying_row_payload(UNDERLYING)
+    assert row["name"] == UNDERLYING
+
+
+def test_get_data_lists_underlying_rows_before_tracked_warrants():
+    """Subscribing the underlying before its chain (scan_underlying) is only
+    half the point — its row has to actually render first too."""
+    lw._underlying_codes.add(UNDERLYING)
+    lw._underlying_names[UNDERLYING] = "台積電"
+    lw._tracked.append(CODE)
+    try:
+        d = lw.get_data()
+        assert [b["code"] for b in d["books"]] == [UNDERLYING, CODE]
+        # The underlying must never be counted as a tracked warrant — it has
+        # no terms/volume/capacity accounting of its own.
+        assert d["tracked"] == 1
+    finally:
+        lw._tracked.remove(CODE)
 
 
 def test_recompute_if_dirty_no_op_when_terms_missing():

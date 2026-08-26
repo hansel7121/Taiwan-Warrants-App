@@ -387,6 +387,10 @@ tbody tr.row-pinned td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 #tab-live .live-dte-near { color: var(--accent); font-weight: 600; }
 #tab-live .live-updated { min-width: 6.5em; color: var(--muted); }
 #tab-live .live-vol { color: var(--muted); font-size: .9em; }
+/* The underlying's own row (subscribed and rendered before its warrant chain
+   — see live_warrant.py's get_data()) reads as a stock quote, not a warrant. */
+#tab-live tr.live-underlying-row { background: var(--accent-soft); font-weight: 600; }
+#tab-live tr.live-underlying-row td { border-bottom: 1px solid var(--border); }
 
 /* Collapsible book-change log at the bottom of the tab — <details>/<summary>
    gives the expand/collapse triangle natively, no custom toggle JS needed. */

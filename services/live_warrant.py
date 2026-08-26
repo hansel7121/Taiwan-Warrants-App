@@ -103,8 +103,9 @@ _book_seq = {}        # code -> int, bumped only when the code's best level chan
 _computed = {}         # code -> {"seq", "time_value", "bid_time_value_pct", "ask_time_value_pct"}
 _pending_log = {}      # code -> deque of {"seq","ts","diff"} awaiting a recompute to log against
 _underlying_of = {}    # code -> underlying stock code, mirrors live_warrant_tracked.underlying
-_underlying_books = {}  # underlying code -> {"price", "ts", "src"} — best-bid/best-ask midpoint
+_underlying_books = {}  # underlying code -> {"price", "best", "ts", "src"}
 _underlying_codes = set()  # underlying codes currently subscribed on the same connection pool
+_underlying_names = {}  # underlying code -> display name, from the same ticker lookup a scan already makes
 _volumes = {}           # code -> int, MIS-sourced, refreshed on the retry_pending() cadence
 _console_log = collections.deque(maxlen=1000)
 _console_log_next_id = 0
@@ -336,12 +337,15 @@ def _handle_message(conn, raw):
 
 
 def _fold_underlying_tick_locked(code, bids, asks):
-    """Best-bid/best-ask midpoint into `_underlying_books`. Assumes `_lock` is
-    already held (safe re-entry — `_lock` is a `threading.RLock`).
+    """Best-bid/best-ask midpoint (for warrant-side recompute) AND the raw best
+    level (for the underlying's own display row, see `_underlying_row_payload`)
+    into `_underlying_books`. Assumes `_lock` is already held (safe re-entry —
+    `_lock` is a `threading.RLock`).
 
     Falls back to the one side available when the book is one-sided, and
-    leaves the last known price untouched when the tick carries neither side
-    (a warrant's own next tick just uses whatever price is currently cached).
+    leaves the last known price/book untouched when the tick carries neither
+    side (a warrant's own next tick just uses whatever price is currently
+    cached; the display row just keeps showing its last known level).
     """
     best = live_warrant_logic.best_level(bids, asks)
     bid, ask = best.get("bid"), best.get("ask")
@@ -353,7 +357,9 @@ def _fold_underlying_tick_locked(code, bids, asks):
         price = ask
     else:
         return
-    _underlying_books[code] = {"price": price, "ts": datetime.now(timezone.utc), "src": "ws"}
+    _underlying_books[code] = {
+        "price": price, "best": best, "ts": datetime.now(timezone.utc), "src": "ws",
+    }
 
 
 def _handle_control(conn, event, message):
@@ -578,12 +584,17 @@ def _track_one(code):
     _seed_from_rest(conn["sdk"], code)
 
 
-def _subscribe_underlying(code):
+def _subscribe_underlying(code, name=None):
     """Idempotent: subscribe one underlying stock to the same books channel
-    the warrant codes use, for a live tick-driven price (see
-    `_fold_underlying_tick_locked`). Reuses the existing connection pool
-    exactly as a warrant subscribe does — capacity is negligible, one extra
-    subscription per allow-listed underlying against the 2,100 cap.
+    the warrant codes use, for a live tick-driven price AND its own display
+    row (see `_fold_underlying_tick_locked` / `_underlying_row_payload`).
+    Reuses the existing connection pool exactly as a warrant subscribe does —
+    capacity is negligible, one extra subscription per allow-listed
+    underlying against the 2,100 cap.
+
+    Called before any of that underlying's warrant codes are subscribed (see
+    `scan_underlying`), so the underlying's row appears — and starts filling
+    in — before its warrant chain does.
 
     Non-fatal on failure, same pattern as `_track_many`'s per-code handling:
     an underlying that fails to subscribe just means that underlying's
@@ -591,6 +602,8 @@ def _subscribe_underlying(code):
     the whole session breaks.
     """
     with _lock:
+        if name:
+            _underlying_names[code] = name
         if code in _underlying_codes:
             return
         _underlying_codes.add(code)
@@ -661,6 +674,12 @@ def _untrack_one(code):
         _pending_log.pop(code, None)
         _volumes.pop(code, None)
         _underlying_of.pop(code, None)
+        # A code can also be an underlying's own subscription (see
+        # _subscribe_underlying) — clear that side too so a manual Remove on
+        # its display row doesn't leave it half-torn-down.
+        _underlying_codes.discard(code)
+        _underlying_books.pop(code, None)
+        _underlying_names.pop(code, None)
         conn = next((c for c in _connections if code in c["codes"]), None)
         sub_id = conn["sub_ids"].get(code) if conn else None
     if conn is None:
@@ -948,7 +967,7 @@ def scan_underlying(underlying, top_n, force=False):
         raise RuntimeError(f"no warrants found for {underlying}")
 
     if underlying in UNDERLYING_LIVE_PRICE_ALLOWLIST:
-        _subscribe_underlying(underlying)
+        _subscribe_underlying(underlying, name=chain.get("name"))
 
     vols, vol_missing = _mis_volumes(codes)
     ranked_codes = live_warrant_logic.scan_codes(codes, vols, top_n)
@@ -1129,6 +1148,7 @@ def get_data():
             for i, c in enumerate(_connections)
         ]
         tracked_snapshot = list(_tracked)
+        underlying_snapshot = sorted(_underlying_codes)
         pending_count = len(_pending)
         # The distinct failure strings, not one per code: a throttled scan
         # produces the same message a thousand times over.
@@ -1153,7 +1173,43 @@ def get_data():
         "errors": error_count,
         "error_kinds": error_kinds[:5],
         "console_log_id": console_log_id,
-        "books": [_ladder_payload(code) for code in tracked_snapshot],
+        # Underlying rows first — an underlying is subscribed before its
+        # warrant chain (see scan_underlying), so its row appears and starts
+        # filling in while the chain is still loading, rather than being
+        # buried wherever it'd fall in tracked-add order.
+        "books": [_underlying_row_payload(code) for code in underlying_snapshot]
+                 + [_ladder_payload(code) for code in tracked_snapshot],
+    }
+
+
+def _underlying_row_payload(code):
+    """One live-priced underlying's own display row — kept entirely separate
+    from `_tracked`/`_ladder_payload` so an underlying never touches warrant-
+    only accounting (capacity, terms backfill, MIS volume ranking, DB
+    persistence). Every warrant-only field comes back None/"—"; the row only
+    ever carries a name, its own best bid/ask, and the price warrants read
+    from `_underlying_books`.
+    """
+    with _lock:
+        info = _underlying_books.get(code)
+        name = _underlying_names.get(code) or code
+    if info is None:
+        return {
+            "code": code, "name": name, "pending": True, "error": None,
+            "type": "Underlying", "underlying_code": code, "underlying_price": None,
+            "strike": None, "exercise_ratio": None, "dte": None, "volume": None,
+            "time_value": None, "bid_time_value_pct": None, "ask_time_value_pct": None,
+            "best": live_warrant_logic.best_level([], []),
+            "age": None, "src": None,
+        }
+    return {
+        "code": code, "name": name, "pending": False, "error": None,
+        "type": "Underlying", "underlying_code": code, "underlying_price": info.get("price"),
+        "strike": None, "exercise_ratio": None, "dte": None, "volume": None,
+        "time_value": None, "bid_time_value_pct": None, "ask_time_value_pct": None,
+        "best": info.get("best") or live_warrant_logic.best_level([], []),
+        "age": round((datetime.now(timezone.utc) - info["ts"]).total_seconds(), 1),
+        "src": info.get("src"),
     }
 
 

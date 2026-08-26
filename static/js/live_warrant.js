@@ -152,6 +152,9 @@ function _lwPatchRow(el, b) {
   _lwSetText(el.cells.ask_time_value_pct, _lwPct(b.ask_time_value_pct, 2));
   // Near-dated warrants are the ones worth spotting at a glance.
   el.cells.dte.classList.toggle("live-dte-near", b.dte !== null && b.dte !== undefined && b.dte <= 30);
+  // The underlying's own row (always first — see get_data()) reads as a stock
+  // quote, not a warrant, so it gets a visual break from the rows below it.
+  el.tr.classList.toggle("live-underlying-row", b.type === "Underlying");
   const degraded = _lwDegraded(b);
   if (el.degraded !== degraded) {
     el.tr.classList.toggle("live-degraded", !!degraded);
