@@ -14,12 +14,13 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v=ASSET_VERSION) }}" />
   </head>
   <body>
+    <button id="logoutBtn" onclick="_logout()" style="display:none;position:fixed;top:8px;right:12px;z-index:9999;padding:5px 10px;font-size:11px;font-family:inherit;background:var(--surface,#1b2127);color:var(--muted,#7b8794);border:1px solid var(--border,#222a31);border-radius:0;cursor:pointer">Logout</button>
     <!-- Dev-only mode switch: writes the app_mode cookie and reloads, so the
          SERVER re-renders without the admin markup/scripts. Not a security
          gate — see services/roles.py. -->
     <button id="modeBtn" onclick="toggleMode()"
             title="Switch between admin (all features) and user (scanner product) mode"
-            style="position:fixed;top:8px;right:12px;z-index:9999;padding:5px 10px;font-size:11px;font-family:inherit;background:var(--surface,#1b2127);color:{% if show_admin %}var(--accent){% else %}var(--muted){% endif %};border:1px solid var(--border,#222a31);border-radius:0;cursor:pointer">{% if show_admin %}Admin mode{% else %}User mode{% endif %}</button>
+            style="position:fixed;top:36px;right:12px;z-index:9999;padding:5px 10px;font-size:11px;font-family:inherit;background:var(--surface,#1b2127);color:{% if show_admin %}var(--accent){% else %}var(--muted){% endif %};border:1px solid var(--border,#222a31);border-radius:0;cursor:pointer">{% if show_admin %}Admin mode{% else %}User mode{% endif %}</button>
     <header>
       <!-- Wordmark matches the marketing site: second half carries the accent. -->
       <h1>Wither<span>mount</span></h1>

@@ -502,6 +502,7 @@ async function _boot() {
   if (_sb) {
     const { data } = await _sb.auth.getSession();
     if (!data.session) { location.replace("/login"); return; }
+    document.getElementById("logoutBtn").style.display = "block";
     _sb.auth.onAuthStateChange((event, session) => {
       if (event === "SIGNED_OUT" || !session) location.replace("/login");
     });
