@@ -403,6 +403,26 @@ tbody tr.row-pinned td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
                           white-space: pre-wrap; }
 #live-console-log-body > div:hover { color: var(--text); }
 
+/* ── Live Options tab ── */
+/* Same status-line/degraded-row conventions as #tab-live — duplicated rather
+   than widened to a shared selector, since the two tabs' markup evolves
+   independently (see static/js/live_options.js's own reuse-vs-duplicate note). */
+#tab-live-options .dot { display: inline-block; width: .6rem; height: .6rem; border-radius: 50%;
+                          margin-right: .45rem; vertical-align: baseline; }
+#tab-live-options .dot.ok { background: var(--put); }
+#tab-live-options .dot.warn { background: var(--accent); }
+#tab-live-options .down { color: var(--call); }
+#tab-live-options .muted { color: var(--muted); }
+#tab-live-options .live-degraded { opacity: .55; }
+#tab-live-options tr.live-degraded td:first-child { border-left: 2px solid var(--accent); }
+
+/* Puts-left / strike-middle / calls-right chain grid. */
+#tab-live-options .lo-strike { text-align: center; font-weight: 600; color: var(--text); background: var(--surface); }
+#tab-live-options .live-term { color: var(--muted); white-space: nowrap; text-align: right; }
+#tab-live-options .live-term.bid { color: var(--put); }
+#tab-live-options .live-term.ask { color: var(--call); }
+#tab-live-options .lo-row td button.sm { padding: 1px 6px; font-size: 11px; }
+
 /* ── Product picker search ── */
 .product-search {
   width: 100%;

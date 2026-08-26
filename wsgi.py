@@ -9,6 +9,7 @@ import threading
 
 from logic import iv_engine
 from services import live_warrant
+from services import live_options
 from services import memlog
 from services import scheduler
 from app import app
@@ -36,7 +37,11 @@ def _safe_stop_session():
     try:
         live_warrant.stop_session()
     except Exception as e:
-        print(f"WSGI: session teardown on shutdown failed: {e}", flush=True)
+        print(f"WSGI: live_warrant session teardown on shutdown failed: {e}", flush=True)
+    try:
+        live_options.stop_session()
+    except Exception as e:
+        print(f"WSGI: live_options session teardown on shutdown failed: {e}", flush=True)
 
 
 def _graceful_shutdown(signum, frame):

@@ -17,6 +17,7 @@ from services import db_market
 from services import db_products
 from services import db_suggestions
 from services import live_warrant
+from services import live_options
 from logic import arb_logic
 from logic import static_arb
 from logic import ttl_cache
@@ -342,6 +343,19 @@ def sync_live_warrant():
     live_warrant.retry_pending()
 
 
+def sync_live_options():
+    """Same shape as sync_live_warrant(), minus the DB load: there is no
+    persisted contract list for options (see services/live_options.py's
+    module docstring), so start_session() is a genuine no-op until "Load
+    TSMC Chain" has been clicked at least once this process's lifetime.
+    Once contracts are loaded, this keeps the connection alive and retries
+    whatever didn't subscribe, exactly like retry_pending() does for
+    warrants.
+    """
+    live_options.start_session()
+    live_options.retry_pending()
+
+
 # ---------------------------------------------------------------------------
 # Job / gate wrappers used at registration time
 # ---------------------------------------------------------------------------
@@ -409,6 +423,10 @@ def _run_live_warrant():
     _job("live_warrant", sync_live_warrant)
 
 
+def _run_live_options():
+    _job("live_options", sync_live_options)
+
+
 _FORCE_MAP = {
     "warrants": _run_warrants,
     "tw_options": _run_tw_options,
@@ -469,6 +487,17 @@ def start():
         # no-op once connected) and also attempted right away, so a restart
         # mid-trading-day doesn't wait for the next grid tick to reconnect.
         sched.add_job(_gated("tw_equity", _run_live_warrant),
+                      CronTrigger(minute="*/5", timezone=_TZ_TAIPEI),
+                      next_run_time=now + timedelta(seconds=2))
+        # Live Options' Fubon session: same shape as Live Warrant's job above,
+        # but start_session() is a genuine no-op until "Load TSMC Chain" has
+        # been clicked at least once this process's lifetime — there's no
+        # persisted contract list to cold-load. Gated on tw_equity (not
+        # tw_option, which also covers TAIFEX's night session for index
+        # futures/TXO — single-stock options only trade the day session, and
+        # gating on tw_equity keeps both Fubon sessions, which share one
+        # login-capped account, coming up/down on the identical clock).
+        sched.add_job(_gated("tw_equity", _run_live_options),
                       CronTrigger(minute="*/5", timezone=_TZ_TAIPEI),
                       next_run_time=now + timedelta(seconds=2))
         sched.start()

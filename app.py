@@ -15,6 +15,7 @@ from services import db_user
 from services import roles
 from services import store
 from services import live_warrant
+from services import live_options
 from logic import arb_logic
 from logic import live_warrant_logic
 from logic import static_arb
@@ -672,6 +673,71 @@ def connect_live_warrant():
 @require_role(ADMIN)
 def disconnect_live_warrant():
     live_warrant.stop_session()
+    return jsonify({"ok": True})
+
+
+@app.route("/live_options_data")
+@require_auth
+@require_role(ADMIN)
+def live_options_data():
+    return jsonify(live_options.get_data())
+
+
+@app.route("/load_live_options_chain", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def load_live_options_chain():
+    """Discover and subscribe every currently-listed TSMC option contract in
+    one shot. Safe to re-run: add-only, never removes a tracked contract."""
+    try:
+        result = live_options.load_chain()
+    except live_warrant_logic.CapacityExceededError as e:
+        return jsonify({"error": str(e)}), 400
+    except (RuntimeError, ValueError) as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, **result})
+
+
+@app.route("/remove_live_option", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def remove_live_option():
+    data = request.json or {}
+    code = (data.get("code") or "").strip()
+    if not code:
+        return jsonify({"error": "code required"}), 400
+    live_options.remove_code(code)
+    return jsonify({"ok": True})
+
+
+@app.route("/retry_live_options", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def retry_live_options():
+    return jsonify({"ok": True, **live_options.retry_pending()})
+
+
+@app.route("/reconnect_live_options", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def reconnect_live_options():
+    live_options.reconnect()
+    return jsonify({"ok": True})
+
+
+@app.route("/connect_live_options", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def connect_live_options():
+    live_options.connect_session()
+    return jsonify({"ok": True})
+
+
+@app.route("/disconnect_live_options", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def disconnect_live_options():
+    live_options.stop_session()
     return jsonify({"ok": True})
 
 

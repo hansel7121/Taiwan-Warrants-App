@@ -43,6 +43,7 @@
       <button onclick="switchTab('arb', this)">Arb Finder</button>
       <button onclick="switchTab('portfolio', this); loadPortfolioOnce()">Portfolio</button>
       <button onclick="switchTab('live', this); loadLiveWarrantOnce()">Live Warrant</button>
+      <button onclick="switchTab('live-options', this); loadLiveOptionsOnce()">Live Options</button>
       {% endif %}
     </div>
 
@@ -682,6 +683,68 @@
       </main>
     </div>
 
+    <!-- LIVE OPTIONS TAB -->
+    <div id="tab-live-options" class="tab-content">
+      <main>
+        <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <button class="sm" id="lo-load-btn" onclick="loadLiveOptionsChain()"
+                    title="Discover and subscribe every currently-listed TSMC (2330) option contract — all expiries, all strikes, both calls and puts — in one shot. Safe to re-run: adds newly-listed contracts, never removes anything.">
+              Load TSMC Chain
+            </button>
+            <span id="lo-load-status" style="font-size:12px;color:var(--muted)"></span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <button class="sm" id="lo-connect-btn" onclick="connectLiveOptions()"
+                    title="Log in and resume streaming the currently loaded chain. No-op if already connected.">
+              Connect
+            </button>
+            <button class="sm" id="lo-disconnect-btn" onclick="disconnectLiveOptions()"
+                    title="Close every open connection and log out. The loaded chain is kept in memory — Connect resumes it.">
+              Disconnect
+            </button>
+            <button class="sm" id="lo-retry-btn" onclick="retryLiveOptions()"
+                    title="Re-subscribe every tracked contract that isn't streaming yet. Nothing is added or removed.">
+              Retry Pending
+            </button>
+            <button class="sm" id="lo-reconnect-btn" onclick="reconnectLiveOptions()"
+                    title="Hard restart: re-logs in and reopens however many connections the loaded chain needs.">
+              Reconnect
+            </button>
+          </div>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:14px;margin:10px 0">
+          <div id="lo-status" style="font-size:12px;color:var(--muted)"></div>
+        </div>
+
+        <!-- Populated dynamically from the loaded chain's distinct expiries — not hardcoded. -->
+        <div id="lo-expiry-tabs" class="sort-btns"></div>
+
+        <div id="lo-chain-view">
+          <table>
+            <thead>
+              <tr>
+                <th colspan="3" style="text-align:center;color:var(--put)">Put</th>
+                <th></th>
+                <th colspan="3" style="text-align:center;color:var(--call)">Call</th>
+              </tr>
+              <tr>
+                <th>Bid</th><th>Ask</th><th></th>
+                <th>Strike</th>
+                <th></th><th>Bid</th><th>Ask</th>
+              </tr>
+            </thead>
+            <tbody id="lo-tbody"></tbody>
+          </table>
+        </div>
+
+        <p id="lo-empty" style="display:none;padding:16px;color:var(--muted)">
+          No TSMC option chain loaded yet — click Load TSMC Chain.
+        </p>
+      </main>
+    </div>
+
     <!-- PORTFOLIO TAB -->
     <div id="tab-portfolio" class="tab-content">
       <main>
@@ -1051,6 +1114,7 @@
     <script src="{{ url_for('static', filename='js/portfolio.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/home.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/live_warrant.js', v=ASSET_VERSION) }}"></script>
+    <script src="{{ url_for('static', filename='js/live_options.js', v=ASSET_VERSION) }}"></script>
     {% endif %}
   </body>
 </html>
