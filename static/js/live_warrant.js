@@ -161,15 +161,21 @@ function _lwPatchRow(el, b) {
   _lwSetText(el.cells.age, _lwAge(b));
 }
 
-// Bound semantics copied exactly from logic/warrant_logic.py::_apply_warrant_filters:
-// - DTE: min <= dte <= max, inclusive.
-// - Time-value%: ask_time_value_pct <= max, with null/missing PASSING (a max
-//   cap can't judge a warrant with no ask, so it isn't filtered out).
-// - Volume: volume >= min.
+// Bound semantics start from logic/warrant_logic.py::_apply_warrant_filters
+// (DTE: min <= dte <= max; Volume: volume >= min), but with one deliberate
+// difference: on the Scanner, a row is a fully-computed batch snapshot, so
+// dte/volume are never null there. On this tab a freshly (re)subscribed code
+// starts with dte/volume still null — backfilled gradually by retry_pending(),
+// not instantly — so a null value here means "not loaded yet", not "fails the
+// bound", and must PASS rather than be hidden. Same treatment
+// ask_time_value_pct already had. Getting this wrong hides every row after
+// every redeploy until the terms/volume backfill catches up.
 function _lwPassesFilter(b, bounds) {
   const dte = bounds.dte || {};
-  if (dte.min !== null && dte.min !== undefined && (b.dte === null || b.dte < dte.min)) return false;
-  if (dte.max !== null && dte.max !== undefined && (b.dte === null || b.dte > dte.max)) return false;
+  if (dte.min !== null && dte.min !== undefined
+      && b.dte !== null && b.dte !== undefined && b.dte < dte.min) return false;
+  if (dte.max !== null && dte.max !== undefined
+      && b.dte !== null && b.dte !== undefined && b.dte > dte.max) return false;
 
   const tv = bounds.tv || {};
   if (tv.max !== null && tv.max !== undefined
@@ -177,7 +183,8 @@ function _lwPassesFilter(b, bounds) {
       && b.ask_time_value_pct > tv.max) return false;
 
   const vol = bounds.volume || {};
-  if (vol.min !== null && vol.min !== undefined && (b.volume === null || b.volume < vol.min)) return false;
+  if (vol.min !== null && vol.min !== undefined
+      && b.volume !== null && b.volume !== undefined && b.volume < vol.min) return false;
 
   return true;
 }
