@@ -57,6 +57,14 @@ SEED_BACKOFF_S = 0.6
 # rather than discovers.
 REST_QUOTA = 300
 REST_QUOTA_WINDOW_S = 60.0
+# The 300/60s cap alone only bounds the AVERAGE rate — right after a window
+# with slack (e.g. every fresh retry_pending() call), many threads can see
+# room and fire in the same instant, which is exactly the "8 unbounded
+# workers -> 429s" case the comment above measured, even though the total
+# stayed under 300/min. _RestQuota.acquire() also enforces this minimum gap
+# between GRANTED slots so a burst gets smoothed into the same steady 5/s
+# pace that was already confirmed to run clean.
+REST_MIN_INTERVAL_S = REST_QUOTA_WINDOW_S / REST_QUOTA
 # Longest a single call will block waiting for a slot before giving up. A scan
 # leaves what it can't seed for retry_pending(), so waiting out a whole window
 # inside a web request is never worth it.
@@ -164,10 +172,13 @@ class _RestQuota:
     enforces: the budget refills as individual requests age out, not in one lump.
     """
 
-    def __init__(self, limit=REST_QUOTA, window=REST_QUOTA_WINDOW_S):
+    def __init__(self, limit=REST_QUOTA, window=REST_QUOTA_WINDOW_S,
+                 min_interval=REST_MIN_INTERVAL_S):
         self._limit = limit
         self._window = window
+        self._min_interval = min_interval
         self._hits = collections.deque()
+        self._last_hit = None
         self._lock = threading.Lock()
 
     def acquire(self, timeout=None):
@@ -178,10 +189,16 @@ class _RestQuota:
                 now = time.monotonic()
                 while self._hits and now - self._hits[0] >= self._window:
                     self._hits.popleft()
-                if len(self._hits) < self._limit:
+                since_last = None if self._last_hit is None else now - self._last_hit
+                has_slot = len(self._hits) < self._limit
+                paced = since_last is None or since_last >= self._min_interval
+                if has_slot and paced:
                     self._hits.append(now)
+                    self._last_hit = now
                     return True
-                wait = self._window - (now - self._hits[0])
+                wait_slot = 0.0 if has_slot else self._window - (now - self._hits[0])
+                wait_pace = 0.0 if paced else self._min_interval - since_last
+                wait = max(wait_slot, wait_pace)
             if deadline is not None:
                 left = deadline - time.monotonic()
                 if left <= 0:
@@ -339,6 +356,41 @@ def _ensure_connection(idx):
         conn["index"] = len(_connections)
         _connections.append(conn)
     return conn
+
+
+def _preopen_connections(target_total_subs):
+    """Open however many pooled connections `target_total_subs` subscriptions
+    will need, all at once, in parallel.
+
+    Each login is a slow, untimed network round trip (broker auth + cert
+    download + websocket handshake, ~7-8s measured against this account) and
+    `_ensure_connection` only ever opens the next missing one just-in-time,
+    one at a time, as `_subscribe_one`'s otherwise-fast serial loop first
+    runs out of room on the last connection. A cold start big enough to need
+    N connections (a 1,000-code chain needs 4) used to pay N serial logins
+    back to back — ~24-30s of pure network wait — before the later
+    connections could even start subscribing. Opening every connection this
+    batch will need up front, concurrently, turns that into about one
+    login's worth of wall time.
+
+    Best-effort: a failed parallel open here just means `_subscribe_one`'s
+    normal lazy path opens it (again, alone) when it actually needs that
+    slot — same fallback behavior as if this function didn't run at all.
+    """
+    with _lock:
+        have = len(_connections)
+    needed = live_warrant_logic.connections_needed(target_total_subs) - have
+    if needed <= 0:
+        return
+    _log_debug(f"_preopen_connections: opening {needed} connection(s) in parallel "
+               f"(target {have + needed} for {target_total_subs} subscriptions)")
+    with ThreadPoolExecutor(max_workers=needed) as pool:
+        futures = [pool.submit(_ensure_connection, have + i) for i in range(needed)]
+        for f in futures:
+            try:
+                f.result()
+            except Exception as e:
+                print(f"LIVEWARRANT: parallel connection open failed: {_error_detail(e)}", flush=True)
 
 
 def _handle_message(conn, raw):
@@ -638,6 +690,61 @@ def _fetch_terms_one(code):
     return bool(conn and _fetch_terms(conn["sdk"], code))
 
 
+def _fan_out_start(fn, codes, deadline):
+    """Submit `fn(code)` for each code across SEED_WORKERS threads and return
+    immediately, WITHOUT waiting on any of them — a `ThreadPoolExecutor`
+    starts running submitted work right away, before the caller ever calls
+    `_fan_out_finish`. Splitting submit from wait is what lets
+    `retry_pending()` launch several REST-bound batches (reseed, terms)
+    against the same shared REST quota AT THE SAME TIME instead of running
+    one to completion before the next even starts — seen directly in
+    production: a reseed batch that got stuck on quota contention once ate
+    53 of a 60s budget, leaving the terms batch only 6.6s to work with, even
+    though both batches draw from the exact same underlying quota anyway and
+    have nothing to gain from being serialized.
+    """
+    if not codes:
+        return None, []
+    label = getattr(fn, "__name__", "fn")
+    remaining = max(0.0, deadline - time.monotonic())
+    _log_debug(f"_fan_out({label}): starting {len(codes)} codes on {SEED_WORKERS} workers, "
+               f"{remaining:.1f}s left in budget")
+    pool = ThreadPoolExecutor(max_workers=SEED_WORKERS)
+    futures = [pool.submit(fn, code) for code in codes]
+    return pool, futures
+
+
+def _fan_out_finish(fn, pool, futures, deadline):
+    """Wait (up to `deadline`, a `time.monotonic()` timestamp) for a batch
+    `_fan_out_start` already launched, then tear down its pool.
+
+    Never blocks the caller past `deadline` — past it, whatever hasn't
+    finished is simply not waited on; its thread keeps running in the
+    background (still bounded by the same quota/retry ceiling) and updates
+    state under `_lock` whenever it completes, it just no longer holds this
+    HTTP response open. Left-over codes are picked up again by the next
+    retry_pending() call exactly as if they'd failed outright.
+    """
+    if pool is None:
+        return 0
+    label = getattr(fn, "__name__", "fn")
+    try:
+        remaining = max(0.0, deadline - time.monotonic())
+        done, not_done = futures_wait(futures, timeout=remaining)
+        ok = sum(1 for f in done if not f.exception() and f.result())
+        if not_done:
+            _log_debug(f"_fan_out({label}): budget ran out — {len(done)}/{len(futures)} finished "
+                       f"({ok} succeeded), {len(not_done)} still running in the background")
+        else:
+            _log_debug(f"_fan_out({label}): all {len(futures)} finished, {ok} succeeded")
+        return ok
+    finally:
+        # wait=False: don't block here either — the still-running futures
+        # finish (or give up) on their own; a Python ThreadPoolExecutor's
+        # worker threads aren't forcibly killable anyway.
+        pool.shutdown(wait=False)
+
+
 def _fan_out(fn, codes, deadline):
     """Run `fn(code)` for each code across SEED_WORKERS threads, but never
     block the caller past `deadline` (a `time.monotonic()` timestamp).
@@ -646,37 +753,15 @@ def _fan_out(fn, codes, deadline):
     LONG the call can take — a single quota-starved `fn` can itself take up
     to ~SEED_RETRIES*(REST_ACQUIRE_TIMEOUT_S+backoff) seconds, and waiting
     for every one of a large batch to finish (what `pool.map` does) could
-    still exceed gunicorn's request timeout under a big enough backlog. Past
-    `deadline`, whatever hasn't finished is simply not waited on — its
-    thread keeps running in the background (still bounded by the same
-    quota/retry ceiling) and updates state under `_lock` whenever it
-    completes; it just no longer holds this HTTP response open. Left-over
-    codes are picked up again by the next retry_pending() call exactly as if
-    they'd failed outright.
+    still exceed gunicorn's request timeout under a big enough backlog.
+
+    Convenience wrapper around `_fan_out_start`/`_fan_out_finish` for a
+    single independent batch; `retry_pending()` calls the split form
+    directly so multiple batches can run concurrently against one shared
+    deadline instead of one at a time through this wrapper.
     """
-    if not codes:
-        return 0
-    label = getattr(fn, "__name__", "fn")
-    remaining = max(0.0, deadline - time.monotonic())
-    _log_debug(f"_fan_out({label}): starting {len(codes)} codes on {SEED_WORKERS} workers, "
-               f"{remaining:.1f}s left in budget")
-    pool = ThreadPoolExecutor(max_workers=SEED_WORKERS)
-    try:
-        futures = [pool.submit(fn, code) for code in codes]
-        remaining = max(0.0, deadline - time.monotonic())
-        done, not_done = futures_wait(futures, timeout=remaining)
-        ok = sum(1 for f in done if not f.exception() and f.result())
-        if not_done:
-            _log_debug(f"_fan_out({label}): budget ran out — {len(done)}/{len(codes)} finished "
-                       f"({ok} succeeded), {len(not_done)} still running in the background")
-        else:
-            _log_debug(f"_fan_out({label}): all {len(codes)} finished, {ok} succeeded")
-        return ok
-    finally:
-        # wait=False: don't block here either — the still-running futures
-        # finish (or give up) on their own; a Python ThreadPoolExecutor's
-        # worker threads aren't forcibly killable anyway.
-        pool.shutdown(wait=False)
+    pool, futures = _fan_out_start(fn, codes, deadline)
+    return _fan_out_finish(fn, pool, futures, deadline)
 
 
 def _subscribe_one(code):
@@ -746,8 +831,12 @@ def _track_many(codes, seed_budget=None):
 
     The REST seed is one round-trip per code and is the whole cost of a large
     scan — a full TSMC chain is ~1,050 of them, which sequentially overruns
-    gunicorn's request timeout and leaves the scan half-applied. Subscribing is
-    still serial (see `_subscribe_one`); only the seeding fans out.
+    gunicorn's request timeout and leaves the scan half-applied. The
+    subscribe loop itself is still serial (see `_subscribe_one`) — each send
+    is a fast local operation — but every connection this batch will need is
+    opened in parallel up front (`_preopen_connections`) so that loop is
+    never stuck waiting through several logins back to back; only the REST
+    seed fans out beyond that.
 
     A per-code subscribe failure is collected and returned, never raised: this
     used to abort the whole batch, which left the codes it had already reached
@@ -756,6 +845,9 @@ def _track_many(codes, seed_budget=None):
     retry_pending() on the next scheduler tick.
     """
     if codes:
+        with _lock:
+            current_subs = sum(len(c["codes"]) for c in _connections)
+        _preopen_connections(current_subs + len(codes))
         _log_debug(f"_track_many: subscribing {len(codes)} codes (serial — each is a fast local "
                    f"send UNLESS a new connection needs to open, see _ensure_connection's own log)")
     conns, failed = [], []
@@ -944,6 +1036,13 @@ def retry_pending(limit=PENDING_RETRY_BATCH):
     Retry Pending, it fills a few rows then stops" symptom. Whatever doesn't
     finish inside the shared budget is simply left for the next call.
 
+    The reseed and terms fan-outs are launched together (`_fan_out_start`
+    for both before either is awaited) rather than one after the other:
+    they draw from the exact same REST quota regardless, so serializing them
+    only starves whichever runs second whenever the first is quota-starved
+    — observed directly in production, where a slow reseed stage ate 53 of
+    a 60s budget and left the terms stage only 6.6s.
+
     Returns {"subscribed", "reseeded", "terms", "pending", "terms_missing"}.
     """
     with _lock:
@@ -963,6 +1062,11 @@ def retry_pending(limit=PENDING_RETRY_BATCH):
                f"{len(need_terms)} needing terms, budget {RETRY_PENDING_BUDGET_S}s")
     _log_resource_snapshot("retry_pending start")
     deadline = time.monotonic() + RETRY_PENDING_BUDGET_S
+
+    if todo:
+        with _lock:
+            current_subs = sum(len(c["codes"]) for c in _connections)
+        _preopen_connections(current_subs + len(todo))
 
     # Subscribing is a cheap local send with no round trip ONLY when an
     # already-open connection has room (_subscribe_one -> _ensure_connection
@@ -997,11 +1101,20 @@ def retry_pending(limit=PENDING_RETRY_BATCH):
             print(f"LIVEWARRANT: retry subscribe {code} failed: {detail}", flush=True)
     subscribed = len(to_seed)
     _log_debug(f"retry_pending: subscribe stage done, {subscribed}/{len(todo)} subscribed — "
-               f"starting seed fan-out for them")
-    _fan_out(_reseed_one, to_seed, deadline)
+               f"starting seed+terms fan-out")
 
-    reseeded = _fan_out(_reseed_one, reseed, deadline)
-    termed = _fan_out(_fetch_terms_one, need_terms, deadline)
+    # Launch every REST-bound batch's pool BEFORE awaiting any of them: a
+    # ThreadPoolExecutor's workers start pulling submitted work immediately,
+    # so by the time we get around to awaiting the first batch, the other
+    # two are already running concurrently against it — none of them can
+    # starve another out of the shared deadline just by being slow.
+    to_seed_pool, to_seed_futures = _fan_out_start(_reseed_one, to_seed, deadline)
+    reseed_pool, reseed_futures = _fan_out_start(_reseed_one, reseed, deadline)
+    terms_pool, terms_futures = _fan_out_start(_fetch_terms_one, need_terms, deadline)
+
+    _fan_out_finish(_reseed_one, to_seed_pool, to_seed_futures, deadline)
+    reseeded = _fan_out_finish(_reseed_one, reseed_pool, reseed_futures, deadline)
+    termed = _fan_out_finish(_fetch_terms_one, terms_pool, terms_futures, deadline)
 
     with _lock:
         still = len(_pending)

@@ -30,6 +30,26 @@ def test_assign_slot_raises_when_pool_fully_saturated():
         lwl.assign_slot(full, max_per_conn=300, max_connections=7)
 
 
+# ── connections_needed ───────────────────────────────────────────────────────
+
+def test_connections_needed_zero_for_no_subs():
+    assert lwl.connections_needed(0) == 0
+
+
+def test_connections_needed_rounds_up_to_a_whole_connection():
+    assert lwl.connections_needed(1, max_per_conn=300) == 1
+    assert lwl.connections_needed(300, max_per_conn=300) == 1
+    assert lwl.connections_needed(301, max_per_conn=300) == 2
+
+
+def test_connections_needed_matches_a_1000_code_chain():
+    assert lwl.connections_needed(1000, max_per_conn=300, max_connections=7) == 4
+
+
+def test_connections_needed_capped_at_max_connections():
+    assert lwl.connections_needed(10_000, max_per_conn=300, max_connections=7) == 7
+
+
 # ── check_capacity ───────────────────────────────────────────────────────────
 
 def test_check_capacity_allows_change_within_cap():

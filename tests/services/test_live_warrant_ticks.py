@@ -250,6 +250,92 @@ def test_fan_out_empty_codes_is_a_no_op():
     assert lw._fan_out(lambda code: True, [], deadline=time.monotonic() + 5) == 0
 
 
+# ── _fan_out_start/_fan_out_finish: split submit-from-wait ──────────────────
+#
+# retry_pending() launches its reseed and terms batches via this split form
+# so both start running before either is awaited — see retry_pending's own
+# docstring for the production freeze this fixes (a slow reseed batch ate
+# 53 of a 60s budget and left the terms batch only 6.6s, even though both
+# draw from the same REST quota regardless of which runs "first").
+
+def test_fan_out_start_then_finish_matches_fan_out_in_one_shot():
+    pool, futures = lw._fan_out_start(lambda code: code == "A", ["A", "B"],
+                                       deadline=time.monotonic() + 5)
+    done = lw._fan_out_finish(lambda code: None, pool, futures, deadline=time.monotonic() + 5)
+    assert done == 1
+
+
+def test_fan_out_start_empty_codes_returns_no_pool():
+    pool, futures = lw._fan_out_start(lambda code: True, [], deadline=time.monotonic() + 5)
+    assert pool is None and futures == []
+    assert lw._fan_out_finish(lambda code: None, pool, futures, deadline=time.monotonic() + 5) == 0
+
+
+def test_fan_out_start_runs_concurrently_before_being_awaited():
+    """Two batches submitted via _fan_out_start must overlap in wall time —
+    the whole point of splitting submit from wait."""
+    started = []
+
+    def _slow(code):
+        started.append((code, time.monotonic()))
+        time.sleep(0.3)
+        return True
+
+    deadline = time.monotonic() + 5
+    pool_a, futures_a = lw._fan_out_start(_slow, ["A"], deadline)
+    pool_b, futures_b = lw._fan_out_start(_slow, ["B"], deadline)
+    lw._fan_out_finish(_slow, pool_a, futures_a, deadline)
+    lw._fan_out_finish(_slow, pool_b, futures_b, deadline)
+
+    (_, ts_a), (_, ts_b) = started
+    assert abs(ts_a - ts_b) < 0.2, "second batch did not start until the first was awaited"
+
+
+# ── _RestQuota: sliding-window cap plus a minimum pacing gap ────────────────
+#
+# The 300/60s cap alone only bounds the average rate: right after a window
+# with slack, many threads can see room and fire in the same instant, which
+# is the exact "8 unbounded workers -> real 429s" case the module's own
+# comment documents even though the total stayed under budget. The pacing
+# gap smooths that burst into a steady rate instead.
+
+def test_rest_quota_denies_past_the_sliding_window_limit():
+    quota = lw._RestQuota(limit=2, window=60.0, min_interval=0.0)
+    assert quota.acquire(timeout=0) is True
+    assert quota.acquire(timeout=0) is True
+    assert quota.acquire(timeout=0) is False  # third slot not free yet
+
+
+def test_rest_quota_enforces_minimum_pacing_between_grants():
+    quota = lw._RestQuota(limit=100, window=60.0, min_interval=0.15)
+    t0 = time.monotonic()
+    assert quota.acquire(timeout=1) is True
+    assert quota.acquire(timeout=1) is True  # must wait out the pacing gap
+    elapsed = time.monotonic() - t0
+    assert elapsed >= 0.15, f"second acquire granted too soon ({elapsed:.3f}s)"
+
+
+def test_rest_quota_used_reports_current_window_count():
+    quota = lw._RestQuota(limit=5, window=60.0, min_interval=0.0)
+    quota.acquire()
+    quota.acquire()
+    assert quota.used() == 2
+
+
+# ── _preopen_connections: no-op when there's already enough capacity ───────
+
+def test_preopen_connections_noop_when_capacity_already_sufficient():
+    """Must not touch `_connections` (and therefore never call the real
+    SDK/login path) when existing connections already cover the target."""
+    fake_conns = [{"codes": set(range(300))}, {"codes": set(range(300))}]
+    lw._connections.extend(fake_conns)
+    try:
+        lw._preopen_connections(target_total_subs=500)  # fits in 2 connections
+        assert lw._connections == fake_conns  # unchanged
+    finally:
+        lw._connections.clear()
+
+
 # ── _log_debug: freeze-diagnostic checkpoints ───────────────────────────────
 
 def test_log_debug_appends_a_debug_level_entry():
