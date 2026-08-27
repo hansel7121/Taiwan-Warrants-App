@@ -346,6 +346,26 @@ async function runLiveWarrantScan() {
   }
 }
 
+async function removeLiveWarrantUnderlying() {
+  const underlying = document.getElementById("live-scan-underlying").value;
+  const statusEl = document.getElementById("live-scan-status");
+  if (!underlying) return;
+  if (!confirm(`Remove every tracked warrant for ${underlying}? This does not remove ${underlying}'s own live price.`)) return;
+  const btn = document.getElementById("live-remove-underlying-btn");
+  btn.disabled = true;
+  try {
+    const r = await apiJson("/remove_live_warrant_underlying", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ underlying }),
+    });
+    if (statusEl) statusEl.textContent = `removed ${r.removed} warrants for ${underlying}`;
+  } catch (e) {
+    if (statusEl) statusEl.textContent = e.message || String(e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // A refused scan (409) means nothing was changed — the resolved chain was so
 // much smaller than what is tracked that a truncated catalog response is the
 // likelier explanation. Deleting on that basis is how codes go missing, so the

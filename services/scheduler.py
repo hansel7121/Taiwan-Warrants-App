@@ -423,6 +423,22 @@ def _run_live_warrant():
     _job("live_warrant", sync_live_warrant)
 
 
+def _boot_live_warrant():
+    """Ungated, one-shot: reload the persisted tracked list and resubscribe
+    it once at scheduler start, regardless of trading hours.
+
+    Without this, a redeploy landing outside the tw_equity window left the
+    Live Warrant tab empty until someone noticed and clicked Reconnect —
+    the persisted list is right there in live_warrant_tracked the whole
+    time, there was just nothing ungated to load it back in. Subscribing a
+    persisted code costs nothing at any hour (the websocket just sits idle
+    until the market actually ticks); the periodic _run_live_warrant tick
+    below stays gated because retry_pending()'s REST churn genuinely has
+    nothing to gain while the market's shut.
+    """
+    _job("live_warrant_boot", live_warrant.start_session)
+
+
 def _run_live_options():
     _job("live_options", sync_live_options)
 
@@ -483,12 +499,15 @@ def start():
         # already written; gated on tw_equity since that's the narrower trading window.
         sched.add_job(_gated("tw_equity", _run_suggestions),
                       CronTrigger(minute="2,17,32,47", timezone=_TZ_TAIPEI))
-        # Live Warrant's Fubon session: checked every 5 min (start_session is a
-        # no-op once connected) and also attempted right away, so a restart
-        # mid-trading-day doesn't wait for the next grid tick to reconnect.
+        # Live Warrant's Fubon session: the persisted tracked list is reloaded
+        # and resubscribed once, ungated, right after boot — a redeploy at
+        # 2am shouldn't leave the tab empty until the next tw_equity window.
+        # The periodic every-5-min tick stays gated: start_session() is a
+        # no-op once connected, so its only real job during the day is
+        # retry_pending()'s catch-up, which has nothing to do while shut.
+        sched.add_job(_boot_live_warrant, "date", run_date=now + timedelta(seconds=2))
         sched.add_job(_gated("tw_equity", _run_live_warrant),
-                      CronTrigger(minute="*/5", timezone=_TZ_TAIPEI),
-                      next_run_time=now + timedelta(seconds=2))
+                      CronTrigger(minute="*/5", timezone=_TZ_TAIPEI))
         # Live Options' Fubon session: same shape as Live Warrant's job above,
         # but start_session() is a genuine no-op until "Load TSMC Chain" has
         # been clicked at least once this process's lifetime — there's no

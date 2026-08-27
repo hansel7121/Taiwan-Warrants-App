@@ -619,6 +619,10 @@
                      title="Warrants to subscribe, ranked by traded volume. 0 = the ENTIRE chain for this underlying (TSMC is ~1,050 books — over half the 2,100-subscription account cap)." style="width:70px" />
             </label>
             <button class="sm" id="live-scan-btn" onclick="runLiveWarrantScan()">Run Scan</button>
+            <button class="sm" id="live-remove-underlying-btn" onclick="removeLiveWarrantUnderlying()"
+                    title="Drop every tracked warrant for the underlying selected above. Does not touch codes added by hand.">
+              Remove Chain
+            </button>
             <span id="live-scan-status" style="font-size:12px;color:var(--muted)"></span>
           </div>
           <div style="display:flex;align-items:center;gap:10px">

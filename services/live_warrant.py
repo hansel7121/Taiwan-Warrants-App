@@ -553,6 +553,31 @@ def _fetch_terms(sdk, code):
     return True
 
 
+def _reseed_one(code):
+    """One reseed attempt for retry_pending()'s parallel fan-out (see its
+    docstring for why this runs on a thread pool instead of one code at a
+    time). Same REST call + name-backfill retry_pending() used to do inline."""
+    with _lock:
+        conn = next((c for c in _connections if code in c["codes"]), None)
+    if not (conn and _seed_from_rest(conn["sdk"], code)):
+        return False
+    with _lock:
+        name = _names.get(code)
+    if name:
+        try:
+            db_live_warrant.update_name(code, name)
+        except Exception as e:
+            print(f"LIVEWARRANT: name backfill {code} failed: {e}", flush=True)
+    return True
+
+
+def _fetch_terms_one(code):
+    """One terms fetch for retry_pending()'s parallel fan-out."""
+    with _lock:
+        conn = _connections[0] if _connections else None
+    return bool(conn and _fetch_terms(conn["sdk"], code))
+
+
 def _subscribe_one(code):
     """Place one code on whichever pool connection has room, opening one if needed.
 
@@ -699,7 +724,19 @@ def _untrack_one(code):
 # Session lifecycle (called by the scheduler gate and the manual Reconnect route)
 # ─────────────────────────────────────────────────────────────────────────────
 def start_session():
-    """Idempotent: no-op if the pool already has connections or the user disconnected; otherwise loads the persisted tracked list."""
+    """Idempotent: no-op if the pool already has connections or the user
+    disconnected; otherwise loads the persisted tracked list and resubscribes
+    it.
+
+    Subscribing is a local send with no round trip (see `_subscribe_one`), so
+    every persisted code is subscribed up front even for a full ~1,050-code
+    chain; only the REST seed is quota-bound, so it's spent the same way
+    `scan_underlying`'s `_track_many` already budgets a fresh scan —
+    `SEED_BUDGET_PER_SCAN` inline, the rest left for `retry_pending()` to
+    drain over the next few ticks. Seeding one code at a time used to make a
+    redeploy's restart minutes slower than a fresh scan for no reason; this
+    is what makes a restart resubscribe exactly as fast as a scan does.
+    """
     global _session_error
     with _lock:
         if _connections or _stopped_by_user:
@@ -722,43 +759,48 @@ def start_session():
         # `_terms` deliberately survives a restart of the session: a warrant's
         # strike, ratio and maturity never change, and re-fetching them would
         # spend a full quota window on data we already have.
-    for row in rows:
-        code = row["code"]
-        stored = row.get("name")
-        usable = bool(stored) and not _is_placeholder_name(stored)
-        with _lock:
-            if usable:
+        for row in rows:
+            code = row["code"]
+            stored = row.get("name")
+            if stored and not _is_placeholder_name(stored):
                 _names[code] = stored
             _tracked.append(code)
             _pending.add(code)
             _underlying_of[code] = row.get("underlying")
-        try:
-            _track_one(code)
-            # The seed above may have produced the first real name for a row
-            # written before it was subscribed, or for one still carrying an
-            # old "(FugleAPIError)" placeholder. Write it back so the pollution
-            # clears on its own rather than being re-read every restart.
-            with _lock:
-                fresh = _names.get(code)
-            if fresh and fresh != stored:
-                try:
-                    db_live_warrant.update_name(code, fresh)
-                except Exception as db_e:
-                    print(f"LIVEWARRANT: name backfill {code} failed: {db_e}", flush=True)
-        except Exception as e:
-            detail = _error_detail(e)
-            _session_error = f"{code}: {detail}"
-            with _lock:
-                _seed_errors[code] = detail
-            print(f"LIVEWARRANT: track {code} failed: {detail}", flush=True)
 
     # Underlying-price subscriptions are not persisted anywhere — re-derived
     # from the tracked list's own `underlying` column every (re)start, same as
-    # the warrant subscriptions themselves.
+    # the warrant subscriptions themselves. Subscribed BEFORE the warrant
+    # chain below (same ordering scan_underlying already uses) so the
+    # underlying's own display row starts ticking immediately instead of
+    # waiting behind however many hundred warrant subscribes come after it.
     with _lock:
         underlyings = {u for u in _underlying_of.values() if u in UNDERLYING_LIVE_PRICE_ALLOWLIST}
     for underlying in underlyings:
         _subscribe_underlying(underlying)
+
+    codes = [row["code"] for row in rows]
+    failed = _track_many(codes, seed_budget=SEED_BUDGET_PER_SCAN)
+    if failed:
+        _session_error = (f"{failed[0]}: subscribe failed"
+                          + (f" (+{len(failed) - 1} more)" if len(failed) > 1 else ""))
+
+    # The seed above may have produced the first real name for a row written
+    # before it was subscribed, or for one still carrying an old
+    # "(FugleAPIError)" placeholder. Write it back so the pollution clears on
+    # its own rather than being re-read every restart. Only codes actually
+    # seeded within this call's budget need it here — a code left for
+    # retry_pending() to seed later gets its own name backfill from that
+    # path's identical check once it catches up.
+    for row in rows:
+        code, stored = row["code"], row.get("name")
+        with _lock:
+            seeded, fresh = code in _seeded, _names.get(code)
+        if seeded and fresh and fresh != stored:
+            try:
+                db_live_warrant.update_name(code, fresh)
+            except Exception as db_e:
+                print(f"LIVEWARRANT: name backfill {code} failed: {db_e}", flush=True)
 
 
 def retry_pending(limit=PENDING_RETRY_BATCH):
@@ -778,6 +820,15 @@ def retry_pending(limit=PENDING_RETRY_BATCH):
     tracked list every call — safe to do every tick since that call goes
     straight to TWSE MIS (`requests.get`), bypassing the Fugle REST quota
     entirely, unlike everything else in this function.
+
+    Every REST-bound step (subscribe+seed, reseed, terms) fans out over
+    SEED_WORKERS threads rather than going one code at a time. One code at a
+    time meant a single quota-starved call could block every code behind it
+    for up to REST_ACQUIRE_TIMEOUT_S, and with all three loops able to run
+    that long each, a big backlog (e.g. right after a redeploy, or a fresh
+    whole-chain scan) could genuinely exceed gunicorn's request timeout and
+    get killed mid-batch — which is what "Retry Pending freezes, I have to
+    click it repeatedly" looks like from the browser.
 
     Returns {"subscribed", "reseeded", "terms", "pending", "terms_missing"}.
     """
@@ -800,37 +851,21 @@ def retry_pending(limit=PENDING_RETRY_BATCH):
         with _lock:
             _volumes.update(vols)
 
-    subscribed = 0
-    for code in todo:
-        try:
-            _track_one(code)
-            subscribed += 1
-        except Exception as e:
-            detail = _error_detail(e)
-            with _lock:
-                _seed_errors[code] = f"subscribe failed: {detail}"
-            print(f"LIVEWARRANT: retry subscribe {code} failed: {detail}", flush=True)
+    # _track_many already does exactly what this batch needs: serial (cheap)
+    # subscribe with per-code failure collected into _pending/_seed_errors,
+    # then the REST seed fanned out over a thread pool.
+    failed = _track_many(todo)
+    subscribed = len(todo) - len(failed)
 
     reseeded = 0
-    for code in reseed:
-        with _lock:
-            conn = next((c for c in _connections if code in c["codes"]), None)
-        if conn and _seed_from_rest(conn["sdk"], code):
-            reseeded += 1
-            with _lock:
-                name = _names.get(code)
-            if name:
-                try:
-                    db_live_warrant.update_name(code, name)
-                except Exception as e:
-                    print(f"LIVEWARRANT: name backfill {code} failed: {e}", flush=True)
+    if reseed:
+        with ThreadPoolExecutor(max_workers=SEED_WORKERS) as pool:
+            reseeded = sum(pool.map(_reseed_one, reseed))
 
     termed = 0
-    for code in need_terms:
-        with _lock:
-            conn = _connections[0] if _connections else None
-        if conn and _fetch_terms(conn["sdk"], code):
-            termed += 1
+    if need_terms:
+        with ThreadPoolExecutor(max_workers=SEED_WORKERS) as pool:
+            termed = sum(pool.map(_fetch_terms_one, need_terms))
 
     with _lock:
         still = len(_pending)
@@ -943,6 +978,27 @@ def _remove_many(codes):
             _names.pop(code, None)
     for code in codes:
         _untrack_one(code)
+
+
+def remove_underlying(underlying):
+    """Drop every tracked warrant for one underlying in a single action —
+    the bulk counterpart to remove_code(), for clearing a whole chain you
+    scanned and no longer want (e.g. "remove Hon Hai") without clicking
+    Remove on every one of its warrants individually.
+
+    Only ever matches scan-sourced rows: `underlying` is non-null exclusively
+    for `source='scan'` rows (see the DB check constraint in migration 023),
+    so a manually-added code is never swept up by this. Does not touch the
+    underlying's own live-price subscription (UNDERLYING_LIVE_PRICE_ALLOWLIST)
+    — that stays subscribed for whichever other tracked warrants still
+    reference it, and simply goes unused if this was the last one.
+
+    Returns the number of codes removed.
+    """
+    with _lock:
+        codes = [c for c, u in _underlying_of.items() if u == underlying]
+    _remove_many(codes)
+    return len(codes)
 
 
 def scan_underlying(underlying, top_n, force=False):

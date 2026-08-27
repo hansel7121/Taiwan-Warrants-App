@@ -614,6 +614,18 @@ def remove_live_warrant():
     return jsonify({"ok": True})
 
 
+@app.route("/remove_live_warrant_underlying", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def remove_live_warrant_underlying():
+    data = request.json or {}
+    underlying = (data.get("underlying") or "").strip()
+    if not underlying:
+        return jsonify({"error": "underlying required"}), 400
+    removed = live_warrant.remove_underlying(underlying)
+    return jsonify({"ok": True, "removed": removed})
+
+
 @app.route("/scan_live_warrant", methods=["POST"])
 @require_auth
 @require_role(ADMIN)
