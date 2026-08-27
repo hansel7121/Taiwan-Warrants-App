@@ -306,26 +306,6 @@ def test_best_level_changed_false_when_nothing_moves():
         old, [{"price": 10, "size": 5}], [{"price": 11, "size": 2}]) is False
 
 
-# ── describe_book_change ─────────────────────────────────────────────────────
-
-def test_describe_book_change_seeded_on_first_tick():
-    diff = lwl.describe_book_change(None, [{"price": 10, "size": 5}], [])
-    assert diff == "seeded: bid 10x5, ask —"
-
-
-def test_describe_book_change_reports_bid_and_ask_moves():
-    old = {"bids": [{"price": 10, "size": 5}], "asks": [{"price": 11, "size": 2}]}
-    diff = lwl.describe_book_change(
-        old, [{"price": 10.5, "size": 5}], [{"price": 11, "size": 2}])
-    assert diff == "bid 10x5 -> 10.5x5"
-
-
-def test_describe_book_change_no_change_text_when_deep_only():
-    old = {"bids": [{"price": 10, "size": 5}], "asks": []}
-    diff = lwl.describe_book_change(old, [{"price": 10, "size": 5}], [])
-    assert diff == "no change"
-
-
 # ── parse_warrant_type ───────────────────────────────────────────────────────
 
 def test_parse_warrant_type_call():

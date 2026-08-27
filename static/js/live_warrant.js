@@ -257,8 +257,13 @@ function _lwPoll() {
     });
 }
 
-// ── Console log: book-change diffs, collapsed by default ───────────────────
+// ── Console log: debug checkpoints only ─────────────────────────────────────
 // Only polls while the panel is open — no point paying for it collapsed.
+// Per-tick book-change diffs used to be logged here too, collapsed behind a
+// toggle, but a busy chain produces far more of those than any freeze-
+// diagnosis session can read, and they drowned out the debug checkpoints
+// (services/live_warrant.py's _log_debug) that this log actually exists for
+// — see services/live_warrant.py's _console_log comment.
 const LW_LOG_MAX_LINES = 500;
 
 // How close to the bottom (px) still counts as "was at the bottom" — a new
@@ -269,38 +274,8 @@ const LW_LOG_STICK_TO_BOTTOM_PX = 8;
 
 function _lwBuildLogLine(e) {
   const line = document.createElement("div");
-  // Debug checkpoints (freeze diagnostics — see services/live_warrant.py's
-  // _log_debug) carry no code/recalculated-columns/duration, just a plain
-  // message; highlighted, and never collapsed — these are exactly the lines
-  // you need to see readily while diagnosing a freeze.
-  if (e.level === "debug") {
-    line.className = "lw-log-debug";
-    line.textContent = `[${e.ts}] ${e.diff}`;
-    return line;
-  }
-  // Normal book-change ticks: collapsed by default behind a small triangle,
-  // since a busy chain can produce far more of these than anyone reads
-  // line-by-line — click to expand the one you actually care about.
-  line.className = "lw-log-line";
-  const toggle = document.createElement("span");
-  toggle.className = "lw-log-toggle";
-  toggle.textContent = "▶";
-  const summary = document.createElement("span");
-  summary.className = "lw-log-summary";
-  summary.textContent = `[${e.ts}] ${e.code}`;
-  const detail = document.createElement("span");
-  detail.className = "lw-log-detail";
-  detail.style.display = "none";
-  detail.textContent = ` "${e.diff}" - "${e.recalculated}" - took +${e.duration_s}s`;
-  line.appendChild(toggle);
-  line.appendChild(document.createTextNode(" "));
-  line.appendChild(summary);
-  line.appendChild(detail);
-  line.onclick = () => {
-    const expanded = detail.style.display !== "none";
-    detail.style.display = expanded ? "none" : "inline";
-    toggle.textContent = expanded ? "▶" : "▼";
-  };
+  line.className = "lw-log-debug";
+  line.textContent = `[${e.ts}] ${e.diff}`;
   return line;
 }
 

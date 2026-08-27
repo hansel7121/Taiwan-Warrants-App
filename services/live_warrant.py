@@ -69,7 +69,17 @@ SEED_BUDGET_PER_SCAN = 200
 # top of the book seed. They are static for a warrant's whole life, so they are
 # fetched once, cached, and never refreshed — and never fetched inline during a
 # scan, where they would double an already quota-bound request.
-TERMS_RETRY_BATCH = 60
+#
+# Sized to REST_QUOTA rather than some smaller round number: _fan_out already
+# refuses to run this list past retry_pending()'s own RETRY_PENDING_BUDGET_S
+# deadline, and every call still goes through the shared REST quota, so a
+# lower cap here does not make one retry_pending() call any safer — it just
+# means fewer terms get fetched than the budget/quota would actually allow.
+# At the old cap of 60, backfilling a full ~1,050-code chain's strike/DTE/
+# ratio took ~18 rounds of the scheduler's 5-minute retry_pending() tick
+# (~90 minutes) even though a single call, given the room, could clear most
+# of that chain in one pass.
+TERMS_RETRY_BATCH = REST_QUOTA
 TW_TZ = ZoneInfo("Asia/Taipei")
 MIS_RETRIES = 3
 MIS_BACKOFF_S = 1.0
@@ -120,14 +130,16 @@ _stopped_by_user = False  # set by stop_session(); blocks scheduler/add_code fro
 # an illiquid warrant from burning compute it never asked for.
 _book_seq = {}        # code -> int, bumped only when the code's best level changes
 _computed = {}         # code -> {"seq", "time_value", "bid_time_value_pct", "ask_time_value_pct"}
-_pending_log = {}      # code -> deque of {"seq","ts","diff"} awaiting a recompute to log against
 _underlying_of = {}    # code -> underlying stock code, mirrors live_warrant_tracked.underlying
 _underlying_books = {}  # underlying code -> {"price", "best", "ts", "src"}
 _underlying_codes = set()  # underlying codes currently subscribed on the same connection pool
 _underlying_names = {}  # underlying code -> display name, from the same ticker lookup a scan already makes
+# Debug checkpoints only (see _log_debug) — per-tick book-change diffs used to
+# be logged here too, but a busy chain produces far more of those than any
+# freeze-diagnosis session can read, and they were pushing genuine checkpoints
+# out of this deque's fixed size right when a freeze made them matter most.
 _console_log = collections.deque(maxlen=1000)
 _console_log_next_id = 0
-CONSOLE_LOG_PER_CODE = 20  # queued-but-not-yet-recomputed diffs kept per code before the oldest drops
 # Underlyings whose own price is subscribed live (books-channel midpoint) for
 # tick-driven recompute. Scoped to TSMC only for initial validation against a
 # real, highly liquid symbol before any wider rollout — see
@@ -365,9 +377,6 @@ def _handle_message(conn, raw):
         # burn exactly the compute this design exists to avoid.
         if dirty:
             _book_seq[code] = _book_seq.get(code, 0) + 1
-            diff = live_warrant_logic.describe_book_change(old_book, new_bids, new_asks)
-            _pending_log.setdefault(code, collections.deque(maxlen=CONSOLE_LOG_PER_CODE)).append(
-                {"seq": _book_seq[code], "ts": datetime.now(timezone.utc), "diff": diff})
 
 
 def _fold_underlying_tick_locked(code, bids, asks):
@@ -795,7 +804,6 @@ def _untrack_one(code):
         _seed_errors.pop(code, None)
         _book_seq.pop(code, None)
         _computed.pop(code, None)
-        _pending_log.pop(code, None)
         _underlying_of.pop(code, None)
         # A code can also be an underlying's own subscription (see
         # _subscribe_underlying) — clear that side too so a manual Remove on
@@ -1407,8 +1415,7 @@ def _recompute_if_dirty(code):
     500ms poll. Missing inputs (terms not backfilled yet, underlying not
     priced yet — only TSMC is live-priced today, expired) leave whatever is
     cached untouched, same degrade-to-"—" pattern the tab already uses for
-    strike/DTE; the queued console-log diffs stay pending until the inputs
-    do show up, rather than being dropped.
+    strike/DTE.
     """
     with _lock:
         seq = _book_seq.get(code)
@@ -1434,19 +1441,14 @@ def _recompute_if_dirty(code):
             return
 
         bids, asks = book["bids"], book["asks"]
-        pending_diffs = list(_pending_log.get(code) or [])
-        _pending_log.pop(code, None)
 
     best = live_warrant_logic.best_level(bids, asks)
     bid, ask = best.get("bid") or 0.0, best.get("ask") or 0.0
     is_put = type_label == "Put"
 
-    t0 = time.perf_counter()
     time_value, bid_pct, ask_pct = iv_engine.solve_tick(
         underlying_price, strike, ratio, is_put, bid, ask)
-    duration_s = round(time.perf_counter() - t0, 4)
 
-    global _console_log_next_id
     with _lock:
         _computed[code] = {
             "seq": seq,
@@ -1458,25 +1460,14 @@ def _recompute_if_dirty(code):
             "bid_time_value_pct": _nan_to_none(bid_pct),
             "ask_time_value_pct": _nan_to_none(ask_pct),
         }
-        for entry in pending_diffs:
-            _console_log_next_id += 1
-            _console_log.append({
-                "id": _console_log_next_id,
-                "ts": entry["ts"].isoformat(),
-                "code": code,
-                "diff": entry["diff"],
-                "recalculated": "time_value, bid_time_value_pct, ask_time_value_pct",
-                "duration_s": duration_s,
-                "level": "info",
-            })
 
 
 def _log_debug(message):
     """A diagnostic checkpoint, surfaced in the Live Warrant tab's console
-    log (rendered highlighted, distinct from the normal book-change lines)
-    so a freeze can be diagnosed by watching the browser instead of guessed
-    at from code inspection — the last checkpoint logged before everything
-    stops is, by construction, right next to whatever's actually stuck.
+    log (the only kind of entry it carries) so a freeze can be diagnosed by
+    watching the browser instead of guessed at from code inspection — the
+    last checkpoint logged before everything stops is, by construction,
+    right next to whatever's actually stuck.
 
     Deliberately cheap (one dict append under the same lock every other
     console-log write already uses) and left on permanently rather than
@@ -1553,7 +1544,7 @@ def _log_resource_snapshot(label):
 
 
 def get_console_log(since=0, limit=200):
-    """Book-change log entries with id > `since`, oldest first, capped at `limit`."""
+    """Debug-checkpoint log entries with id > `since`, oldest first, capped at `limit`."""
     with _lock:
         entries = [e for e in _console_log if e["id"] > since][-limit:]
         latest_id = _console_log_next_id
