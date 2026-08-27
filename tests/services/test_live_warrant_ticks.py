@@ -10,6 +10,7 @@ subtly wrong, and the console-log queue/drain interaction between
 of this module is verified manually against the real Fubon connection).
 """
 import json
+import time
 
 import pytest
 
@@ -24,16 +25,14 @@ def _clean_state():
     """Every test starts from empty module state and leaves it empty after —
     these are process-wide globals, not per-instance."""
     for d in (lw._books, lw._book_seq, lw._computed, lw._pending_log,
-              lw._terms, lw._underlying_of, lw._underlying_books, lw._underlying_names,
-              lw._volumes):
+              lw._terms, lw._underlying_of, lw._underlying_books, lw._underlying_names):
         d.clear()
     lw._underlying_codes.clear()
     lw._console_log.clear()
     lw._console_log_next_id = 0
     yield
     for d in (lw._books, lw._book_seq, lw._computed, lw._pending_log,
-              lw._terms, lw._underlying_of, lw._underlying_books, lw._underlying_names,
-              lw._volumes):
+              lw._terms, lw._underlying_of, lw._underlying_books, lw._underlying_names):
         d.clear()
     lw._underlying_codes.clear()
     lw._console_log.clear()
@@ -98,7 +97,7 @@ def test_underlying_row_payload_pending_before_first_tick():
     assert row["type"] == "Underlying"
     assert row["underlying_price"] is None
     # Warrant-only fields must degrade to None/"—", never raise or fabricate a value.
-    assert row["strike"] is None and row["dte"] is None and row["volume"] is None
+    assert row["strike"] is None and row["dte"] is None
 
 
 def test_underlying_row_payload_fills_in_after_a_tick():
@@ -215,3 +214,48 @@ def test_recompute_if_dirty_expired_warrant_stays_uncomputed():
     lw._handle_message({}, _frame([{"price": 3.2, "size": 5}], [{"price": 3.4, "size": 3}]))
     lw._recompute_if_dirty(CODE)
     assert CODE not in lw._computed
+
+
+# ── _fan_out: bounded wall-clock, not just bounded parallelism ─────────────
+#
+# Parallelizing retry_pending()'s REST-bound loops (SEED_WORKERS threads
+# instead of one code at a time) was the first fix for "Retry Pending
+# freezes" — but pool.map() still blocks the caller until every submitted
+# call finishes, and one quota-starved call can itself take ~60s+. A big
+# backlog could still make that "parallel" version exceed the request
+# timeout and get killed mid-batch, which is the second half of the bug
+# report. _fan_out is what actually bounds the CALLER's wall-clock time,
+# regardless of how long individual tasks take.
+
+def test_fan_out_returns_by_the_deadline_even_with_slow_tasks():
+    def _slow(code):
+        time.sleep(2)
+        return True
+
+    t0 = time.monotonic()
+    lw._fan_out(_slow, ["A", "B", "C"], deadline=time.monotonic() + 0.2)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 1.0, f"_fan_out blocked past its deadline: took {elapsed:.2f}s"
+
+
+def test_fan_out_counts_only_what_finished_before_the_deadline():
+    def _slow(code):
+        time.sleep(2)
+        return True
+
+    done = lw._fan_out(_slow, ["A", "B"], deadline=time.monotonic() + 0.2)
+    assert done == 0  # neither task could have finished in 0.2s
+
+
+def test_fan_out_returns_completed_count_when_tasks_are_fast():
+    done = lw._fan_out(lambda code: True, ["A", "B", "C"], deadline=time.monotonic() + 5)
+    assert done == 3
+
+
+def test_fan_out_does_not_count_a_false_result():
+    done = lw._fan_out(lambda code: code == "A", ["A", "B"], deadline=time.monotonic() + 5)
+    assert done == 1
+
+
+def test_fan_out_empty_codes_is_a_no_op():
+    assert lw._fan_out(lambda code: True, [], deadline=time.monotonic() + 5) == 0

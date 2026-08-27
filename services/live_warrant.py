@@ -17,7 +17,7 @@ import os
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -76,6 +76,19 @@ MIS_BACKOFF_S = 1.0
 # Codes re-attempted per retry_pending() call. Bounded so a scheduler tick that
 # inherits a fully failed 1,000-code scan still finishes promptly.
 PENDING_RETRY_BATCH = 100
+# Hard wall-clock ceiling on one retry_pending() call, independent of how
+# many codes are queued or how contended the REST quota is. Parallelizing
+# the three REST-bound stages (see _fan_out) bounds how many codes run at
+# once, not how long the call can take — pool.map() still blocks until
+# every submitted call finishes, and one quota-starved call can take up to
+# SEED_RETRIES*(REST_ACQUIRE_TIMEOUT_S+backoff) ≈ 63s on its own. A big
+# backlog (e.g. right after a redeploy) could make even the parallelized
+# version exceed gunicorn's request timeout and get killed mid-batch — the
+# exact "click Retry Pending, it fills a few rows then stops" symptom.
+# Past this budget, whatever hasn't finished is simply left running in the
+# background (its own thread still completes and updates state under _lock
+# whenever it's done) rather than holding the HTTP response open.
+RETRY_PENDING_BUDGET_S = 60
 # Warrants are listed on both boards; scanning only TSE silently misses the
 # OTC-listed half of some chains.
 WARRANT_MARKETS = ("TSE", "OTC")
@@ -106,11 +119,9 @@ _underlying_of = {}    # code -> underlying stock code, mirrors live_warrant_tra
 _underlying_books = {}  # underlying code -> {"price", "best", "ts", "src"}
 _underlying_codes = set()  # underlying codes currently subscribed on the same connection pool
 _underlying_names = {}  # underlying code -> display name, from the same ticker lookup a scan already makes
-_volumes = {}           # code -> int, MIS-sourced, refreshed on the retry_pending() cadence
 _console_log = collections.deque(maxlen=1000)
 _console_log_next_id = 0
 CONSOLE_LOG_PER_CODE = 20  # queued-but-not-yet-recomputed diffs kept per code before the oldest drops
-VOLUME_RETRY_BATCH = 300   # tracked codes refreshed per retry_pending() call — cheap, bypasses the Fugle quota
 # Underlyings whose own price is subscribed live (books-channel midpoint) for
 # tick-driven recompute. Scoped to TSMC only for initial validation against a
 # real, highly liquid symbol before any wider rollout — see
@@ -578,6 +589,37 @@ def _fetch_terms_one(code):
     return bool(conn and _fetch_terms(conn["sdk"], code))
 
 
+def _fan_out(fn, codes, deadline):
+    """Run `fn(code)` for each code across SEED_WORKERS threads, but never
+    block the caller past `deadline` (a `time.monotonic()` timestamp).
+
+    Parallelizing bounds how many codes run AT ONCE; it does not bound how
+    LONG the call can take — a single quota-starved `fn` can itself take up
+    to ~SEED_RETRIES*(REST_ACQUIRE_TIMEOUT_S+backoff) seconds, and waiting
+    for every one of a large batch to finish (what `pool.map` does) could
+    still exceed gunicorn's request timeout under a big enough backlog. Past
+    `deadline`, whatever hasn't finished is simply not waited on — its
+    thread keeps running in the background (still bounded by the same
+    quota/retry ceiling) and updates state under `_lock` whenever it
+    completes; it just no longer holds this HTTP response open. Left-over
+    codes are picked up again by the next retry_pending() call exactly as if
+    they'd failed outright.
+    """
+    if not codes:
+        return 0
+    pool = ThreadPoolExecutor(max_workers=SEED_WORKERS)
+    try:
+        futures = [pool.submit(fn, code) for code in codes]
+        remaining = max(0.0, deadline - time.monotonic())
+        done, _not_done = futures_wait(futures, timeout=remaining)
+        return sum(1 for f in done if not f.exception() and f.result())
+    finally:
+        # wait=False: don't block here either — the still-running futures
+        # finish (or give up) on their own; a Python ThreadPoolExecutor's
+        # worker threads aren't forcibly killable anyway.
+        pool.shutdown(wait=False)
+
+
 def _subscribe_one(code):
     """Place one code on whichever pool connection has room, opening one if needed.
 
@@ -697,7 +739,6 @@ def _untrack_one(code):
         _book_seq.pop(code, None)
         _computed.pop(code, None)
         _pending_log.pop(code, None)
-        _volumes.pop(code, None)
         _underlying_of.pop(code, None)
         # A code can also be an underlying's own subscription (see
         # _subscribe_underlying) — clear that side too so a manual Remove on
@@ -815,20 +856,19 @@ def retry_pending(limit=PENDING_RETRY_BATCH):
 
     Also backfills the contract terms (strike / exercise ratio / maturity) the
     table shows, a bounded batch at a time — those are one REST call per code
-    and never change, so the work runs down to nothing. And refreshes the
-    Live Warrant tab's Volume column via `_mis_volumes()` for the whole
-    tracked list every call — safe to do every tick since that call goes
-    straight to TWSE MIS (`requests.get`), bypassing the Fugle REST quota
-    entirely, unlike everything else in this function.
+    and never change, so the work runs down to nothing.
 
-    Every REST-bound step (subscribe+seed, reseed, terms) fans out over
-    SEED_WORKERS threads rather than going one code at a time. One code at a
-    time meant a single quota-starved call could block every code behind it
-    for up to REST_ACQUIRE_TIMEOUT_S, and with all three loops able to run
-    that long each, a big backlog (e.g. right after a redeploy, or a fresh
-    whole-chain scan) could genuinely exceed gunicorn's request timeout and
-    get killed mid-batch — which is what "Retry Pending freezes, I have to
-    click it repeatedly" looks like from the browser.
+    Every REST-bound step (subscribe, reseed, terms) fans out over
+    SEED_WORKERS threads via `_fan_out`, all sharing ONE
+    RETRY_PENDING_BUDGET_S deadline — see `_fan_out`'s docstring for why
+    parallelism alone (bounding how many codes run at once) isn't enough:
+    `pool.map()` still blocks until every submitted call finishes, and one
+    quota-starved call can itself take up to ~SEED_RETRIES*
+    (REST_ACQUIRE_TIMEOUT_S+backoff) seconds. A big backlog (e.g. right
+    after a redeploy) could still make an unbounded parallel version exceed
+    gunicorn's request timeout and get killed mid-batch — the exact "click
+    Retry Pending, it fills a few rows then stops" symptom. Whatever doesn't
+    finish inside the shared budget is simply left for the next call.
 
     Returns {"subscribed", "reseeded", "terms", "pending", "terms_missing"}.
     """
@@ -844,28 +884,30 @@ def retry_pending(limit=PENDING_RETRY_BATCH):
         # Terms are one-shot per code and never expire, so this list empties for
         # good once every tracked warrant has been looked up.
         need_terms = [c for c in _tracked if c not in _terms][:TERMS_RETRY_BATCH]
-        volume_batch = list(_tracked)[:VOLUME_RETRY_BATCH]
 
-    if volume_batch:
-        vols, _missing = _mis_volumes(volume_batch)
-        with _lock:
-            _volumes.update(vols)
+    deadline = time.monotonic() + RETRY_PENDING_BUDGET_S
 
-    # _track_many already does exactly what this batch needs: serial (cheap)
-    # subscribe with per-code failure collected into _pending/_seed_errors,
-    # then the REST seed fanned out over a thread pool.
-    failed = _track_many(todo)
-    subscribed = len(todo) - len(failed)
+    # Subscribing is a cheap local send with no round trip (see
+    # _subscribe_one), so this always runs in full regardless of budget;
+    # only the REST seed that follows is deadline-bound.
+    to_seed = []
+    for code in todo:
+        try:
+            _subscribe_one(code)
+            with _lock:
+                _pending.discard(code)
+            to_seed.append(code)
+        except Exception as e:
+            detail = _error_detail(e)
+            with _lock:
+                _pending.add(code)
+                _seed_errors[code] = f"subscribe failed: {detail}"
+            print(f"LIVEWARRANT: retry subscribe {code} failed: {detail}", flush=True)
+    subscribed = len(to_seed)
+    _fan_out(_reseed_one, to_seed, deadline)
 
-    reseeded = 0
-    if reseed:
-        with ThreadPoolExecutor(max_workers=SEED_WORKERS) as pool:
-            reseeded = sum(pool.map(_reseed_one, reseed))
-
-    termed = 0
-    if need_terms:
-        with ThreadPoolExecutor(max_workers=SEED_WORKERS) as pool:
-            termed = sum(pool.map(_fetch_terms_one, need_terms))
+    reseeded = _fan_out(_reseed_one, reseed, deadline)
+    termed = _fan_out(_fetch_terms_one, need_terms, deadline)
 
     with _lock:
         still = len(_pending)
@@ -1253,7 +1295,7 @@ def _underlying_row_payload(code):
         return {
             "code": code, "name": name, "pending": True, "error": None,
             "type": "Underlying", "underlying_code": code, "underlying_price": None,
-            "strike": None, "exercise_ratio": None, "dte": None, "volume": None,
+            "strike": None, "exercise_ratio": None, "dte": None,
             "time_value": None, "bid_time_value_pct": None, "ask_time_value_pct": None,
             "best": live_warrant_logic.best_level([], []),
             "age": None, "src": None,
@@ -1261,7 +1303,7 @@ def _underlying_row_payload(code):
     return {
         "code": code, "name": name, "pending": False, "error": None,
         "type": "Underlying", "underlying_code": code, "underlying_price": info.get("price"),
-        "strike": None, "exercise_ratio": None, "dte": None, "volume": None,
+        "strike": None, "exercise_ratio": None, "dte": None,
         "time_value": None, "bid_time_value_pct": None, "ask_time_value_pct": None,
         "best": info.get("best") or live_warrant_logic.best_level([], []),
         "age": round((datetime.now(timezone.utc) - info["ts"]).total_seconds(), 1),
@@ -1366,7 +1408,6 @@ def _ladder_payload(code):
             _underlying_books.get(underlying, {}).get("price") if underlying else None
         )
         computed = _computed.get(code) or {}
-        volume = _volumes.get(code)
     base = {
         "code": code, "name": name, "pending": pending, "error": error,
         "type": live_warrant_logic.parse_warrant_type(name),
@@ -1375,7 +1416,6 @@ def _ladder_payload(code):
         "strike": terms.get("strike"),
         "exercise_ratio": terms.get("exercise_ratio"),
         "dte": _days_to_expiry(terms.get("maturity")),
-        "volume": volume,
         "time_value": computed.get("time_value"),
         "bid_time_value_pct": computed.get("bid_time_value_pct"),
         "ask_time_value_pct": computed.get("ask_time_value_pct"),

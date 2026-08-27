@@ -16,17 +16,16 @@ let _lwRows = {};           // code -> table row els, keyed by _lwBuildRow()
 let _lwLogLastId = 0;
 const _lwLastText = new WeakMap();
 
-// Same three bounds as the Warrant Scanner's WARRANT_FILTER_SPEC (scanners.js),
-// minus Leverage — this tab never computes leverage (that would need IV/delta,
-// which are deliberately never solved here, not even internally).
+// Same bounds as the Warrant Scanner's WARRANT_FILTER_SPEC (scanners.js),
+// minus Leverage (this tab never computes it — that would need IV/delta,
+// which are deliberately never solved here, not even internally) and minus
+// Volume (this tab doesn't show a Volume column at all).
 const LIVE_WARRANT_FILTER_SPEC = [
   { key: "dte", label: "Days to expiry", short: "DTE",
     min: { field: "min_days", value: 0, attrs: { min: 0, step: 1 } },
     max: { field: "max_days", value: 365, attrs: { min: 0, step: 1 } } },
   { key: "tv", label: "Time value %", short: "TV%",
     max: { field: "max_tv_pct", value: 100, attrs: { min: 0, step: 0.1 } } },
-  { key: "volume", label: "Volume", short: "Vol",
-    min: { field: "min_volume", value: 0, attrs: { min: 0 } } },
 ];
 
 function _lwSetText(el, s) {
@@ -79,7 +78,7 @@ function _lwBuildRow(code) {
   // updates once the code's own best level has ticked — so they render as "—"
   // until the backend has something for them.
   const cols = ["underlying_code", "type", "underlying_price", "best_bid", "best_ask",
-                "strike", "dte", "ratio", "volume",
+                "strike", "dte", "ratio",
                 "time_value", "bid_time_value_pct", "ask_time_value_pct"];
   // Best Bid/Ask keep the same red/green coloring the old 10-column ladder used.
   const colorClass = { best_bid: "bid", best_ask: "ask" };
@@ -126,10 +125,6 @@ function _lwPct(v, dp) {
   return `${_lwNum(v, dp)}%`;
 }
 
-function _lwInt(v) {
-  return v === null || v === undefined ? "—" : Number(v).toLocaleString();
-}
-
 function _lwDte(v) {
   if (v === null || v === undefined) return "—";
   return v < 0 ? `${v}d (expired)` : `${v}d`;
@@ -146,7 +141,6 @@ function _lwPatchRow(el, b) {
   _lwSetText(el.cells.strike, _lwNum(b.strike, 2));
   _lwSetText(el.cells.dte, _lwDte(b.dte));
   _lwSetText(el.cells.ratio, _lwNum(b.exercise_ratio, 4));
-  _lwSetText(el.cells.volume, _lwInt(b.volume));
   _lwSetText(el.cells.time_value, _lwNum(b.time_value, 2));
   _lwSetText(el.cells.bid_time_value_pct, _lwPct(b.bid_time_value_pct, 2));
   _lwSetText(el.cells.ask_time_value_pct, _lwPct(b.ask_time_value_pct, 2));
@@ -165,14 +159,14 @@ function _lwPatchRow(el, b) {
 }
 
 // Bound semantics start from logic/warrant_logic.py::_apply_warrant_filters
-// (DTE: min <= dte <= max; Volume: volume >= min), but with one deliberate
-// difference: on the Scanner, a row is a fully-computed batch snapshot, so
-// dte/volume are never null there. On this tab a freshly (re)subscribed code
-// starts with dte/volume still null — backfilled gradually by retry_pending(),
-// not instantly — so a null value here means "not loaded yet", not "fails the
-// bound", and must PASS rather than be hidden. Same treatment
-// ask_time_value_pct already had. Getting this wrong hides every row after
-// every redeploy until the terms/volume backfill catches up.
+// (DTE: min <= dte <= max), but with one deliberate difference: on the
+// Scanner, a row is a fully-computed batch snapshot, so dte is never null
+// there. On this tab a freshly (re)subscribed code starts with dte still
+// null — backfilled gradually by retry_pending(), not instantly — so a null
+// value here means "not loaded yet", not "fails the bound", and must PASS
+// rather than be hidden. Same treatment ask_time_value_pct already had.
+// Getting this wrong hides every row after every redeploy until the terms
+// backfill catches up.
 function _lwPassesFilter(b, bounds) {
   const dte = bounds.dte || {};
   if (dte.min !== null && dte.min !== undefined
@@ -184,10 +178,6 @@ function _lwPassesFilter(b, bounds) {
   if (tv.max !== null && tv.max !== undefined
       && b.ask_time_value_pct !== null && b.ask_time_value_pct !== undefined
       && b.ask_time_value_pct > tv.max) return false;
-
-  const vol = bounds.volume || {};
-  if (vol.min !== null && vol.min !== undefined
-      && b.volume !== null && b.volume !== undefined && b.volume < vol.min) return false;
 
   return true;
 }
