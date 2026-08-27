@@ -57,14 +57,23 @@ SEED_BACKOFF_S = 0.6
 # rather than discovers.
 REST_QUOTA = 300
 REST_QUOTA_WINDOW_S = 60.0
-# The 300/60s cap alone only bounds the AVERAGE rate — right after a window
-# with slack (e.g. every fresh retry_pending() call), many threads can see
-# room and fire in the same instant, which is exactly the "8 unbounded
-# workers -> 429s" case the comment above measured, even though the total
-# stayed under 300/min. _RestQuota.acquire() also enforces this minimum gap
-# between GRANTED slots so a burst gets smoothed into the same steady 5/s
-# pace that was already confirmed to run clean.
-REST_MIN_INTERVAL_S = REST_QUOTA_WINDOW_S / REST_QUOTA
+# The 300/60s cap alone only bounds the AVERAGE rate: a fresh window (e.g.
+# right after boot) lets many threads see room and fire in the same instant.
+# A first-attempt fix paced EVERY grant to the full-account average (5/s,
+# window/quota) — that turned out far more conservative than the account
+# actually needs: both this account's observed bursts (8 workers, no pacing
+# at all) moved ~200 codes in ~11s with zero errors; the real 429s only
+# showed up later, once cumulative volume was already near the 300 ceiling.
+# Flattening every call to 5/s made a 200-call stage take ~40s instead of
+# ~11s for no measured benefit over just capping the BURST rate instead.
+# This second, much shorter window is what actually addresses the failure:
+# it caps how many can be granted within any single second (comfortably
+# above what SEED_WORKERS's natural 8-way concurrency needs, even with two
+# fan-outs running at once per retry_pending()'s concurrent reseed+terms),
+# without slowing the account down to its raw 60s average the way pacing
+# every single grant did.
+REST_BURST_LIMIT = 24
+REST_BURST_WINDOW_S = 1.0
 # Longest a single call will block waiting for a slot before giving up. A scan
 # leaves what it can't seed for retry_pending(), so waiting out a whole window
 # inside a web request is never worth it.
@@ -160,7 +169,8 @@ UNDERLYING_LIVE_PRICE_ALLOWLIST = {"2330"}
 # REST quota
 # ─────────────────────────────────────────────────────────────────────────────
 class _RestQuota:
-    """Sliding-window limiter in front of every Fugle REST call.
+    """Two sliding windows in front of every Fugle REST call: the account's
+    60s budget, and a much shorter burst window layered on top of it.
 
     The SDK does nothing to pace requests, so the seed fan-out used to find the
     quota by hitting it: the first ~300 calls succeeded and every one after that
@@ -168,18 +178,38 @@ class _RestQuota:
     latency instead of into a wall of failed seeds — which is what was showing
     up in the name column.
 
-    A sliding window rather than a token bucket because that is what the server
-    enforces: the budget refills as individual requests age out, not in one lump.
+    Sliding windows rather than a token bucket because that is what the server
+    enforces: the budget refills as individual requests age out, not in one
+    lump. The burst window exists because the 60s window alone only bounds the
+    AVERAGE rate — a fresh window lets many threads see room and fire in the
+    same instant, and 60s later those same simultaneous hits age out and free
+    a burst of slots all over again. The short window caps how many can be
+    granted within any single second, without capping the sustained rate down
+    to the account's raw 60s average the way pacing every grant to that
+    average would (measured: it turned an ~11s stage into ~40s for no benefit
+    over just capping the burst).
     """
 
     def __init__(self, limit=REST_QUOTA, window=REST_QUOTA_WINDOW_S,
-                 min_interval=REST_MIN_INTERVAL_S):
+                 burst_limit=REST_BURST_LIMIT, burst_window=REST_BURST_WINDOW_S):
         self._limit = limit
         self._window = window
-        self._min_interval = min_interval
+        self._burst_limit = burst_limit
+        self._burst_window = burst_window
         self._hits = collections.deque()
-        self._last_hit = None
         self._lock = threading.Lock()
+
+    def _burst_count_and_oldest(self, now):
+        """How many of the current hits fall inside the burst window, and the
+        oldest of those — `_hits` is ordered oldest-first, so scanning from
+        the right (newest) stops as soon as one falls outside the window."""
+        count, oldest = 0, None
+        for t in reversed(self._hits):
+            if now - t >= self._burst_window:
+                break
+            count += 1
+            oldest = t
+        return count, oldest
 
     def acquire(self, timeout=None):
         """Claim one request slot. False if `timeout` elapsed without one."""
@@ -189,16 +219,16 @@ class _RestQuota:
                 now = time.monotonic()
                 while self._hits and now - self._hits[0] >= self._window:
                     self._hits.popleft()
-                since_last = None if self._last_hit is None else now - self._last_hit
+                burst_count, oldest_in_burst = self._burst_count_and_oldest(now)
                 has_slot = len(self._hits) < self._limit
-                paced = since_last is None or since_last >= self._min_interval
-                if has_slot and paced:
+                has_burst_room = burst_count < self._burst_limit
+                if has_slot and has_burst_room:
                     self._hits.append(now)
-                    self._last_hit = now
                     return True
                 wait_slot = 0.0 if has_slot else self._window - (now - self._hits[0])
-                wait_pace = 0.0 if paced else self._min_interval - since_last
-                wait = max(wait_slot, wait_pace)
+                wait_burst = (0.0 if has_burst_room
+                              else self._burst_window - (now - oldest_in_burst))
+                wait = max(wait_slot, wait_burst)
             if deadline is not None:
                 left = deadline - time.monotonic()
                 if left <= 0:
