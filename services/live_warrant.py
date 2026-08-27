@@ -658,9 +658,12 @@ def _fetch_terms(sdk, code):
     """Strike, exercise ratio and maturity for one code, from intraday/ticker.
 
     intraday/quote — the call the book seed makes — carries none of these, so
-    this is a separate round trip. Cached permanently on success; a failure is
-    left uncached so the next retry_pending() pass picks it up again, and is
-    deliberately NOT written to `_seed_errors`, which tracks the streaming path.
+    this is a separate round trip. Cached permanently on success (and
+    persisted to Supabase — see `db_live_warrant.update_terms` — so a future
+    restart can load it back instead of spending another REST round trip); a
+    failure is left uncached so the next retry_pending() pass picks it up
+    again, and is deliberately NOT written to `_seed_errors`, which tracks
+    the streaming path.
     """
     t0 = time.perf_counter()
     try:
@@ -685,13 +688,17 @@ def _fetch_terms(sdk, code):
         return v or None  # 0 means "not applicable" in this payload, not a real 0
 
     with _lock:
-        _terms[code] = {
+        terms = _terms[code] = {
             "strike": num("exercisePrice"),
             "exercise_ratio": num("exerciseRatio"),
             "maturity": _parse_maturity(t.get("maturityDate")),
         }
         if t.get("name"):
             _names.setdefault(code, t["name"])
+    try:
+        db_live_warrant.update_terms(code, terms["strike"], terms["exercise_ratio"], terms["maturity"])
+    except Exception as e:
+        print(f"LIVEWARRANT: terms persist {code} failed: {e}", flush=True)
     return True
 
 
@@ -989,7 +996,15 @@ def start_session():
         _underlying_of.clear()
         # `_terms` deliberately survives a restart of the session: a warrant's
         # strike, ratio and maturity never change, and re-fetching them would
-        # spend a full quota window on data we already have.
+        # spend a full quota window on data we already have. For a genuinely
+        # fresh process (the common case — `_terms` is in-memory only) this
+        # loop reloads it from `live_warrant_tracked` instead (migration 024)
+        # for any code whose terms were already looked up before a previous
+        # restart — `terms_fetched_at` set is what "already looked up" means;
+        # the value columns alone can't tell that apart from "never looked
+        # up" since a malformed payload can leave one of them null and still
+        # count as done (see _fetch_terms).
+        terms_loaded = 0
         for row in rows:
             code = row["code"]
             stored = row.get("name")
@@ -998,6 +1013,17 @@ def start_session():
             _tracked.append(code)
             _pending.add(code)
             _underlying_of[code] = row.get("underlying")
+            if code not in _terms and row.get("terms_fetched_at") is not None:
+                maturity_raw = row.get("maturity")
+                _terms[code] = {
+                    "strike": row.get("strike"),
+                    "exercise_ratio": row.get("exercise_ratio"),
+                    "maturity": date.fromisoformat(maturity_raw) if maturity_raw else None,
+                }
+                terms_loaded += 1
+    if terms_loaded:
+        _log_debug(f"start_session: loaded {terms_loaded} codes' contract terms from Supabase "
+                   f"— {len(rows) - terms_loaded} still need a REST fetch")
 
     # Underlying-price subscriptions are not persisted anywhere — re-derived
     # from the tracked list's own `underlying` column every (re)start, same as
