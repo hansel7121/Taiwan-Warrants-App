@@ -42,6 +42,17 @@ def assign_slot(conn_counts, max_per_conn=MAX_SUBS_PER_CONN, max_connections=MAX
         f"all {max_connections} connections are full ({max_per_conn} subscriptions each)")
 
 
+def connections_needed(total_subs, max_per_conn=MAX_SUBS_PER_CONN, max_connections=MAX_CONNECTIONS):
+    """How many pooled connections `total_subs` subscriptions require in total,
+    capped at `max_connections` (the same ceiling `assign_slot` enforces one
+    slot at a time). Lets a caller open every connection a big batch will
+    need up front, in parallel, instead of discovering them one at a time —
+    each one only as `assign_slot` first runs out of room on the last."""
+    if total_subs <= 0:
+        return 0
+    return min(max_connections, -(-total_subs // max_per_conn))  # ceil division
+
+
 def check_capacity(current_total, net_change, max_total=MAX_TOTAL_SUBS):
     """Reject a change that would push total subscriptions past the account-wide cap."""
     if current_total + net_change > max_total:
