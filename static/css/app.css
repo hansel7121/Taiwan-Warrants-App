@@ -407,6 +407,13 @@ tbody tr.row-pinned td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
    scrolling a log that's otherwise mostly quiet book-change lines. */
 #live-console-log-body .lw-log-debug { color: #f5d90a; background: rgba(245, 217, 10, .08); }
 #live-console-log-body .lw-log-debug:hover { color: #f5d90a; }
+/* Normal book-change ticks: collapsed by default behind a small triangle —
+   a busy chain produces far more of these than anyone reads line-by-line. */
+#live-console-log-body .lw-log-line { cursor: pointer; }
+#live-console-log-body .lw-log-toggle { display: inline-block; width: 1em; color: var(--muted); }
+#live-console-log-body .lw-log-detail { color: var(--muted); }
+#live-console-log-body .lw-log-line:hover .lw-log-summary,
+#live-console-log-body .lw-log-line:hover .lw-log-detail { color: var(--text); }
 
 /* ── Live Options tab ── */
 /* Same status-line/degraded-row conventions as #tab-live — duplicated rather

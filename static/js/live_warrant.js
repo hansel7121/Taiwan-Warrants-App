@@ -261,6 +261,49 @@ function _lwPoll() {
 // Only polls while the panel is open — no point paying for it collapsed.
 const LW_LOG_MAX_LINES = 500;
 
+// How close to the bottom (px) still counts as "was at the bottom" — a new
+// line arriving shouldn't snap the view back down while reading history
+// further up, but should keep following along if you were already at the
+// live edge. A few px of slack absorbs sub-pixel rounding from the browser.
+const LW_LOG_STICK_TO_BOTTOM_PX = 8;
+
+function _lwBuildLogLine(e) {
+  const line = document.createElement("div");
+  // Debug checkpoints (freeze diagnostics — see services/live_warrant.py's
+  // _log_debug) carry no code/recalculated-columns/duration, just a plain
+  // message; highlighted, and never collapsed — these are exactly the lines
+  // you need to see readily while diagnosing a freeze.
+  if (e.level === "debug") {
+    line.className = "lw-log-debug";
+    line.textContent = `[${e.ts}] ${e.diff}`;
+    return line;
+  }
+  // Normal book-change ticks: collapsed by default behind a small triangle,
+  // since a busy chain can produce far more of these than anyone reads
+  // line-by-line — click to expand the one you actually care about.
+  line.className = "lw-log-line";
+  const toggle = document.createElement("span");
+  toggle.className = "lw-log-toggle";
+  toggle.textContent = "▶";
+  const summary = document.createElement("span");
+  summary.className = "lw-log-summary";
+  summary.textContent = `[${e.ts}] ${e.code}`;
+  const detail = document.createElement("span");
+  detail.className = "lw-log-detail";
+  detail.style.display = "none";
+  detail.textContent = ` "${e.diff}" - "${e.recalculated}" - took +${e.duration_s}s`;
+  line.appendChild(toggle);
+  line.appendChild(document.createTextNode(" "));
+  line.appendChild(summary);
+  line.appendChild(detail);
+  line.onclick = () => {
+    const expanded = detail.style.display !== "none";
+    detail.style.display = expanded ? "none" : "inline";
+    toggle.textContent = expanded ? "▶" : "▼";
+  };
+  return line;
+}
+
 function _lwPollLog() {
   const details = document.getElementById("live-console-log");
   if (!details || !details.open) return;
@@ -270,27 +313,20 @@ function _lwPollLog() {
       if (!d.entries || !d.entries.length) return;
       const body = document.getElementById("live-console-log-body");
       if (!body) return;
+      const wasAtBottom = body.scrollHeight - body.scrollTop - body.clientHeight
+                          <= LW_LOG_STICK_TO_BOTTOM_PX;
       const frag = document.createDocumentFragment();
-      d.entries.forEach(e => {
-        const line = document.createElement("div");
-        // Debug checkpoints (freeze diagnostics — see services/live_warrant.py's
-        // _log_debug) carry no code/recalculated-columns/duration, just a plain
-        // message; highlighted so the exact last-thing-that-happened before a
-        // freeze is easy to spot while scrolling a busy log.
-        if (e.level === "debug") {
-          line.className = "lw-log-debug";
-          line.textContent = `[${e.ts}] ${e.diff}`;
-        } else {
-          line.textContent =
-            `[${e.ts}] ${e.code} "${e.diff}" - "${e.recalculated}" - took +${e.duration_s}s`;
-        }
-        frag.appendChild(line);
-      });
+      d.entries.forEach(e => frag.appendChild(_lwBuildLogLine(e)));
       body.appendChild(frag);
       while (body.childElementCount > LW_LOG_MAX_LINES) {
         body.removeChild(body.firstChild);
       }
-      body.scrollTop = body.scrollHeight;
+      // Only follow new lines down if you were already reading the live
+      // edge — otherwise a message arriving every few seconds would yank
+      // you back to the bottom the moment you scroll up to read history.
+      if (wasAtBottom) {
+        body.scrollTop = body.scrollHeight;
+      }
     })
     .catch(() => {});  // transient — next tick retries
 }
