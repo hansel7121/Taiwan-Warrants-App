@@ -273,8 +273,17 @@ function _lwPollLog() {
       const frag = document.createDocumentFragment();
       d.entries.forEach(e => {
         const line = document.createElement("div");
-        line.textContent =
-          `[${e.ts}] ${e.code} "${e.diff}" - "${e.recalculated}" - took +${e.duration_s}s`;
+        // Debug checkpoints (freeze diagnostics — see services/live_warrant.py's
+        // _log_debug) carry no code/recalculated-columns/duration, just a plain
+        // message; highlighted so the exact last-thing-that-happened before a
+        // freeze is easy to spot while scrolling a busy log.
+        if (e.level === "debug") {
+          line.className = "lw-log-debug";
+          line.textContent = `[${e.ts}] ${e.diff}`;
+        } else {
+          line.textContent =
+            `[${e.ts}] ${e.code} "${e.diff}" - "${e.recalculated}" - took +${e.duration_s}s`;
+        }
         frag.appendChild(line);
       });
       body.appendChild(frag);

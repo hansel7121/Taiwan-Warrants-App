@@ -439,6 +439,19 @@ def _boot_live_warrant():
     _job("live_warrant_boot", live_warrant.start_session)
 
 
+def _run_resource_check():
+    """Ungated, always runs (not tied to trading hours or any Live
+    Warrant/Options activity): logs a memory/CPU-limit snapshot to the Live
+    Warrant tab's console log every tick. Render's OOM killer sends an
+    unblockable SIGKILL — there is no "as it happens" log possible for a
+    real OOM by construction — so this is the closest substitute: whatever
+    this last logged before a freeze shows the resource trend leading up to
+    it, whether or not retry_pending or start_session happened to be running
+    at the time.
+    """
+    _job("resource_check", lambda: live_warrant._log_resource_snapshot("periodic"))
+
+
 def _run_live_options():
     _job("live_options", sync_live_options)
 
@@ -519,6 +532,13 @@ def start():
         sched.add_job(_gated("tw_equity", _run_live_options),
                       CronTrigger(minute="*/5", timezone=_TZ_TAIPEI),
                       next_run_time=now + timedelta(seconds=2))
+        # Memory/CPU-limit snapshot: ungated, every 2 min, always — not tied
+        # to trading hours or any Live Warrant/Options activity, so it keeps
+        # a resource-usage trail even when nothing else is running. See
+        # _run_resource_check's docstring for why this is the closest
+        # available substitute for logging an actual OOM kill.
+        sched.add_job(_run_resource_check, "interval", minutes=2,
+                      next_run_time=now + timedelta(seconds=3))
         sched.start()
         _scheduler = sched
         print("SCHED: started", flush=True)

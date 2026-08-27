@@ -13,6 +13,17 @@ import psutil
 # cgroup v2 current usage — this, not RSS, is what the host's OOM killer acts
 # on (it counts page cache and every process in the container). Absent locally.
 _CGROUP_CURRENT = "/sys/fs/cgroup/memory.current"
+# The container's actual memory ceiling — comparing _CGROUP_CURRENT against
+# this is what turns "usage is going up" into "usage is N% of the limit,"
+# which is the number that actually predicts an OOM kill. Absent locally.
+_CGROUP_MAX = "/sys/fs/cgroup/memory.max"
+# Cumulative CPU-throttle counters: the kernel increments these whenever a
+# cgroup with a CPU quota (e.g. Render's "1 vCPU" plan) runs out of its quota
+# for the current period and gets paused until the next one. This is the
+# actual "hit the CPU limit" signal — CPU% alone can't distinguish "busy" from
+# "throttled," but a nonzero nr_throttled delta can only mean the latter.
+_CGROUP_CPU_STAT = "/sys/fs/cgroup/cpu.stat"
+_CGROUP_CPU_MAX = "/sys/fs/cgroup/cpu.max"
 
 _SAMPLE_INTERVAL = 0.25
 
@@ -38,6 +49,61 @@ def _cgroup_bytes():
             return int(f.read().strip())
     except Exception:
         return None
+
+
+def cgroup_memory_limit_bytes():
+    """The container's memory ceiling, or None if unavailable/unlimited
+    ("max") — e.g. running locally with no cgroup, or a plan with no memory
+    cap set."""
+    try:
+        with open(_CGROUP_MAX) as f:
+            raw = f.read().strip()
+        return None if raw == "max" else int(raw)
+    except Exception:
+        return None
+
+
+def memory_usage_fraction():
+    """Current cgroup memory usage as a fraction of the container's limit
+    (0-1+), or None if either figure is unavailable. This is the number that
+    actually predicts an OOM kill — RSS alone doesn't account for page cache
+    or sibling processes the way the cgroup's own accounting does."""
+    limit = cgroup_memory_limit_bytes()
+    current = _cgroup_bytes()
+    if limit is None or current is None or limit <= 0:
+        return None
+    return current / limit
+
+
+def cpu_quota_vcpus():
+    """Configured CPU quota in vCPU-equivalents (e.g. 1.0 for a "1 vCPU"
+    plan), or None if unlimited/unavailable."""
+    try:
+        with open(_CGROUP_CPU_MAX) as f:
+            raw = f.read().strip()
+        quota_str, period_str = raw.split()
+        return None if quota_str == "max" else int(quota_str) / int(period_str)
+    except Exception:
+        return None
+
+
+def cpu_throttle_stats():
+    """(nr_throttled, throttled_usec): cumulative counters from cgroup v2's
+    cpu.stat — how many times, and for how long in total, the kernel has
+    paused this container for exceeding its CPU quota. (None, None) if
+    unavailable (no cgroup, or no CPU quota configured to be throttled
+    against in the first place). These only ever increase — a caller wanting
+    "did throttling happen since I last checked" needs to diff two readings.
+    """
+    try:
+        stats = {}
+        with open(_CGROUP_CPU_STAT) as f:
+            for line in f:
+                key, _, value = line.strip().partition(" ")
+                stats[key] = int(value)
+        return stats.get("nr_throttled"), stats.get("throttled_usec")
+    except Exception:
+        return None, None
 
 
 def _mb(n):

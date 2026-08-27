@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from logic import iv_engine, live_warrant_logic
-from services import db_live_warrant
+from services import db_live_warrant, memlog
 from services.broker import credentials as broker_credentials
 
 FUBON_CRED_LABEL = os.environ.get("FUBON_CRED_LABEL", broker_credentials.DEFAULT_LABEL)
@@ -89,6 +89,12 @@ PENDING_RETRY_BATCH = 100
 # background (its own thread still completes and updates state under _lock
 # whenever it's done) rather than holding the HTTP response open.
 RETRY_PENDING_BUDGET_S = 60
+# A single REST call taking longer than this gets a debug checkpoint logged
+# (see _log_debug) — the common fast case (a healthy call finishing in well
+# under a second) stays quiet so the console log doesn't flood under a big
+# batch; a call that's actually struggling shows up immediately instead of
+# only being inferable after the fact from a missing "done" checkpoint.
+SLOW_CALL_LOG_THRESHOLD_S = 3.0
 # Warrants are listed on both boards; scanning only TSE silently misses the
 # OTC-listed half of some chains.
 WARRANT_MARKETS = ("TSE", "OTC")
@@ -249,7 +255,10 @@ def _login_new_connection():
     callback thread — which silently starves connect()'s wait loop into an
     "authentication timeout" instead of surfacing the real error.
     """
+    _log_debug("login: fetching credentials from Supabase…")
+    t0 = time.perf_counter()
     creds = broker_credentials.get_credential(FUBON_CRED_LABEL)
+    _log_debug(f"login: credentials fetched in {time.perf_counter() - t0:.1f}s")
     if creds is None:
         raise RuntimeError(f"no fubon_credentials row for label '{FUBON_CRED_LABEL}'")
     missing = [k for k in ("fubon_id", "fubon_password", "cert_password") if not creds.get(k)]
@@ -258,7 +267,10 @@ def _login_new_connection():
     if not creds.get("cert_path"):
         raise RuntimeError(f"fubon_credentials row '{FUBON_CRED_LABEL}' has no cert uploaded")
 
+    _log_debug("login: downloading cert from Supabase storage…")
+    t0 = time.perf_counter()
     cert_bytes = broker_credentials.download_cert(FUBON_CRED_LABEL)
+    _log_debug(f"login: cert downloaded in {time.perf_counter() - t0:.1f}s")
 
     from fubon_neo.sdk import FubonSDK
 
@@ -269,12 +281,18 @@ def _login_new_connection():
             f.write(cert_bytes)
 
         sdk = FubonSDK()
+        _log_debug("login: calling sdk.login() (Fubon broker auth, no client-side timeout)…")
+        t0 = time.perf_counter()
         result = sdk.login(creds["fubon_id"], creds["fubon_password"],
                            local_cert_path, creds["cert_password"])
+        _log_debug(f"login: sdk.login() returned in {time.perf_counter() - t0:.1f}s")
         if not getattr(result, "is_success", False):
             raise RuntimeError(f"login failed: {getattr(result, 'message', result)}")
 
+        _log_debug("login: calling sdk.init_realtime()…")
+        t0 = time.perf_counter()
         sdk.init_realtime()
+        _log_debug(f"login: init_realtime() returned in {time.perf_counter() - t0:.1f}s")
         ws = sdk.marketdata.websocket_client.stock
         conn = {"sdk": sdk, "ws": ws, "codes": set(), "sub_ids": {}, "state": "connecting", "last_error": None}
         # Before connect(): the socket starts emitting as soon as it authenticates.
@@ -282,7 +300,10 @@ def _login_new_connection():
         ws.on("connect", lambda *a, **k: _on_connect(conn))
         ws.on("disconnect", lambda *a, **k: _on_disconnect(conn))
         ws.on("error", lambda *a, **k: _on_error(conn, a, k))
+        _log_debug("login: calling ws.connect() (websocket handshake, no client-side timeout)…")
+        t0 = time.perf_counter()
         ws.connect()
+        _log_debug(f"login: ws.connect() returned in {time.perf_counter() - t0:.1f}s — connection ready")
     finally:
         try:
             os.unlink(local_cert_path)
@@ -299,6 +320,8 @@ def _ensure_connection(idx):
             return _connections[idx]
         if _stopped_by_user:
             raise RuntimeError("session disconnected — click Connect to resume")
+    _log_debug(f"_ensure_connection: connection #{idx} doesn't exist yet — opening a fresh login "
+               f"(this is the one un-timed network call in the whole subscribe path)")
     conn = _login_new_connection()
     with _lock:
         conn["index"] = len(_connections)
@@ -460,12 +483,21 @@ def _seed_from_rest(sdk, code):
     Returns True when the quote came back.
     """
     for attempt in range(1, SEED_RETRIES + 1):
+        t0 = time.perf_counter()
         try:
             q = _rest_call(f"quote {code}",
                            sdk.marketdata.rest_client.stock.intraday.quote, symbol=code)
+            elapsed = time.perf_counter() - t0
+            if elapsed > SLOW_CALL_LOG_THRESHOLD_S:
+                _log_debug(f"seed {code}: REST quote call took {elapsed:.1f}s "
+                           f"(attempt {attempt}/{SEED_RETRIES}) — slower than expected")
             break
         except Exception as e:
+            elapsed = time.perf_counter() - t0
             detail = _error_detail(e)
+            if elapsed > SLOW_CALL_LOG_THRESHOLD_S:
+                _log_debug(f"seed {code}: REST quote call failed after {elapsed:.1f}s "
+                           f"(attempt {attempt}/{SEED_RETRIES}): {detail}")
             if attempt == SEED_RETRIES:
                 with _lock:
                     _seed_errors[code] = detail
@@ -539,11 +571,19 @@ def _fetch_terms(sdk, code):
     left uncached so the next retry_pending() pass picks it up again, and is
     deliberately NOT written to `_seed_errors`, which tracks the streaming path.
     """
+    t0 = time.perf_counter()
     try:
         t = _rest_call(f"ticker {code}",
                        sdk.marketdata.rest_client.stock.intraday.ticker, symbol=code) or {}
+        elapsed = time.perf_counter() - t0
+        if elapsed > SLOW_CALL_LOG_THRESHOLD_S:
+            _log_debug(f"terms {code}: REST ticker call took {elapsed:.1f}s — slower than expected")
     except Exception as e:
-        print(f"LIVEWARRANT: terms {code} failed: {_error_detail(e)}", flush=True)
+        elapsed = time.perf_counter() - t0
+        detail = _error_detail(e)
+        if elapsed > SLOW_CALL_LOG_THRESHOLD_S:
+            _log_debug(f"terms {code}: REST ticker call failed after {elapsed:.1f}s: {detail}")
+        print(f"LIVEWARRANT: terms {code} failed: {detail}", flush=True)
         return False
 
     def num(key):
@@ -607,12 +647,22 @@ def _fan_out(fn, codes, deadline):
     """
     if not codes:
         return 0
+    label = getattr(fn, "__name__", "fn")
+    remaining = max(0.0, deadline - time.monotonic())
+    _log_debug(f"_fan_out({label}): starting {len(codes)} codes on {SEED_WORKERS} workers, "
+               f"{remaining:.1f}s left in budget")
     pool = ThreadPoolExecutor(max_workers=SEED_WORKERS)
     try:
         futures = [pool.submit(fn, code) for code in codes]
         remaining = max(0.0, deadline - time.monotonic())
-        done, _not_done = futures_wait(futures, timeout=remaining)
-        return sum(1 for f in done if not f.exception() and f.result())
+        done, not_done = futures_wait(futures, timeout=remaining)
+        ok = sum(1 for f in done if not f.exception() and f.result())
+        if not_done:
+            _log_debug(f"_fan_out({label}): budget ran out — {len(done)}/{len(codes)} finished "
+                       f"({ok} succeeded), {len(not_done)} still running in the background")
+        else:
+            _log_debug(f"_fan_out({label}): all {len(codes)} finished, {ok} succeeded")
+        return ok
     finally:
         # wait=False: don't block here either — the still-running futures
         # finish (or give up) on their own; a Python ThreadPoolExecutor's
@@ -696,6 +746,9 @@ def _track_many(codes, seed_budget=None):
     Anything that fails here stays in `_pending` and is picked up by
     retry_pending() on the next scheduler tick.
     """
+    if codes:
+        _log_debug(f"_track_many: subscribing {len(codes)} codes (serial — each is a fast local "
+                   f"send UNLESS a new connection needs to open, see _ensure_connection's own log)")
     conns, failed = [], []
     for code in codes:
         try:
@@ -710,6 +763,9 @@ def _track_many(codes, seed_budget=None):
     with _lock:
         for code, _conn in conns:
             _pending.discard(code)
+    if codes:
+        _log_debug(f"_track_many: subscribe done, {len(conns)}/{len(codes)} subscribed — "
+                   f"starting REST seed fan-out")
     # Seeding is quota-bound (REST_QUOTA/minute), so a whole-chain scan cannot
     # seed everything inside one web request. Spend the budget, leave the rest
     # unseeded — those codes are subscribed and will fill from the websocket on
@@ -718,6 +774,7 @@ def _track_many(codes, seed_budget=None):
     if to_seed:
         with ThreadPoolExecutor(max_workers=SEED_WORKERS) as pool:
             list(pool.map(lambda pair: _seed_from_rest(pair[1]["sdk"], pair[0]), to_seed))
+        _log_debug(f"_track_many: REST seed fan-out done for {len(to_seed)} codes")
     if len(to_seed) < len(conns):
         print(f"LIVEWARRANT: seeded {len(to_seed)}/{len(conns)} inline, "
               f"{len(conns) - len(to_seed)} left for retry_pending", flush=True)
@@ -783,6 +840,8 @@ def start_session():
         if _connections or _stopped_by_user:
             return
     _session_error = None
+    _log_debug("start_session: loading persisted tracked list from Supabase…")
+    _log_resource_snapshot("start_session start")
 
     try:
         rows = db_live_warrant.list_tracked()
@@ -790,6 +849,7 @@ def start_session():
         _session_error = f"failed to load tracked list: {type(e).__name__}: {e}"
         print(f"LIVEWARRANT: {_session_error}", flush=True)
         return
+    _log_debug(f"start_session: loaded {len(rows)} persisted rows")
 
     with _lock:
         _tracked.clear()
@@ -817,11 +877,17 @@ def start_session():
     # waiting behind however many hundred warrant subscribes come after it.
     with _lock:
         underlyings = {u for u in _underlying_of.values() if u in UNDERLYING_LIVE_PRICE_ALLOWLIST}
+    if underlyings:
+        _log_debug(f"start_session: subscribing underlyings {sorted(underlyings)} before the warrant chain")
     for underlying in underlyings:
         _subscribe_underlying(underlying)
 
     codes = [row["code"] for row in rows]
+    _log_debug(f"start_session: subscribing/seeding {len(codes)} warrant codes "
+               f"(seed budget {SEED_BUDGET_PER_SCAN})")
     failed = _track_many(codes, seed_budget=SEED_BUDGET_PER_SCAN)
+    _log_debug(f"start_session: _track_many done, {len(codes) - len(failed)}/{len(codes)} subscribed")
+    _log_resource_snapshot("start_session end")
     if failed:
         _session_error = (f"{failed[0]}: subscribe failed"
                           + (f" (+{len(failed) - 1} more)" if len(failed) > 1 else ""))
@@ -885,6 +951,9 @@ def retry_pending(limit=PENDING_RETRY_BATCH):
         # good once every tracked warrant has been looked up.
         need_terms = [c for c in _tracked if c not in _terms][:TERMS_RETRY_BATCH]
 
+    _log_debug(f"retry_pending: start — {len(todo)} to subscribe, {len(reseed)} to reseed, "
+               f"{len(need_terms)} needing terms, budget {RETRY_PENDING_BUDGET_S}s")
+    _log_resource_snapshot("retry_pending start")
     deadline = time.monotonic() + RETRY_PENDING_BUDGET_S
 
     # Subscribing is a cheap local send with no round trip ONLY when an
@@ -902,8 +971,10 @@ def retry_pending(limit=PENDING_RETRY_BATCH):
     # that gap: once time's up, whatever's left in `todo` just stays pending
     # for the next call, same as always.
     to_seed = []
-    for code in todo:
+    for i, code in enumerate(todo):
         if time.monotonic() >= deadline:
+            _log_debug(f"retry_pending: subscribe stage hit its deadline after "
+                       f"{i}/{len(todo)} codes — {len(todo) - i} left pending for next call")
             break
         try:
             _subscribe_one(code)
@@ -917,6 +988,8 @@ def retry_pending(limit=PENDING_RETRY_BATCH):
                 _seed_errors[code] = f"subscribe failed: {detail}"
             print(f"LIVEWARRANT: retry subscribe {code} failed: {detail}", flush=True)
     subscribed = len(to_seed)
+    _log_debug(f"retry_pending: subscribe stage done, {subscribed}/{len(todo)} subscribed — "
+               f"starting seed fan-out for them")
     _fan_out(_reseed_one, to_seed, deadline)
 
     reseeded = _fan_out(_reseed_one, reseed, deadline)
@@ -925,6 +998,9 @@ def retry_pending(limit=PENDING_RETRY_BATCH):
     with _lock:
         still = len(_pending)
         missing_terms = sum(1 for c in _tracked if c not in _terms)
+    _log_debug(f"retry_pending: done — subscribed={subscribed} reseeded={reseeded} "
+               f"terms={termed} pending={still} terms_missing={missing_terms}")
+    _log_resource_snapshot("retry_pending end")
     if subscribed or reseeded or termed:
         print(f"LIVEWARRANT: retry_pending subscribed={subscribed} reseeded={reseeded} "
               f"terms={termed} pending={still} terms_missing={missing_terms}", flush=True)
@@ -1391,7 +1467,89 @@ def _recompute_if_dirty(code):
                 "diff": entry["diff"],
                 "recalculated": "time_value, bid_time_value_pct, ask_time_value_pct",
                 "duration_s": duration_s,
+                "level": "info",
             })
+
+
+def _log_debug(message):
+    """A diagnostic checkpoint, surfaced in the Live Warrant tab's console
+    log (rendered highlighted, distinct from the normal book-change lines)
+    so a freeze can be diagnosed by watching the browser instead of guessed
+    at from code inspection — the last checkpoint logged before everything
+    stops is, by construction, right next to whatever's actually stuck.
+
+    Deliberately cheap (one dict append under the same lock every other
+    console-log write already uses) and left on permanently rather than
+    behind a flag: the whole point is to have this on the FIRST time a
+    freeze happens on the real site, not the first time after someone
+    remembers to turn on debug logging.
+    """
+    global _console_log_next_id
+    with _lock:
+        _console_log_next_id += 1
+        _console_log.append({
+            "id": _console_log_next_id,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "code": "-",
+            "diff": message,
+            "recalculated": "",
+            "duration_s": None,
+            "level": "debug",
+        })
+    print(f"LIVEWARRANT DEBUG: {message}", flush=True)
+
+
+# Previous cpu.stat throttle reading, so each snapshot can report what's
+# NEW since the last one rather than a lifetime-of-the-container total.
+_last_cpu_throttle = {"nr": None, "usec": None}
+
+
+def _log_resource_snapshot(label):
+    """Memory/CPU-limit checkpoint, logged the same way as _log_debug (so
+    it's yellow-highlighted in the console log too) — this is what lets a
+    freeze be correlated with actual resource pressure instead of guessed
+    at. Render's OOM killer sends the process an unblockable SIGKILL, so a
+    real OOM has no "as it happens" log by construction; this is the closest
+    available substitute — the trend leading up to a freeze, from whichever
+    checkpoint ran last before everything stopped responding.
+
+    CPU is reported as throttle events, not %: a busy-but-not-throttled
+    process and one that's hitting its quota and getting paused by the
+    kernel can both show high CPU%, but only the second one is actually
+    "hitting the limit" — cgroup v2's cpu.stat counters are the one signal
+    that distinguishes them.
+    """
+    frac = memlog.memory_usage_fraction()
+    quota = memlog.cpu_quota_vcpus()
+    nr, usec = memlog.cpu_throttle_stats()
+
+    parts = []
+    if frac is None:
+        parts.append("memory limit unavailable (no cgroup — not running in a container?)")
+    else:
+        pct = round(frac * 100, 1)
+        if pct >= 90:
+            parts.append(f"memory {pct}% of container limit — CRITICAL, an OOM kill may be imminent")
+        elif pct >= 75:
+            parts.append(f"memory {pct}% of container limit — elevated")
+        else:
+            parts.append(f"memory {pct}% of container limit")
+
+    if nr is None:
+        parts.append("CPU throttle stats unavailable")
+    else:
+        with _lock:
+            prev_nr, prev_usec = _last_cpu_throttle["nr"], _last_cpu_throttle["usec"]
+            _last_cpu_throttle["nr"], _last_cpu_throttle["usec"] = nr, usec
+        new_throttles = nr - prev_nr if prev_nr is not None else 0
+        if new_throttles > 0:
+            added_usec = (usec - prev_usec) if prev_usec is not None else usec
+            parts.append(f"CPU THROTTLED {new_throttles} more time(s) since last check "
+                        f"({added_usec / 1000:.0f}ms paused) — quota is {quota or '?'} vCPU")
+        else:
+            parts.append(f"CPU: no new throttling (quota {quota or 'unlimited'} vCPU)")
+
+    _log_debug(f"{label}: " + "; ".join(parts))
 
 
 def get_console_log(since=0, limit=200):

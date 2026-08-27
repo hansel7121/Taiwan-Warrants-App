@@ -30,6 +30,8 @@ def _clean_state():
     lw._underlying_codes.clear()
     lw._console_log.clear()
     lw._console_log_next_id = 0
+    lw._last_cpu_throttle["nr"] = None
+    lw._last_cpu_throttle["usec"] = None
     yield
     for d in (lw._books, lw._book_seq, lw._computed, lw._pending_log,
               lw._terms, lw._underlying_of, lw._underlying_books, lw._underlying_names):
@@ -37,6 +39,8 @@ def _clean_state():
     lw._underlying_codes.clear()
     lw._console_log.clear()
     lw._console_log_next_id = 0
+    lw._last_cpu_throttle["nr"] = None
+    lw._last_cpu_throttle["usec"] = None
 
 
 def _frame(bids, asks, code=CODE):
@@ -259,3 +263,98 @@ def test_fan_out_does_not_count_a_false_result():
 
 def test_fan_out_empty_codes_is_a_no_op():
     assert lw._fan_out(lambda code: True, [], deadline=time.monotonic() + 5) == 0
+
+
+# ── _log_debug: freeze-diagnostic checkpoints ───────────────────────────────
+
+def test_log_debug_appends_a_debug_level_entry():
+    lw._console_log.clear()
+    before_id = lw._console_log_next_id
+    lw._log_debug("test checkpoint")
+    entry = lw._console_log[-1]
+    assert entry["level"] == "debug"
+    assert entry["diff"] == "test checkpoint"
+    assert entry["code"] == "-"
+    assert entry["id"] == before_id + 1
+    lw._console_log.clear()
+
+
+def test_log_debug_is_retrievable_via_get_console_log():
+    lw._console_log.clear()
+    since = lw._console_log_next_id
+    lw._log_debug("checkpoint one")
+    lw._log_debug("checkpoint two")
+    result = lw.get_console_log(since=since)
+    assert [e["diff"] for e in result["entries"]] == ["checkpoint one", "checkpoint two"]
+    assert all(e["level"] == "debug" for e in result["entries"])
+    lw._console_log.clear()
+
+
+# ── _log_resource_snapshot: memory/CPU-limit diagnostics ────────────────────
+#
+# No real cgroup exists on this machine (confirmed: memlog's readers already
+# return None gracefully outside a container), so these tests exercise the
+# graceful-degradation path plus the throttle-delta math against a mocked
+# memlog, not real /sys/fs/cgroup numbers — that only exists on the real
+# Render deployment this feature is meant to diagnose.
+
+def test_resource_snapshot_reports_unavailable_with_no_cgroup(monkeypatch):
+    from services import memlog
+    monkeypatch.setattr(memlog, "memory_usage_fraction", lambda: None)
+    monkeypatch.setattr(memlog, "cpu_quota_vcpus", lambda: None)
+    monkeypatch.setattr(memlog, "cpu_throttle_stats", lambda: (None, None))
+    lw._console_log.clear()
+    lw._log_resource_snapshot("test")
+    msg = lw._console_log[-1]["diff"]
+    assert "memory limit unavailable" in msg
+    assert "CPU throttle stats unavailable" in msg
+    lw._console_log.clear()
+
+
+def test_resource_snapshot_flags_high_memory_as_critical(monkeypatch):
+    from services import memlog
+    monkeypatch.setattr(memlog, "memory_usage_fraction", lambda: 0.95)
+    monkeypatch.setattr(memlog, "cpu_quota_vcpus", lambda: 1.0)
+    monkeypatch.setattr(memlog, "cpu_throttle_stats", lambda: (0, 0))
+    lw._console_log.clear()
+    lw._last_cpu_throttle["nr"] = None
+    lw._last_cpu_throttle["usec"] = None
+    lw._log_resource_snapshot("test")
+    msg = lw._console_log[-1]["diff"]
+    assert "95.0%" in msg
+    assert "CRITICAL" in msg
+    lw._console_log.clear()
+
+
+def test_resource_snapshot_detects_new_cpu_throttling_since_last_check(monkeypatch):
+    from services import memlog
+    monkeypatch.setattr(memlog, "memory_usage_fraction", lambda: 0.5)
+    monkeypatch.setattr(memlog, "cpu_quota_vcpus", lambda: 1.0)
+    lw._console_log.clear()
+    lw._last_cpu_throttle["nr"] = None
+    lw._last_cpu_throttle["usec"] = None
+
+    monkeypatch.setattr(memlog, "cpu_throttle_stats", lambda: (5, 200_000))
+    lw._log_resource_snapshot("first")
+    assert "THROTTLED" not in lw._console_log[-1]["diff"]  # nothing to diff against yet
+
+    monkeypatch.setattr(memlog, "cpu_throttle_stats", lambda: (8, 350_000))
+    lw._log_resource_snapshot("second")
+    msg = lw._console_log[-1]["diff"]
+    assert "THROTTLED 3 more time(s)" in msg
+    assert "150ms" in msg
+    lw._console_log.clear()
+
+
+def test_resource_snapshot_no_new_throttling_reads_clean(monkeypatch):
+    from services import memlog
+    monkeypatch.setattr(memlog, "memory_usage_fraction", lambda: 0.3)
+    monkeypatch.setattr(memlog, "cpu_quota_vcpus", lambda: 1.0)
+    monkeypatch.setattr(memlog, "cpu_throttle_stats", lambda: (5, 200_000))
+    lw._console_log.clear()
+    lw._last_cpu_throttle["nr"] = 5
+    lw._last_cpu_throttle["usec"] = 200_000
+    lw._log_resource_snapshot("test")
+    msg = lw._console_log[-1]["diff"]
+    assert "no new throttling" in msg
+    lw._console_log.clear()
