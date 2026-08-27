@@ -887,11 +887,24 @@ def retry_pending(limit=PENDING_RETRY_BATCH):
 
     deadline = time.monotonic() + RETRY_PENDING_BUDGET_S
 
-    # Subscribing is a cheap local send with no round trip (see
-    # _subscribe_one), so this always runs in full regardless of budget;
-    # only the REST seed that follows is deadline-bound.
+    # Subscribing is a cheap local send with no round trip ONLY when an
+    # already-open connection has room (_subscribe_one -> _ensure_connection
+    # returns immediately in that case). When every existing connection is
+    # full, _ensure_connection instead calls _login_new_connection() — a
+    # real, untimed network round trip (broker login + cert download +
+    # websocket handshake) that this loop previously ran for every such code
+    # with NO deadline check at all, silently bypassing the whole budget
+    # below it. A slow or stuck login here could burn the entire time budget
+    # (or more) before _fan_out ever got a chance to run — which looks
+    # exactly like "click Retry Pending, it fills a couple rows then stops
+    # entirely," just from a different cause than the REST-quota one this
+    # budget was originally built for. Checking the deadline here too closes
+    # that gap: once time's up, whatever's left in `todo` just stays pending
+    # for the next call, same as always.
     to_seed = []
     for code in todo:
+        if time.monotonic() >= deadline:
+            break
         try:
             _subscribe_one(code)
             with _lock:
