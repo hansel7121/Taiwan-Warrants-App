@@ -249,6 +249,16 @@ create table if not exists live_warrant_tracked (
   source text not null check (source in ('scan', 'manual')),
   underlying text,
   created_at timestamptz not null default now(),
+  -- Contract terms (migration 024): fetched once per code and never change,
+  -- so persisting them is what lets a restart skip the REST round trip
+  -- entirely instead of re-fetching every tracked code. terms_fetched_at
+  -- marks "looked up, whatever came back" — the value columns alone can't
+  -- distinguish that from "never looked up" since any of them can come back
+  -- null on a malformed payload and still count as done.
+  strike double precision,
+  exercise_ratio double precision,
+  maturity date,
+  terms_fetched_at timestamptz,
   constraint live_warrant_tracked_underlying_only_for_scan
     check (source = 'scan' or underlying is null)
 );

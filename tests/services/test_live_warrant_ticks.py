@@ -291,32 +291,42 @@ def test_fan_out_start_runs_concurrently_before_being_awaited():
     assert abs(ts_a - ts_b) < 0.2, "second batch did not start until the first was awaited"
 
 
-# ── _RestQuota: sliding-window cap plus a minimum pacing gap ────────────────
+# ── _RestQuota: a 60s budget plus a much shorter burst cap ──────────────────
 #
 # The 300/60s cap alone only bounds the average rate: right after a window
 # with slack, many threads can see room and fire in the same instant, which
 # is the exact "8 unbounded workers -> real 429s" case the module's own
-# comment documents even though the total stayed under budget. The pacing
-# gap smooths that burst into a steady rate instead.
+# comment documents even though the total stayed under budget — and those
+# same simultaneous hits later age out of the 60s window together too,
+# re-bursting all over again. The short burst window caps how many can be
+# granted within any one second; a first-attempt fix that instead paced
+# EVERY grant down to the full 60s average measurably regressed throughput
+# (an ~11s stage became ~40s) for no proven benefit over capping the burst.
 
 def test_rest_quota_denies_past_the_sliding_window_limit():
-    quota = lw._RestQuota(limit=2, window=60.0, min_interval=0.0)
+    quota = lw._RestQuota(limit=2, window=60.0, burst_limit=10, burst_window=1.0)
     assert quota.acquire(timeout=0) is True
     assert quota.acquire(timeout=0) is True
     assert quota.acquire(timeout=0) is False  # third slot not free yet
 
 
-def test_rest_quota_enforces_minimum_pacing_between_grants():
-    quota = lw._RestQuota(limit=100, window=60.0, min_interval=0.15)
-    t0 = time.monotonic()
-    assert quota.acquire(timeout=1) is True
-    assert quota.acquire(timeout=1) is True  # must wait out the pacing gap
-    elapsed = time.monotonic() - t0
-    assert elapsed >= 0.15, f"second acquire granted too soon ({elapsed:.3f}s)"
+def test_rest_quota_denies_past_the_burst_limit_even_with_window_room():
+    quota = lw._RestQuota(limit=100, window=60.0, burst_limit=2, burst_window=1.0)
+    assert quota.acquire(timeout=0) is True
+    assert quota.acquire(timeout=0) is True
+    assert quota.acquire(timeout=0) is False  # burst cap hit, plenty of window room left
+
+
+def test_rest_quota_burst_slot_frees_once_the_burst_window_elapses():
+    quota = lw._RestQuota(limit=100, window=60.0, burst_limit=1, burst_window=0.1)
+    assert quota.acquire(timeout=0) is True
+    assert quota.acquire(timeout=1) is True  # waits out the burst window, then succeeds
+    elapsed_ok = quota.used() == 2
+    assert elapsed_ok
 
 
 def test_rest_quota_used_reports_current_window_count():
-    quota = lw._RestQuota(limit=5, window=60.0, min_interval=0.0)
+    quota = lw._RestQuota(limit=5, window=60.0, burst_limit=10, burst_window=1.0)
     quota.acquire()
     quota.acquire()
     assert quota.used() == 2
