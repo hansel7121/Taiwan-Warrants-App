@@ -54,11 +54,13 @@ def test_parse_strike_structured_field_string():
 
 
 def test_parse_strike_falls_back_to_symbol_digits():
-    assert lol.parse_strike({"symbol": "CDA06500L4"}) == 6500.0
+    """"06500" carries an implied one-decimal-place strike, confirmed live
+    against a real 2330 chain (see parse_strike's comment) -> 650.0, not 6500."""
+    assert lol.parse_strike({"symbol": "CDA06500L4"}) == 650.0
 
 
 def test_parse_strike_zero_structured_value_falls_through_to_symbol():
-    assert lol.parse_strike({"strike": 0, "symbol": "CDA06500L4"}) == 6500.0
+    assert lol.parse_strike({"strike": 0, "symbol": "CDA06500L4"}) == 650.0
 
 
 def test_parse_strike_none_when_nothing_matches():

@@ -82,7 +82,13 @@ def parse_strike(row):
     m = _SYMBOL_RE.match(row.get("symbol") or "")
     if m:
         try:
-            strike = float(m.group(2))
+            # Confirmed live against a 2330 (TSMC) chain, 2026-08-27: the
+            # digit group carries an implied one-decimal-place strike (e.g.
+            # "23500" -> 2350.0, "18600" -> 1860.0) — a bare 10x too high
+            # without this division. TXO (index) symbols, the only shape
+            # this fallback was validated against before, need no such
+            # scaling since index strikes are already whole numbers.
+            strike = float(m.group(2)) / 10
         except ValueError:
             return None
         if strike > 0:
