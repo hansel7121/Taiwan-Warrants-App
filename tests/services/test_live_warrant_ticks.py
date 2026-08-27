@@ -5,9 +5,8 @@ fake connection and a synthetic JSON frame — no SDK, no live market — then
 asserts on the module's in-process state (`_book_seq`, `_computed`,
 `_console_log`). This is the one impure-glue path worth a targeted test: the
 "deep-level-only change does not dirty" behavior is new and easy to get
-subtly wrong, and the console-log queue/drain interaction between
-`_handle_message` and `_recompute_if_dirty` has no other safety net (the rest
-of this module is verified manually against the real Fubon connection).
+subtly wrong (the rest of this module is verified manually against the real
+Fubon connection).
 """
 import json
 import time
@@ -24,7 +23,7 @@ UNDERLYING = "2330"
 def _clean_state():
     """Every test starts from empty module state and leaves it empty after —
     these are process-wide globals, not per-instance."""
-    for d in (lw._books, lw._book_seq, lw._computed, lw._pending_log,
+    for d in (lw._books, lw._book_seq, lw._computed,
               lw._terms, lw._underlying_of, lw._underlying_books, lw._underlying_names):
         d.clear()
     lw._underlying_codes.clear()
@@ -33,7 +32,7 @@ def _clean_state():
     lw._last_cpu_throttle["nr"] = None
     lw._last_cpu_throttle["usec"] = None
     yield
-    for d in (lw._books, lw._book_seq, lw._computed, lw._pending_log,
+    for d in (lw._books, lw._book_seq, lw._computed,
               lw._terms, lw._underlying_of, lw._underlying_books, lw._underlying_names):
         d.clear()
     lw._underlying_codes.clear()
@@ -54,27 +53,23 @@ def test_first_tick_dirties_and_seeds_book():
     lw._handle_message({}, _frame([{"price": 10.0, "size": 5}], [{"price": 10.5, "size": 3}]))
     assert lw._book_seq[CODE] == 1
     assert lw._books[CODE]["bids"] == [{"price": 10.0, "size": 5}]
-    assert len(lw._pending_log[CODE]) == 1
-    assert lw._pending_log[CODE][0]["diff"].startswith("seeded:")
 
 
 def test_best_level_move_dirties_again():
     lw._handle_message({}, _frame([{"price": 10.0, "size": 5}], [{"price": 10.5, "size": 3}]))
     lw._handle_message({}, _frame([{"price": 10.1, "size": 5}], [{"price": 10.5, "size": 3}]))
     assert lw._book_seq[CODE] == 2
-    assert len(lw._pending_log[CODE]) == 2
 
 
 def test_deep_level_only_move_does_not_dirty():
     """The whole point of the dirty gate: a level-2+ requote that leaves the
-    best level untouched must not bump the sequence or queue a log entry."""
+    best level untouched must not bump the sequence."""
     lw._handle_message({}, _frame(
         [{"price": 10.0, "size": 5}, {"price": 9.9, "size": 1}], []))
     seq_after_first = lw._book_seq[CODE]
     lw._handle_message({}, _frame(
         [{"price": 10.0, "size": 5}, {"price": 9.5, "size": 40}], []))
     assert lw._book_seq[CODE] == seq_after_first
-    assert len(lw._pending_log[CODE]) == 1  # only the first (seeding) tick queued
 
 
 def test_underlying_tick_routes_to_underlying_books_not_warrant_books():
@@ -142,12 +137,9 @@ def test_recompute_if_dirty_no_op_when_terms_missing():
     lw._handle_message({}, _frame([{"price": 10.0, "size": 5}], [{"price": 10.5, "size": 3}]))
     lw._recompute_if_dirty(CODE)
     assert CODE not in lw._computed
-    # The queued diff must still be there, waiting for the input to show up —
-    # not silently dropped.
-    assert len(lw._pending_log[CODE]) == 1
 
 
-def test_recompute_if_dirty_computes_and_logs_once_inputs_present():
+def test_recompute_if_dirty_computes_once_inputs_present():
     lw._underlying_codes.add(UNDERLYING)
     lw._terms[CODE] = {"strike": 590.0, "exercise_ratio": 0.1, "maturity": None}
     lw._underlying_of[CODE] = UNDERLYING
@@ -160,12 +152,6 @@ def test_recompute_if_dirty_computes_and_logs_once_inputs_present():
     assert CODE in lw._computed
     assert lw._computed[CODE]["seq"] == lw._book_seq[CODE]
     assert lw._computed[CODE]["time_value"] is not None
-    assert len(lw._console_log) == 1
-    entry = lw._console_log[0]
-    assert entry["code"] == CODE
-    assert "time_value" in entry["recalculated"]
-    assert entry["duration_s"] >= 0
-    assert lw._pending_log.get(CODE) is None  # drained
 
 
 def test_recompute_if_dirty_is_a_no_op_once_current():
@@ -181,7 +167,6 @@ def test_recompute_if_dirty_is_a_no_op_once_current():
 
     lw._recompute_if_dirty(CODE)  # nothing changed since — must be a no-op
     assert lw._computed[CODE] == first
-    assert len(lw._console_log) == 1  # no duplicate log entry
 
 
 def test_recompute_if_dirty_nan_result_sanitized_to_none_for_json():
