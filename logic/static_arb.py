@@ -49,10 +49,19 @@ from logic import warrant_logic
 # lowers the long strike and only lifts the payoff.
 AMERICAN_PUT_INTRINSIC_FLOOR = True
 
-# LP weights below this fraction of the largest weight are numerical dust.
-DUST_FRAC = 1e-3
+# LP solver noise floor, as a fraction of a LEG'S OWN lot size. Scaled per-leg
+# rather than to the largest weight anywhere else in a shared multi-leg
+# horizon solve -- a global threshold let a real small edge get read as dust
+# next to an unrelated deep-liquidity leg (see the 2026-09 arb-ticket bug:
+# a $550 real vertical vanished next to fake legs sized at 10,000 lots).
+_LEG_DUST_FRAC = 1e-6
 
 _TOL = 1e-6
+
+# _solve_horizon re-solves the LP from scratch after evicting a leg, so this
+# bounds the number of re-solves, not the number of legs in the chain -- each
+# round strictly shrinks the candidate pool by at least one leg.
+_MAX_REPAIR_ROUNDS = 25
 
 
 def _int_or(v, default=0):
@@ -173,38 +182,82 @@ def _build_legs(warrant_df, opt_df, T_star, M, r):
     return longs, shorts, dropped_no_depth
 
 
-def _repair_integers(longs, shorts, xl_raw, xs_raw, dust):
-    """Drop dust, round shorts DOWN and longs UP to whole tradable lots.
+def _leg_dust(leg):
+    """LP solver noise floor for one leg, scaled to its own lot size."""
+    return leg["lot_shares"] * _LEG_DUST_FRAC
 
-    Direction matters: floors are non-negative and non-decreasing in the long
-    weights, so rounding longs up only lifts the payoff curve while rounding
-    shorts down only shrinks what is subtracted. Payoff >= 0 therefore survives
-    the rounding by construction — but dropping a dust LONG removes protection,
-    so the caller still re-verifies every kink.
+
+def _round_longs(cand_l, z_l):
+    """Round each long UP to whole tradable lots.
+
+    Floors are non-negative and non-decreasing in the long weights, so this
+    only ever lifts the payoff curve. Returns (keep, xl, forced_out): a long
+    whose rounded-up lot size exceeds its own resting depth cannot be bought
+    at all and is reported in `forced_out` for the caller to evict from the
+    candidate pool and re-solve around, rather than voiding every other leg
+    bundled into the same horizon.
     """
-    keep_l, xl = [], []
-    for leg, v in zip(longs, xl_raw):
-        if v <= dust:
+    keep, xl, forced_out = [], [], []
+    for leg, v in zip(cand_l, z_l):
+        if v <= _leg_dust(leg):
             continue
         lots = int(np.ceil(v / leg["lot_shares"] - _TOL))
+        if lots <= 0:
+            continue
         shares = lots * leg["lot_shares"]
-        if lots <= 0 or shares > leg["depth_shares"] + _TOL:
-            return None, None, None, None   # can't buy enough protection
-        keep_l.append({**leg, "lots": lots, "shares": shares})
+        if shares > leg["depth_shares"] + _TOL:
+            forced_out.append(leg)
+            continue
+        keep.append({**leg, "lots": lots, "shares": shares})
         xl.append(shares)
+    return keep, xl, forced_out
 
-    keep_s, xs = [], []
-    for leg, v in zip(shorts, xs_raw):
-        if v <= dust:
+
+def _round_shorts(cand_s, z_s):
+    """Round each short DOWN to whole tradable lots -- only ever shrinks what
+    is subtracted, so this can never exceed the short's own resting depth."""
+    keep, xs = [], []
+    for leg, v in zip(cand_s, z_s):
+        if v <= _leg_dust(leg):
             continue
         lots = int(np.floor(v / leg["lot_shares"] + _TOL))
         if lots <= 0:
             continue
         shares = lots * leg["lot_shares"]
-        keep_s.append({**leg, "lots": lots, "shares": shares})
+        keep.append({**leg, "lots": lots, "shares": shares})
         xs.append(shares)
+    return keep, xs
 
-    return keep_l, xl, keep_s, xs
+
+def _worst_rounded_leg(cand_l, z_l, cand_s, z_s):
+    """The leg whose lot-rounding moved furthest, in NT$, from what the raw LP
+    solution actually wanted -- the likeliest reason a structure that was
+    profitable in continuous terms turned unprofitable once forced onto whole
+    lots. Returns (leg, side) so the caller can evict it from the SAME list
+    identity was found in: the same option code can appear as separate long
+    and short leg dicts (bought at ask, sold at bid) with identical fields
+    whenever ask == bid, so an equality-based lookup could evict the wrong
+    copy. (None, None) once every leg already sits on (or near) a lot
+    boundary.
+    """
+    best_leg, best_side, best_cost = None, None, 0.0
+    for leg, v in zip(cand_l, z_l):
+        if v <= _leg_dust(leg):
+            continue
+        lots = int(np.ceil(v / leg["lot_shares"] - _TOL))
+        shares = lots * leg["lot_shares"]
+        cost = abs(shares - v) * leg["price_ps"]
+        if cost > best_cost:
+            best_leg, best_side, best_cost = leg, "long", cost
+    for leg, v in zip(cand_s, z_s):
+        if v <= _leg_dust(leg):
+            continue
+        lots = int(np.floor(v / leg["lot_shares"] + _TOL))
+        shares = lots * leg["lot_shares"]
+        cost = abs(shares - v) * leg["price_ps"]
+        if cost > best_cost:
+            best_leg, best_side, best_cost = leg, "short", cost
+    return best_leg, best_side
 
 
 def _leg_out(leg, side):
@@ -222,8 +275,8 @@ def _leg_out(leg, side):
     }
 
 
-def _solve_horizon(longs, shorts, T_star, min_edge):
-    """Solve one horizon's LP and return a finished row, or None.
+def _solve_lp(longs, shorts):
+    """Solve the continuous relaxation for one leg set. Returns (res, kinks).
 
     maximise  sum(y_j * bid_j) - sum(x_i * cost_i)          [entry credit]
     s.t.      sum(x_i * floor_i(S)) - sum(y_j * payoff_j(S)) >= 0  at every kink
@@ -235,9 +288,6 @@ def _solve_horizon(longs, shorts, T_star, min_edge):
     at S=0, at every kink, and its far-right slope is >= 0 — so this finite
     constraint set is EXACTLY equivalent to the infinite condition, not a sample.
     """
-    if not longs or not shorts:
-        return None
-
     kinks = _kink_points(longs, shorts)
     nL, nS = len(longs), len(shorts)
 
@@ -261,55 +311,102 @@ def _solve_horizon(longs, shorts, T_star, min_edge):
 
     res = linprog(c, A_ub=A, b_ub=np.zeros(len(kinks) + 1), bounds=bounds,
                   method="highs")
-    if not res.success or res.x is None:
-        return None
-    if -float(res.fun) <= max(min_edge, _TOL):
-        return None
+    return res, kinks
 
-    z = np.asarray(res.x, dtype=float)
-    dust = float(z.max()) * DUST_FRAC if z.size else 0.0
-    keep_l, xl, keep_s, xs = _repair_integers(longs, shorts, z[:nL], z[nL:], dust)
-    if not keep_l or not keep_s:
-        return None
 
-    # Re-verify from scratch on the integer weights — the proof above covers the
-    # rounding but not the dropped dust longs.
-    kinks2 = _kink_points(keep_l, keep_s)
-    tail = (sum(w * _leg_slope(l) for l, w in zip(keep_l, xl))
-            - sum(w * _leg_slope(s) for s, w in zip(keep_s, xs)))
-    if tail < -_TOL:
-        return None
-    payoffs = [_net_payoff(keep_l, keep_s, xl, xs, S) for S in kinks2]
-    min_payoff = min(payoffs)
-    if min_payoff < -_TOL:
-        return None
+def _solve_horizon(longs, shorts, T_star, min_edge):
+    """Solve one horizon's LP and return a finished row, or None.
 
-    gross_debit = sum(l["price_ps"] * w for l, w in zip(keep_l, xl))
-    proceeds = sum(s["price_ps"] * w for s, w in zip(keep_s, xs))
-    credit = proceeds - gross_debit
-    guaranteed = credit + max(0.0, min_payoff)
-    # Credit must be positive: cash in today, never a payout later. Debit-financed
-    # structures can also be arbs but tie up capital, so they are out of scope.
-    if credit <= 0 or guaranteed <= min_edge:
-        return None
+    A single shared LP over every warrant/option at this horizon can find a
+    structure that is profitable in CONTINUOUS shares but turns unprofitable
+    once each leg is forced onto whole tradable lots (options round in
+    2,000-share jumps; a leg the raw solution wanted only a fraction of can
+    overshoot badly). The old behaviour voided the ENTIRE combined structure
+    when that happened, silently hiding every other, unrelated, genuinely
+    valid arb bundled into the same horizon. Instead: evict whichever leg's
+    rounding cost the most and re-solve the remainder from scratch, so one
+    badly-rounding leg (or a handful of quote-tick-noise legs sharing a
+    resting-depth-heavy horizon with a real mispricing) no longer buries a
+    real arb sitting right next to it.
+    """
+    cand_l, cand_s = list(longs), list(shorts)
 
-    return {
-        "underlying_code": None,      # set by the caller
-        "underlying_price": None,
-        "horizon_dte": int(T_star),
-        "n_legs": len(keep_l) + len(keep_s),
-        "n_long": len(keep_l), "n_short": len(keep_s),
-        "legs": ([_leg_out(l, "long") for l in keep_l]
-                 + [_leg_out(s, "short") for s in keep_s]),
-        "net_credit": round(credit, 0),
-        "min_payoff": round(min_payoff, 0),
-        "guaranteed_profit": round(guaranteed, 0),
-        "worst_spot": round(kinks2[int(np.argmin(payoffs))], 2),
-        "gross_debit": round(gross_debit, 0),
-        "return_pct": round(guaranteed / gross_debit * 100, 2) if gross_debit > 0 else None,
-        "riskless": True,
-        "fillable": True,
-    }
+    for _ in range(_MAX_REPAIR_ROUNDS):
+        if not cand_l or not cand_s:
+            return None
+
+        res, kinks = _solve_lp(cand_l, cand_s)
+        if not res.success or res.x is None:
+            return None
+        if -float(res.fun) <= max(min_edge, _TOL):
+            return None
+
+        nL = len(cand_l)
+        z = np.asarray(res.x, dtype=float)
+        keep_l, xl, forced_out = _round_longs(cand_l, z[:nL])
+        if forced_out:
+            # Can't buy enough of this long to cover what it was meant to
+            # protect -- it never belonged in this structure. Drop it and
+            # re-solve the rest, rather than voiding everything around it.
+            cand_l = [l for l in cand_l if l not in forced_out]
+            continue
+        keep_s, xs = _round_shorts(cand_s, z[nL:])
+        if not keep_l or not keep_s:
+            return None
+
+        # Re-verify from scratch on the integer weights. Shorts only ever
+        # shrink under floor-rounding and longs only ever grow under
+        # ceil-rounding, so both moves can only LIFT the net payoff relative
+        # to the already-nonnegative continuous solution -- a violation here
+        # means a dust-dropped long was load-bearing, which has no cheap
+        # partial fix, so this candidate set is abandoned outright.
+        kinks2 = _kink_points(keep_l, keep_s)
+        tail = (sum(w * _leg_slope(l) for l, w in zip(keep_l, xl))
+                - sum(w * _leg_slope(s) for s, w in zip(keep_s, xs)))
+        if tail < -_TOL:
+            return None
+        payoffs = [_net_payoff(keep_l, keep_s, xl, xs, S) for S in kinks2]
+        min_payoff = min(payoffs)
+        if min_payoff < -_TOL:
+            return None
+
+        gross_debit = sum(l["price_ps"] * w for l, w in zip(keep_l, xl))
+        proceeds = sum(s["price_ps"] * w for s, w in zip(keep_s, xs))
+        credit = proceeds - gross_debit
+        guaranteed = credit + max(0.0, min_payoff)
+        # Credit must be positive: cash in today, never a payout later. Debit-financed
+        # structures can also be arbs but tie up capital, so they are out of scope.
+        if credit > 0 and guaranteed > min_edge:
+            return {
+                "underlying_code": None,      # set by the caller
+                "underlying_price": None,
+                "horizon_dte": int(T_star),
+                "n_legs": len(keep_l) + len(keep_s),
+                "n_long": len(keep_l), "n_short": len(keep_s),
+                "legs": ([_leg_out(l, "long") for l in keep_l]
+                         + [_leg_out(s, "short") for s in keep_s]),
+                "net_credit": round(credit, 0),
+                "min_payoff": round(min_payoff, 0),
+                "guaranteed_profit": round(guaranteed, 0),
+                "worst_spot": round(kinks2[int(np.argmin(payoffs))], 2),
+                "gross_debit": round(gross_debit, 0),
+                "return_pct": round(guaranteed / gross_debit * 100, 2) if gross_debit > 0 else None,
+                "riskless": True,
+                "fillable": True,
+            }
+
+        # Profitable in continuous terms but not after lot rounding: evict
+        # whichever leg's rounding cost the most (in NT$) relative to what
+        # the raw solution wanted, and re-solve the remainder from scratch.
+        worst, worst_side = _worst_rounded_leg(cand_l, z[:nL], cand_s, z[nL:])
+        if worst is None:
+            return None   # every leg already sits on a lot boundary -- genuinely too thin
+        if worst_side == "long":
+            cand_l = [l for l in cand_l if l is not worst]
+        else:
+            cand_s = [l for l in cand_s if l is not worst]
+
+    return None
 
 
 def match_static_arb(stock_codes, min_volume=0, min_edge=0.0,
