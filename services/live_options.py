@@ -459,13 +459,24 @@ def load_chain(underlying=SUPPORTED_UNDERLYING):
 
     rest = _rest_client()
     products = (rest.products(type="OPTION") or {}).get("data") or []
+    # Every product whose underlying is this stock, regardless of type — kept
+    # separately from the filtered list below so a product that matches on
+    # underlyingSymbol but gets excluded by the underlyingType=="S" check
+    # (e.g. if the weekly-SSO product, CDO for TSMC, turns out to carry a
+    # different type tag than the monthly CDA one) is visible in the
+    # response instead of silently vanishing — see logic/live_options_logic.py's
+    # module docstring on weekly SSOs being a separate product code.
+    underlying_products = [{"symbol": p.get("symbol"), "underlyingType": p.get("underlyingType")}
+                            for p in products if p.get("underlyingSymbol") == underlying]
     product_codes = [p["symbol"] for p in products
                       if p.get("underlyingSymbol") == underlying
                       and p.get("underlyingType") == "S" and p.get("symbol")]
     if not product_codes:
-        raise RuntimeError(f"no OPTION product found for underlying {underlying}")
-    # More than one product code is possible (e.g. standard + mini contracts)
-    # — merge tickers from every one found, don't assume exactly one.
+        raise RuntimeError(f"no OPTION product found for underlying {underlying} "
+                            f"(saw {underlying_products})")
+    # More than one product code is possible (e.g. standard + mini contracts,
+    # or the monthly CDA + weekly CDO SSO products) — merge tickers from
+    # every one found, don't assume exactly one.
 
     rows = []
     for product in product_codes:
@@ -500,11 +511,13 @@ def load_chain(underlying=SUPPORTED_UNDERLYING):
     failed = _track_many(new_codes)
 
     print(f"LIVEOPTIONS: load_chain {underlying} products={product_codes} "
+          f"(underlying_products={underlying_products}) "
           f"chain={len(parsed)} +{len(new_codes)} failed={len(failed)} "
           f"parse_failures={parse_failures}", flush=True)
     return {
         "chain": len(parsed), "added": len(new_codes), "failed": len(failed),
-        "product_codes": product_codes, "parse_failures": parse_failures,
+        "product_codes": product_codes, "underlying_products": underlying_products,
+        "parse_failures": parse_failures,
         "expiries": sorted({p["expiry"].isoformat() for p in parsed}),
     }
 
