@@ -16,7 +16,7 @@ from services import roles
 from services import store
 from services import live_warrant
 from services import live_options
-from services import live_arb, db_live_arb
+from services import live_arb, db_live_arb, db_live_arb_lp
 from logic import arb_logic
 from logic import live_warrant_logic
 from logic import static_arb
@@ -788,6 +788,42 @@ def live_arb_trades():
     date_str = request.args.get("date")
     trade_date = date.fromisoformat(date_str) if date_str else datetime.now(live_arb.TW_TZ).date()
     return jsonify({"trades": db_live_arb.list_trades_for_date(trade_date)})
+
+
+@app.route("/live_arb_lp_data")
+@require_auth
+@require_role(ADMIN)
+def live_arb_lp_data():
+    return jsonify(live_arb.get_lp_data())
+
+
+@app.route("/start_live_arb_lp", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def start_live_arb_lp():
+    """The Live Arb LP subtab's own kill switch, independent of Direct
+    Match's. Requires the Rust engine (no Python fallback) — surfaces a
+    session_error via /live_arb_lp_data if it's unavailable."""
+    live_arb.start_lp_scan()
+    return jsonify({"ok": True})
+
+
+@app.route("/stop_live_arb_lp", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def stop_live_arb_lp():
+    """The Live Arb LP subtab's kill switch's "off"."""
+    live_arb.stop_lp_scan()
+    return jsonify({"ok": True})
+
+
+@app.route("/live_arb_lp_trades")
+@require_auth
+@require_role(ADMIN)
+def live_arb_lp_trades():
+    date_str = request.args.get("date")
+    trade_date = date.fromisoformat(date_str) if date_str else datetime.now(live_arb.TW_TZ).date()
+    return jsonify({"trades": db_live_arb_lp.list_trades_for_date(trade_date)})
 
 
 @app.route("/read_warrant", methods=["POST"])

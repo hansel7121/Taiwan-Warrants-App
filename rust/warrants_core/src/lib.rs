@@ -8,6 +8,7 @@
 mod arb;
 mod bs;
 mod frame;
+mod static_arb;
 mod tick;
 
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
@@ -368,6 +369,62 @@ fn round_py(x: f64, nd: usize) -> f64 {
     arb::round_py(x, nd)
 }
 
+/// Live Arb LP subtab's kernel: solve one (underlying, horizon) static-arb
+/// LP, including the lot-rounding repair loop. See `static_arb.rs`'s module
+/// docstring for why this has no Python-fallback twin (deliberately, per
+/// docs/adr/0004's degenerate-LP-vertex note) -- `logic/iv_engine.py` binds
+/// this only when the Rust extension is present, with no `else` branch.
+///
+/// Returns `None` for "no structure found" (arb-free, or the repair loop
+/// evicted everything down to nothing viable) — never a partial/zero row.
+/// On a match, returns indices into the CALLER's own long/short arrays (this
+/// module never sees or returns a leg's code/name/strike display fields —
+/// the caller already has that and just needs to know which candidates were
+/// used and at how many lots), per CLAUDE.md's "Rust returns column arrays
+/// and row indices, never strings/dicts" rule.
+#[pyfunction]
+#[pyo3(signature = (
+    long_price_ps, long_eff_strike, long_is_call, long_lot_shares, long_depth_shares,
+    short_price_ps, short_eff_strike, short_is_call, short_lot_shares, short_depth_shares,
+    min_edge,
+))]
+#[allow(clippy::too_many_arguments)]
+fn solve_static_arb_horizon<'py>(
+    py: Python<'py>,
+    long_price_ps: Vec<f64>, long_eff_strike: Vec<f64>, long_is_call: Vec<bool>,
+    long_lot_shares: Vec<f64>, long_depth_shares: Vec<f64>,
+    short_price_ps: Vec<f64>, short_eff_strike: Vec<f64>, short_is_call: Vec<bool>,
+    short_lot_shares: Vec<f64>, short_depth_shares: Vec<f64>,
+    min_edge: f64,
+) -> PyResult<Option<(Vec<i64>, Vec<i64>, Vec<i64>, Vec<i64>, f64, f64, f64, f64, f64)>> {
+    let nl = long_price_ps.len();
+    same_len(nl, long_eff_strike.len(), "long_eff_strike")?;
+    same_len(nl, long_is_call.len(), "long_is_call")?;
+    same_len(nl, long_lot_shares.len(), "long_lot_shares")?;
+    same_len(nl, long_depth_shares.len(), "long_depth_shares")?;
+    let ns = short_price_ps.len();
+    same_len(ns, short_eff_strike.len(), "short_eff_strike")?;
+    same_len(ns, short_is_call.len(), "short_is_call")?;
+    same_len(ns, short_lot_shares.len(), "short_lot_shares")?;
+    same_len(ns, short_depth_shares.len(), "short_depth_shares")?;
+
+    let result = py.allow_threads(|| {
+        static_arb::solve_horizon(
+            &long_price_ps, &long_eff_strike, &long_is_call, &long_lot_shares, &long_depth_shares,
+            &short_price_ps, &short_eff_strike, &short_is_call, &short_lot_shares, &short_depth_shares,
+            min_edge,
+        )
+    }).map_err(PyValueError::new_err)?;
+
+    Ok(result.map(|s| (
+        s.long_idx.into_iter().map(|i| i as i64).collect(),
+        s.long_lots,
+        s.short_idx.into_iter().map(|i| i as i64).collect(),
+        s.short_lots,
+        s.net_credit, s.min_payoff, s.guaranteed_profit, s.worst_spot, s.gross_debit,
+    )))
+}
+
 /// Live Warrant tab tick kernel: time-value columns only for one warrant's
 /// current best bid/ask. No IV/delta/leverage solve — see `tick.rs`.
 #[pyfunction]
@@ -393,5 +450,6 @@ fn warrants_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(round_py, m)?)?;
     m.add_function(wrap_pyfunction!(build_warrant_columns, m)?)?;
     m.add_function(wrap_pyfunction!(solve_tick, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_static_arb_horizon, m)?)?;
     Ok(())
 }

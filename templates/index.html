@@ -752,65 +752,133 @@
     <!-- LIVE ARB TAB -->
     <div id="tab-live-arb" class="tab-content">
       <main>
-        <p style="font-size:12px;color:var(--muted);margin:0 0 14px">
-          TSMC (2330) Direct Match — buy warrant / sell option — rerun against live websocket quotes from the Live Warrant and Live Options tabs.
-          Load TSMC on both of those tabs first; this tab only reads what they already have tracked, it never starts a connection itself.
-        </p>
-
-        <div style="display:flex;align-items:center;gap:10px;margin:0 0 14px">
-          <button class="sm" id="la-start-btn" onclick="startLiveArb()"
-                  title="Start scanning. Reads the Live Warrant / Live Options tabs' current tracked lists on every changed tick.">
-            Start
-          </button>
-          <button class="sm" id="la-stop-btn" onclick="stopLiveArb()"
-                  title="Kill switch: stop scanning immediately. Does not touch the Live Warrant or Live Options sessions.">
-            Stop
-          </button>
-          <div id="la-status" style="font-size:12px;color:var(--muted)"></div>
+        <!-- Sub-tabs: Direct Match | LP -->
+        <div style="display:flex;gap:6px;border-bottom:1px solid var(--border);margin-bottom:16px">
+          <button id="lasub-btn-direct" class="lasub-btn active" onclick="switchLaSub('direct', this)">Direct Match</button>
+          <button id="lasub-btn-lp"     class="lasub-btn"        onclick="switchLaSub('lp', this)">LP</button>
         </div>
 
-        <div style="display:flex;align-items:center;gap:24px;margin:0 0 14px">
-          <div><span style="font-size:12px;color:var(--muted)">Active arbs</span>
-            <div id="la-active-count" style="font-size:22px;font-weight:600">0</div></div>
-          <div><span style="font-size:12px;color:var(--muted)">Logged today</span>
-            <div id="la-logged-count" style="font-size:22px;font-weight:600">0</div></div>
+        <div id="lasub-direct" class="lasub-content" style="display:block">
+          <p style="font-size:12px;color:var(--muted);margin:0 0 14px">
+            TSMC (2330) Direct Match — buy warrant / sell option — rerun against live websocket quotes from the Live Warrant and Live Options tabs.
+            Load TSMC on both of those tabs first; this tab only reads what they already have tracked, it never starts a connection itself.
+          </p>
+
+          <div style="display:flex;align-items:center;gap:10px;margin:0 0 14px">
+            <button class="sm" id="la-start-btn" onclick="startLiveArb()"
+                    title="Start scanning. Reads the Live Warrant / Live Options tabs' current tracked lists on every changed tick.">
+              Start
+            </button>
+            <button class="sm" id="la-stop-btn" onclick="stopLiveArb()"
+                    title="Kill switch: stop scanning immediately. Does not touch the Live Warrant or Live Options sessions.">
+              Stop
+            </button>
+            <div id="la-status" style="font-size:12px;color:var(--muted)"></div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:24px;margin:0 0 14px">
+            <div><span style="font-size:12px;color:var(--muted)">Active arbs</span>
+              <div id="la-active-count" style="font-size:22px;font-weight:600">0</div></div>
+            <div><span style="font-size:12px;color:var(--muted)">Logged today</span>
+              <div id="la-logged-count" style="font-size:22px;font-weight:600">0</div></div>
+          </div>
+
+          <div id="la-active-view">
+            <table>
+              <thead>
+                <tr>
+                  <th>Warrant</th><th>Type</th><th>Option</th>
+                  <th title="Warrant strike vs option strike">Strikes (W / O)</th>
+                  <th title="Days to expiry, warrant / option">DTE (W / O)</th>
+                  <th>Warrant Ask</th><th>Option Bid</th>
+                  <th>Price Diff</th><th>Price Diff %</th>
+                  <th title="True (riskless) arb: the vertical pays &ge; 0 at every spot">Riskless</th>
+                </tr>
+              </thead>
+              <tbody id="la-active-tbody"></tbody>
+            </table>
+          </div>
+          <p id="la-active-empty" style="display:none;padding:16px;color:var(--muted)">
+            No active arb right now.
+          </p>
+
+          <h3 style="font-size:13px;font-weight:600;margin:26px 0 10px">Logged Trades — today</h3>
+          <div id="la-log-view">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th><th>Warrant</th><th>Option</th>
+                  <th>Warrant Ask</th><th>Option Bid</th>
+                  <th>Price Diff</th><th>Price Diff %</th>
+                </tr>
+              </thead>
+              <tbody id="la-log-tbody"></tbody>
+            </table>
+          </div>
+          <p id="la-log-empty" style="display:none;padding:16px;color:var(--muted)">
+            Nothing logged yet today.
+          </p>
         </div>
 
-        <div id="la-active-view">
-          <table>
-            <thead>
-              <tr>
-                <th>Warrant</th><th>Type</th><th>Option</th>
-                <th title="Warrant strike vs option strike">Strikes (W / O)</th>
-                <th title="Days to expiry, warrant / option">DTE (W / O)</th>
-                <th>Warrant Ask</th><th>Option Bid</th>
-                <th>Price Diff</th><th>Price Diff %</th>
-                <th title="True (riskless) arb: the vertical pays &ge; 0 at every spot">Riskless</th>
-              </tr>
-            </thead>
-            <tbody id="la-active-tbody"></tbody>
-          </table>
-        </div>
-        <p id="la-active-empty" style="display:none;padding:16px;color:var(--muted)">
-          No active arb right now.
-        </p>
+        <div id="lasub-lp" class="lasub-content" style="display:none">
+          <p style="font-size:12px;color:var(--muted);margin:0 0 14px">
+            TSMC (2330) static-arb LP — a multi-leg structure per option expiry (horizon), solved against the same live quotes as Direct Match.
+            A full scan (~90ms measured) can't keep pace with individual ticks the way Direct Match's ~8ms scan does, so this subtab updates on its
+            own self-paced loop rather than every tick. Requires the Rust engine — there is no Python fallback for this kernel (see CLAUDE.md).
+          </p>
 
-        <h3 style="font-size:13px;font-weight:600;margin:26px 0 10px">Logged Trades — today</h3>
-        <div id="la-log-view">
-          <table>
-            <thead>
-              <tr>
-                <th>Time</th><th>Warrant</th><th>Option</th>
-                <th>Warrant Ask</th><th>Option Bid</th>
-                <th>Price Diff</th><th>Price Diff %</th>
-              </tr>
-            </thead>
-            <tbody id="la-log-tbody"></tbody>
-          </table>
+          <div style="display:flex;align-items:center;gap:10px;margin:0 0 14px">
+            <button class="sm" id="lalp-start-btn" onclick="startLiveArbLp()"
+                    title="Start scanning. Independent of Direct Match's own Start/Stop and of the Live Warrant/Live Options sessions.">
+              Start
+            </button>
+            <button class="sm" id="lalp-stop-btn" onclick="stopLiveArbLp()"
+                    title="Kill switch: stop scanning immediately, independent of Direct Match.">
+              Stop
+            </button>
+            <div id="lalp-status" style="font-size:12px;color:var(--muted)"></div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:24px;margin:0 0 14px">
+            <div><span style="font-size:12px;color:var(--muted)">Active structures</span>
+              <div id="lalp-active-count" style="font-size:22px;font-weight:600">0</div></div>
+            <div><span style="font-size:12px;color:var(--muted)">Logged today</span>
+              <div id="lalp-logged-count" style="font-size:22px;font-weight:600">0</div></div>
+          </div>
+
+          <div id="lalp-active-view">
+            <table>
+              <thead>
+                <tr>
+                  <th>Horizon</th><th>Structure</th>
+                  <th style="text-align:right">Net credit</th><th style="text-align:right">Guaranteed</th>
+                  <th style="text-align:right">Return</th>
+                </tr>
+              </thead>
+              <tbody id="lalp-active-tbody"></tbody>
+            </table>
+          </div>
+          <p id="lalp-active-empty" style="display:none;padding:16px;color:var(--muted)">
+            No active structure right now.
+          </p>
+
+          <h3 style="font-size:13px;font-weight:600;margin:26px 0 10px">Logged Trades — today</h3>
+          <div id="lalp-log-view">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th><th>Horizon</th><th>Structure</th>
+                  <th style="text-align:right">Net credit</th><th style="text-align:right">Guaranteed</th>
+                  <th style="text-align:right">Return</th>
+                </tr>
+              </thead>
+              <tbody id="lalp-log-tbody"></tbody>
+            </table>
+          </div>
+          <p id="lalp-log-empty" style="display:none;padding:16px;color:var(--muted)">
+            Nothing logged yet today.
+          </p>
         </div>
-        <p id="la-log-empty" style="display:none;padding:16px;color:var(--muted)">
-          Nothing logged yet today.
-        </p>
       </main>
     </div>
 
@@ -1185,6 +1253,7 @@
     <script src="{{ url_for('static', filename='js/live_warrant.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/live_options.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/live_arb.js', v=ASSET_VERSION) }}"></script>
+    <script src="{{ url_for('static', filename='js/live_arb_lp.js', v=ASSET_VERSION) }}"></script>
     {% endif %}
   </body>
 </html>

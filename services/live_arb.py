@@ -24,8 +24,8 @@ import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from logic import live_arb_logic
-from services import db_live_arb, live_options, live_warrant
+from logic import iv_engine, live_arb_logic, live_arb_lp_logic
+from services import db_live_arb, db_live_arb_lp, live_options, live_warrant
 
 TW_TZ = ZoneInfo("Asia/Taipei")
 UNDERLYING = "2330"
@@ -179,4 +179,160 @@ def get_data():
             "active_count": len(_active_hits),
             "logged_count_today": len(_logged_today),
             "trade_date": _trade_date.isoformat() if _trade_date else None,
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LP subtab: static-arb LP against the same live TSMC quotes, via the
+# Rust-only rust/warrants_core::solve_static_arb_horizon kernel (see
+# logic/live_arb_lp_logic.py and logic/iv_engine.py — deliberately no Python
+# fallback). Fully independent state/kill-switch from the Direct Match scan
+# above: the newer, less battle-tested LP path can be stopped without
+# touching the already-proven Direct Match one. A full LP scan is far more
+# expensive (~90ms measured, vs Direct Match's ~8ms) and can't be
+# tick-synchronous — see the plan this shipped under — so this loop is
+# self-paced (start the next scan the instant the previous one finishes)
+# rather than trying to match Direct Match's near-tick cadence; it still
+# reuses the same dirty-gate signal (`_combined_seq`) so an idle period
+# costs nothing.
+# ─────────────────────────────────────────────────────────────────────────────
+LP_POLL_INTERVAL_S = 0.1
+
+_lp_lock = threading.RLock()
+_lp_enabled = False
+_lp_thread = None
+_lp_stop_event = threading.Event()
+
+_lp_last_seq = None
+_lp_active_structures = []
+_lp_logged_today = set()
+_lp_trade_date = None
+_lp_session_error = None
+
+
+def _lp_seed_logged_today():
+    global _lp_logged_today, _lp_trade_date, _lp_session_error
+    today = _today()
+    try:
+        ids = db_live_arb_lp.existing_ids_for_date(today)
+    except Exception as e:
+        _lp_session_error = f"failed to seed today's logged LP trades: {type(e).__name__}: {e}"
+        print(f"LIVEARB-LP: {_lp_session_error}", flush=True)
+        ids = set()
+    with _lp_lock:
+        _lp_logged_today = ids
+        _lp_trade_date = today
+
+
+def _lp_log_new_structures(rows, today):
+    global _lp_logged_today
+    for row in rows:
+        key = live_arb_lp_logic.dedup_key(row, today)
+        with _lp_lock:
+            already = key in _lp_logged_today
+        if already:
+            continue
+        payload = {
+            "id": key,
+            "trade_date": today.isoformat(),
+            "horizon_dte": row["horizon_dte"],
+            "legs": row["legs"],
+            "net_credit": row["net_credit"],
+            "min_payoff": row["min_payoff"],
+            "guaranteed_profit": row["guaranteed_profit"],
+            "worst_spot": row["worst_spot"],
+            "gross_debit": row["gross_debit"],
+            "return_pct": row["return_pct"],
+        }
+        try:
+            db_live_arb_lp.insert_trade(payload)
+        except Exception as e:
+            # Same reasoning as Direct Match's _log_new_hits: never let a
+            # logging failure kill the scan loop, and don't mark it seen so
+            # a transient failure gets retried on this structure's next scan.
+            print(f"LIVEARB-LP: log structure {key} failed: {type(e).__name__}: {e}", flush=True)
+            continue
+        with _lp_lock:
+            _lp_logged_today.add(key)
+
+
+def _lp_scan_once():
+    global _lp_active_structures, _lp_last_seq
+    today = _today()
+    with _lp_lock:
+        needs_reseed = _lp_trade_date != today
+    if needs_reseed:
+        _lp_seed_logged_today()  # a Supabase call — never made while holding _lp_lock
+
+    seq, warrant_rows, option_rows = _combined_seq()
+    with _lp_lock:
+        unchanged = _lp_last_seq is not None and seq == _lp_last_seq
+        _lp_last_seq = seq
+    if unchanged:
+        return
+
+    rows = live_arb_lp_logic.scan(warrant_rows, option_rows, today)
+    with _lp_lock:
+        _lp_active_structures = rows
+    _lp_log_new_structures(rows, today)
+
+
+def _lp_scan_loop():
+    print("LIVEARB-LP: scan loop started", flush=True)
+    while not _lp_stop_event.is_set():
+        try:
+            _lp_scan_once()
+        except Exception as e:
+            print(f"LIVEARB-LP: scan tick failed: {type(e).__name__}: {e}", flush=True)
+            with _lp_lock:
+                _lp_session_error = f"{type(e).__name__}: {e}"
+        _lp_stop_event.wait(LP_POLL_INTERVAL_S)
+    print("LIVEARB-LP: scan loop stopped", flush=True)
+
+
+def start_lp_scan():
+    """The LP subtab's own kill switch, independent of start_scan()/
+    stop_scan() above. Idempotent — a no-op if already running. Requires the
+    Rust engine (no Python fallback exists for this kernel); surfaces a
+    clear session_error instead of starting a loop that could never
+    succeed if it's missing."""
+    global _lp_enabled, _lp_thread, _lp_last_seq, _lp_session_error
+    with _lp_lock:
+        if _lp_enabled:
+            return
+        _lp_enabled = True
+        _lp_last_seq = None
+    _lp_session_error = None
+    if not iv_engine.RUST_AVAILABLE:
+        with _lp_lock:
+            _lp_session_error = "Rust engine not available — Live Arb LP requires it (no Python fallback)"
+            _lp_enabled = False
+        return
+    _lp_seed_logged_today()
+    _lp_stop_event.clear()
+    _lp_thread = threading.Thread(target=_lp_scan_loop, daemon=True)
+    _lp_thread.start()
+
+
+def stop_lp_scan():
+    """The LP subtab's kill switch's "off". Does not touch Direct Match's
+    scan or either Live Warrant/Live Options session."""
+    global _lp_enabled
+    with _lp_lock:
+        if not _lp_enabled:
+            return
+        _lp_enabled = False
+    _lp_stop_event.set()
+
+
+def get_lp_data():
+    """Snapshot for the /live_arb_lp_data poll route."""
+    with _lp_lock:
+        return {
+            "enabled": _lp_enabled,
+            "session_error": _lp_session_error,
+            "active_structures": list(_lp_active_structures),
+            "active_count": len(_lp_active_structures),
+            "logged_count_today": len(_lp_logged_today),
+            "trade_date": _lp_trade_date.isoformat() if _lp_trade_date else None,
         }

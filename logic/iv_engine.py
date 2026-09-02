@@ -209,6 +209,37 @@ else:  # pragma: no cover - exercised under RUST_ENGINE=python
     direct_pairs = arb_kernels_py.direct_pairs
 
 
+# ── Live Arb LP subtab kernel ───────────────────────────────────────────────
+# Deliberately NO Python fallback (contrast with every other name in this
+# module) — see rust/warrants_core/src/static_arb.rs's module docstring.
+# logic/static_arb.py's scipy/HiGHS path is ~20-60x too slow to serve a live
+# tab, and per docs/adr/0004 the two can legitimately choose different (but
+# equally valid) legs on a degenerate LP's tied optimum — presenting the slow
+# Python path as "the same feature, just slower" would be misleading. Callers
+# (logic/live_arb_lp_logic.py) check RUST_AVAILABLE up front and degrade to a
+# clear "Rust engine required" state instead of ever calling this without it.
+if RUST_AVAILABLE and use_rust("arb"):
+
+    def solve_static_arb_horizon(long_price_ps, long_eff_strike, long_is_call,
+                                 long_lot_shares, long_depth_shares,
+                                 short_price_ps, short_eff_strike, short_is_call,
+                                 short_lot_shares, short_depth_shares, min_edge):
+        """See `rust/warrants_core/src/static_arb.rs::solve_horizon`."""
+        return _rust.solve_static_arb_horizon(
+            list(long_price_ps), list(long_eff_strike), list(long_is_call),
+            list(long_lot_shares), list(long_depth_shares),
+            list(short_price_ps), list(short_eff_strike), list(short_is_call),
+            list(short_lot_shares), list(short_depth_shares), float(min_edge),
+        )
+
+else:
+    def solve_static_arb_horizon(*_args, **_kwargs):
+        raise RuntimeError(
+            "solve_static_arb_horizon requires the Rust engine (no Python "
+            "fallback exists for this kernel) — check iv_engine.RUST_AVAILABLE "
+            "before calling it")
+
+
 # ── warrant frame ───────────────────────────────────────────────────────────
 # Imported lazily inside the binding: warrant_frame_py imports the IV kernels
 # from this module, so a top-level import here would be circular.
