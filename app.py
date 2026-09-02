@@ -16,6 +16,7 @@ from services import roles
 from services import store
 from services import live_warrant
 from services import live_options
+from services import live_arb, db_live_arb
 from logic import arb_logic
 from logic import live_warrant_logic
 from logic import static_arb
@@ -37,7 +38,7 @@ import threading
 import traceback
 import webbrowser
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
 app = Flask(
@@ -751,6 +752,42 @@ def connect_live_options():
 def disconnect_live_options():
     live_options.stop_session()
     return jsonify({"ok": True})
+
+
+@app.route("/live_arb_data")
+@require_auth
+@require_role(ADMIN)
+def live_arb_data():
+    return jsonify(live_arb.get_data())
+
+
+@app.route("/start_live_arb", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def start_live_arb():
+    """The Live Arb kill switch's "on". Does not touch the Live Warrant /
+    Live Options sessions — it only reads whatever they already have
+    tracked (manual pre-load, by design)."""
+    live_arb.start_scan()
+    return jsonify({"ok": True})
+
+
+@app.route("/stop_live_arb", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def stop_live_arb():
+    """The Live Arb kill switch's "off"."""
+    live_arb.stop_scan()
+    return jsonify({"ok": True})
+
+
+@app.route("/live_arb_trades")
+@require_auth
+@require_role(ADMIN)
+def live_arb_trades():
+    date_str = request.args.get("date")
+    trade_date = date.fromisoformat(date_str) if date_str else datetime.now(live_arb.TW_TZ).date()
+    return jsonify({"trades": db_live_arb.list_trades_for_date(trade_date)})
 
 
 @app.route("/read_warrant", methods=["POST"])

@@ -1557,6 +1557,36 @@ def get_data():
     }
 
 
+def snapshot_for_underlying(underlying):
+    """Read-only cross-module accessor for Live Arb (services/live_arb.py):
+    static terms + best bid/ask/size for every tracked warrant on
+    `underlying`, plus a tick-seq sum that only changes when one of those
+    warrants' best level actually moves — the dirty-gate signal live_arb.py
+    polls on a fast timer instead of diffing raw books itself, reusing the
+    same `_book_seq` this module already maintains for its own tick-driven
+    recompute (see `_handle_message`/`best_level_changed`).
+    """
+    with _lock:
+        codes = [c for c in _tracked if _underlying_of.get(c) == underlying]
+        seq = sum(_book_seq.get(c, 0) for c in codes)
+        rows = []
+        for code in codes:
+            book = _books.get(code)
+            terms = _terms.get(code) or {}
+            name = _display_name(code)
+            best = (live_warrant_logic.best_level(book["bids"], book["asks"])
+                    if book else live_warrant_logic.best_level([], []))
+            rows.append({
+                "code": code, "name": name,
+                "type": live_warrant_logic.parse_warrant_type(name),
+                "strike": terms.get("strike"),
+                "exercise_ratio": terms.get("exercise_ratio"),
+                "maturity": terms.get("maturity"),
+                "best": best,
+            })
+    return seq, rows
+
+
 def _underlying_row_payload(code):
     """One live-priced underlying's own display row — kept entirely separate
     from `_tracked`/`_ladder_payload` so an underlying never touches warrant-

@@ -66,6 +66,13 @@ _track_errors = {}  # code -> last subscribe error, cleared on success
 _session_error = None  # set when the session can't even start (e.g. no credentials)
 _stopped_by_user = False  # set by stop_session(); blocks scheduler/load_chain from silently reopening it
 _diagnostic_logged = False  # one-shot: log the first raw tickers() row so the field-shape guess can be checked
+# Bumped on every books tick. Nothing in this module needs per-code dirty
+# tracking (see the module docstring — no derived columns here), but Live
+# Arb (services/live_arb.py) needs SOME cheap "has anything changed since I
+# last scanned" signal, mirroring live_warrant.py's per-code `_book_seq`
+# without needing the per-code granularity that module's tick-driven
+# recompute actually requires.
+_tick_seq = 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -170,6 +177,7 @@ def _handle_message(conn, raw):
     if not code:
         return
 
+    global _tick_seq
     with _lock:
         _books[code] = {
             "bids": data.get("bids") or [],
@@ -177,6 +185,7 @@ def _handle_message(conn, raw):
             "ts": datetime.now(timezone.utc),
             "src": "ws",
         }
+        _tick_seq += 1
 
 
 def _handle_control(conn, event, message):
@@ -563,6 +572,31 @@ def get_data():
         "expiries": expiries,
         "contracts": [_contract_payload(code) for code in tracked_snapshot],
     }
+
+
+def snapshot_for_underlying(underlying=SUPPORTED_UNDERLYING):
+    """Read-only cross-module accessor for Live Arb (services/live_arb.py) —
+    see live_warrant.py's identical-purpose function. `underlying` is
+    accepted for symmetry only: every tracked contract here already belongs
+    to SUPPORTED_UNDERLYING (this module supports exactly one underlying
+    today, see the module docstring)."""
+    with _lock:
+        seq = _tick_seq
+        rows = []
+        for code in _tracked:
+            book = _books.get(code)
+            contract = _contracts.get(code) or {}
+            is_put = contract.get("is_put")
+            best = (live_warrant_logic.best_level(book["bids"], book["asks"])
+                    if book else live_warrant_logic.best_level([], []))
+            rows.append({
+                "code": code, "name": contract.get("name") or code,
+                "type": None if is_put is None else ("Put" if is_put else "Call"),
+                "strike": contract.get("strike"),
+                "expiry": contract.get("expiry"),
+                "best": best,
+            })
+    return seq, rows
 
 
 def _contract_payload(code):
