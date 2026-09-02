@@ -292,6 +292,32 @@ create index if not exists live_arb_trades_date_idx
 alter table live_arb_trades enable row level security;
 grant all on live_arb_trades to service_role;
 
+-- Live Arb LP subtab's append-only log of unique static-arb structures
+-- (migration 026). Separate table from live_arb_trades above — a static-arb
+-- structure is multi-leg (variable-length `legs` array + horizon economics),
+-- not a two-instrument pair, so a shared table would mean a pile of nullable
+-- columns for one side or the other. Same server-only RLS pattern; id is
+-- deterministic ("{horizon_dte}:{sorted leg codes}:{trade_date}") so
+-- re-finding the same structure the same day is a no-op.
+create table if not exists live_arb_lp_trades (
+  id text primary key,
+  trade_date date not null,
+  horizon_dte integer not null,
+  legs jsonb not null,
+  net_credit numeric,
+  min_payoff numeric,
+  guaranteed_profit numeric,
+  worst_spot numeric,
+  gross_debit numeric,
+  return_pct numeric,
+  detected_at timestamptz not null default now(),
+  created_at timestamptz default now()
+);
+create index if not exists live_arb_lp_trades_date_idx
+  on live_arb_lp_trades (trade_date desc, detected_at desc);
+alter table live_arb_lp_trades enable row level security;
+grant all on live_arb_lp_trades to service_role;
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- USER-MODE dashboard tables (migration 005_user_dashboard.sql).
 -- Per-user and RLS-scoped like `portfolio`, NOT shared like the product tables.

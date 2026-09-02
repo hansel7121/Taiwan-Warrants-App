@@ -22,6 +22,18 @@ async function loadLiveArbOnce() {
   _laPoll();
 }
 
+// Own class (.lasub-btn/.lasub-content), not Portfolio's .pfsub-btn/
+// .pfsub-content: those are selected globally by switchPfSub, so sharing
+// them would let switching Portfolio's sub-tab blank out whichever Live Arb
+// sub-tab was open.
+function switchLaSub(sub, btn) {
+  document.querySelectorAll("#tab-live-arb .lasub-content").forEach(el => el.style.display = "none");
+  document.querySelectorAll("#tab-live-arb .lasub-btn").forEach(el => el.classList.remove("active"));
+  document.getElementById("lasub-" + sub).style.display = "block";
+  btn.classList.add("active");
+  if (sub === "lp") loadLiveArbLpOnce();
+}
+
 function _laRenderActive(hits) {
   const tbody = document.getElementById("la-active-tbody");
   const empty = document.getElementById("la-active-empty");

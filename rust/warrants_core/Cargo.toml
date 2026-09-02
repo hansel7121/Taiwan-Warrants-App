@@ -14,6 +14,7 @@ pyo3 = { version = "0.22", features = ["extension-module", "abi3-py311"] }
 numpy = "0.22"
 rayon = "1.10"
 libm = "0.2"
+microlp = "0.6"
 
 [profile.release]
 opt-level = 3

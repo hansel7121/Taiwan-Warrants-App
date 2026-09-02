@@ -109,6 +109,17 @@ header .badge {
 .pfsub-btn:hover { color: var(--text); }
 .pfsub-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
 
+/* ── Live Arb sub-tabs (own class, not .pfsub-btn: that one's JS selectors
+   are global/unscoped, so sharing it would let switching Portfolio's
+   sub-tab blank out whichever Live Arb sub-tab was open) ── */
+.lasub-btn {
+  background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--muted); font-family: inherit; font-size: 13px; font-weight: 600;
+  padding: 8px 14px; cursor: pointer; margin-bottom: -1px;
+}
+.lasub-btn:hover { color: var(--text); }
+.lasub-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
 /* ── Main layout ── */
 .tab-content { display: none; }
 .tab-content.active { display: block; }
