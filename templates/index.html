@@ -44,6 +44,7 @@
       <button onclick="switchTab('portfolio', this); loadPortfolioOnce()">Portfolio</button>
       <button onclick="switchTab('live', this); loadLiveWarrantOnce()">Live Warrant</button>
       <button onclick="switchTab('live-options', this); loadLiveOptionsOnce()">Live Options</button>
+      <button onclick="switchTab('live-arb', this); loadLiveArbOnce()">Live Arb</button>
       {% endif %}
     </div>
 
@@ -748,6 +749,71 @@
       </main>
     </div>
 
+    <!-- LIVE ARB TAB -->
+    <div id="tab-live-arb" class="tab-content">
+      <main>
+        <p style="font-size:12px;color:var(--muted);margin:0 0 14px">
+          TSMC (2330) Direct Match — buy warrant / sell option — rerun against live websocket quotes from the Live Warrant and Live Options tabs.
+          Load TSMC on both of those tabs first; this tab only reads what they already have tracked, it never starts a connection itself.
+        </p>
+
+        <div style="display:flex;align-items:center;gap:10px;margin:0 0 14px">
+          <button class="sm" id="la-start-btn" onclick="startLiveArb()"
+                  title="Start scanning. Reads the Live Warrant / Live Options tabs' current tracked lists on every changed tick.">
+            Start
+          </button>
+          <button class="sm" id="la-stop-btn" onclick="stopLiveArb()"
+                  title="Kill switch: stop scanning immediately. Does not touch the Live Warrant or Live Options sessions.">
+            Stop
+          </button>
+          <div id="la-status" style="font-size:12px;color:var(--muted)"></div>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:24px;margin:0 0 14px">
+          <div><span style="font-size:12px;color:var(--muted)">Active arbs</span>
+            <div id="la-active-count" style="font-size:22px;font-weight:600">0</div></div>
+          <div><span style="font-size:12px;color:var(--muted)">Logged today</span>
+            <div id="la-logged-count" style="font-size:22px;font-weight:600">0</div></div>
+        </div>
+
+        <div id="la-active-view">
+          <table>
+            <thead>
+              <tr>
+                <th>Warrant</th><th>Type</th><th>Option</th>
+                <th title="Warrant strike vs option strike">Strikes (W / O)</th>
+                <th title="Days to expiry, warrant / option">DTE (W / O)</th>
+                <th>Warrant Ask</th><th>Option Bid</th>
+                <th>Price Diff</th><th>Price Diff %</th>
+                <th title="True (riskless) arb: the vertical pays &ge; 0 at every spot">Riskless</th>
+              </tr>
+            </thead>
+            <tbody id="la-active-tbody"></tbody>
+          </table>
+        </div>
+        <p id="la-active-empty" style="display:none;padding:16px;color:var(--muted)">
+          No active arb right now.
+        </p>
+
+        <h3 style="font-size:13px;font-weight:600;margin:26px 0 10px">Logged Trades — today</h3>
+        <div id="la-log-view">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th><th>Warrant</th><th>Option</th>
+                <th>Warrant Ask</th><th>Option Bid</th>
+                <th>Price Diff</th><th>Price Diff %</th>
+              </tr>
+            </thead>
+            <tbody id="la-log-tbody"></tbody>
+          </table>
+        </div>
+        <p id="la-log-empty" style="display:none;padding:16px;color:var(--muted)">
+          Nothing logged yet today.
+        </p>
+      </main>
+    </div>
+
     <!-- PORTFOLIO TAB -->
     <div id="tab-portfolio" class="tab-content">
       <main>
@@ -1118,6 +1184,7 @@
     <script src="{{ url_for('static', filename='js/home.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/live_warrant.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/live_options.js', v=ASSET_VERSION) }}"></script>
+    <script src="{{ url_for('static', filename='js/live_arb.js', v=ASSET_VERSION) }}"></script>
     {% endif %}
   </body>
 </html>

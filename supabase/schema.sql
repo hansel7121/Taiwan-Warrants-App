@@ -267,6 +267,31 @@ create index if not exists live_warrant_tracked_underlying_idx
 alter table live_warrant_tracked enable row level security;
 grant all on live_warrant_tracked to service_role;
 
+-- Live Arb tab's append-only log of unique real-time Direct Match hits
+-- (migration 025). Same server-only RLS pattern as arb_suggestions, but
+-- day-scoped instead of status-scoped: a row is a record of a moment (a
+-- warrant/option pair going arb-positive against live websocket quotes),
+-- never re-evaluated or marked stale — see services/live_arb.py. id is
+-- deterministic ("{warrant_code}:{option_contract}:{trade_date}") so
+-- logging the same pair again the same day is a no-op, not a duplicate row.
+create table if not exists live_arb_trades (
+  id text primary key,
+  trade_date date not null,
+  warrant_code text not null,
+  warrant_name text,
+  option_contract text not null,
+  price_diff numeric not null,
+  price_diff_pct numeric,
+  warrant_ask numeric,
+  opt_bid numeric,
+  detected_at timestamptz not null default now(),
+  created_at timestamptz default now()
+);
+create index if not exists live_arb_trades_date_idx
+  on live_arb_trades (trade_date desc, detected_at desc);
+alter table live_arb_trades enable row level security;
+grant all on live_arb_trades to service_role;
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- USER-MODE dashboard tables (migration 005_user_dashboard.sql).
 -- Per-user and RLS-scoped like `portfolio`, NOT shared like the product tables.
