@@ -16,6 +16,19 @@ below tries structured fields first (harmless if genuinely absent) but is
 written assuming the symbol/name decode below is what actually fires. This
 needs confirming against a live account (see services/live_options.py's
 load_chain docstring for the one-shot diagnostic) before it's trusted.
+
+Weekly single-stock options (TAIFEX product launched 2025-12-08; TSMC is one
+of the initial underlyings, ticker prefix CDO vs the monthly CDA) are a
+SEPARATE product code from the monthly one and are included by
+services/live_options.py::load_chain's product discovery same as any other
+product on the underlying. The one part that needed a dedicated fallback
+here is `parse_expiry`: a weekly's exact settlement date is a plain calendar
+day (not the 3rd-Wednesday-of-month a monthly's structured field would
+imply), and TAIFEX's own MIS feed for the same underlying data only ever
+carries it in the contract's display name (see
+logic/options_logic.py::_decode_mis_symbol's "W# (YYYY/MM/DD)" pattern) —
+Fugle's `tickers()` name field is assumed to follow the same TAIFEX-sourced
+convention, unconfirmed until seen live.
 """
 import re
 from datetime import datetime
@@ -28,6 +41,11 @@ from datetime import datetime
 _EXPIRY_KEYS = ("expiryDate", "maturityDate", "settlementDate", "endDate", "deliveryDate")
 _STRIKE_KEYS = ("strikePrice", "exercisePrice", "strike")
 _CALLPUT_KEYS = ("callPut", "call_put", "right", "optionRight")
+
+# A weekly SSO's exact settlement day, embedded in the contract's display
+# name — the same place TAIFEX's MIS feed puts it (options_logic.py's
+# _decode_mis_symbol matches this same "YYYY/MM/DD" shape in DispCName).
+_NAME_DATE_RE = re.compile(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})")
 
 # TAIFEX/CME-style month-code letter: calls A-L (Jan-Dec), puts M-X (Jan-Dec).
 # UNVERIFIED for single-stock option symbols specifically — the only place
@@ -55,13 +73,26 @@ def _parse_date_str(v):
 
 
 def parse_expiry(row):
-    """A contract's expiry date, or None if no candidate field parses."""
+    """A contract's expiry date, or None if no candidate field parses.
+
+    Structured field first; a weekly SSO's exact date living only in the
+    display name (see module docstring) is the fallback, not the primary
+    path, since a monthly's structured field — when present — is the more
+    trustworthy source.
+    """
     for key in _EXPIRY_KEYS:
         v = row.get(key)
         if v:
             d = _parse_date_str(v)
             if d:
                 return d
+
+    m = _NAME_DATE_RE.search(str(row.get("name") or ""))
+    if m:
+        try:
+            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date()
+        except ValueError:
+            return None
     return None
 
 

@@ -1197,6 +1197,17 @@ def _teardown():
         # Nothing is subscribed any more, so every tracked code is pending again.
         # The rows themselves are untouched — a teardown never drops a code.
         _pending.update(_tracked)
+        # _underlying_codes is also a "currently subscribed" set, same as
+        # conn["codes"] — but unlike the tracked warrants, nothing re-derives
+        # it from _pending. Left uncleared, _subscribe_underlying's dedup
+        # guard ("if code in _underlying_codes: return") sees the stale entry
+        # on the next start_session() and skips resubscribing it for good,
+        # even though the connection that held it is gone: the underlying's
+        # row freezes on its last price while every warrant recovers normally.
+        # _underlying_books goes with it so the row reads "pending" again
+        # instead of silently keeping the stale price.
+        _underlying_codes.clear()
+        _underlying_books.clear()
     for conn in conns:
         try:
             conn["ws"].disconnect()

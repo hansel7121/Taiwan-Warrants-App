@@ -43,6 +43,22 @@ def test_parse_expiry_none_when_unparsable():
     assert lol.parse_expiry({"expiryDate": "not-a-date"}) is None
 
 
+def test_parse_expiry_from_name_date_when_no_structured_field():
+    # Weekly SSOs (TAIFEX, launched 2025-12-08) carry their exact settlement
+    # date only in the display name, same shape TAIFEX's MIS feed uses.
+    row = {"symbol": "CDO06500W2", "name": "台積電W2週選擇權2026/09/23"}
+    assert lol.parse_expiry(row) == dt.date(2026, 9, 23)
+
+
+def test_parse_expiry_structured_field_wins_over_name():
+    row = {"expiryDate": "20261016", "name": "some name with 2026/09/23 in it"}
+    assert lol.parse_expiry(row) == dt.date(2026, 10, 16)
+
+
+def test_parse_expiry_none_when_name_has_no_date():
+    assert lol.parse_expiry({"symbol": "CDA06500L4", "name": "台積電買權"}) is None
+
+
 # ── parse_strike ─────────────────────────────────────────────────────────
 
 def test_parse_strike_structured_field():
