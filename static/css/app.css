@@ -437,6 +437,10 @@ tbody tr.row-pinned td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 #tab-live-options .live-term.bid { color: var(--put); }
 #tab-live-options .live-term.ask { color: var(--call); }
 #tab-live-options .lo-row td button.sm { padding: 1px 6px; font-size: 11px; }
+/* REST-seeded, not yet overwritten by a live tick — see live_options.js's
+   _loApplySnapshotState. Hover the cell for the exact age (same wording as
+   the Live Warrant tab's dedicated Age column, "snapshot, Xs old"). */
+#tab-live-options .lo-snapshot { font-style: italic; opacity: .7; }
 
 /* ── Product picker search ── */
 .product-search {

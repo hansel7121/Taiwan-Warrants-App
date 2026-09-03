@@ -165,3 +165,32 @@ def dedup_key(row, trade_date):
     """Deterministic id for a (warrant, option, day) — logging this pair
     again the same day is a no-op, mirroring arb_suggestions' id scheme."""
     return f"{row['warrant_code']}:{row['option_code']}:{trade_date.isoformat()}"
+
+
+def latest_tick(warrant_rows, option_rows):
+    """The single most recently ticked row across both live snapshots, by
+    `ts` — feeds the "Last received tick" debug line in services/live_arb.py's
+    get_data()/get_lp_data(). None when neither side has ticked yet.
+
+    Only `src == "ws"` rows count: a REST-seeded book (see
+    services/live_warrant.py::_seed_from_rest and the mirrored
+    services/live_options.py version) fills a cell before any tick arrives,
+    but it isn't a tick the exchange pushed, and it never bumps the
+    tick-seq counters `_combined_seq()` sums — so filtering to "ws" here
+    keeps this signal in lockstep with what that counter actually measures.
+
+    Every tracked row is a candidate, not just the ones with fully resolved
+    terms `build_direct_arrays` keeps — this is a raw liveness signal, not
+    an arb-matching input, and deliberately shows tick flow even when
+    nothing is currently matchable.
+    """
+    candidates = [("warrant", r) for r in warrant_rows if r.get("src") == "ws" and r.get("ts") is not None]
+    candidates += [("option", r) for r in option_rows if r.get("src") == "ws" and r.get("ts") is not None]
+    if not candidates:
+        return None
+    kind, row = max(candidates, key=lambda kr: kr[1]["ts"])
+    best = row.get("best") or {}
+    return {
+        "kind": kind, "code": row["code"], "name": row.get("name"),
+        "bid": best.get("bid"), "ask": best.get("ask"), "ts": row["ts"],
+    }

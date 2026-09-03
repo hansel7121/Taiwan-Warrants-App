@@ -17,6 +17,27 @@ function _lalpMoney(v) {
   return v === null || v === undefined ? "—" : Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
 }
 
+// Same debug line as live_arb.js's _laFormatTickLine (Direct Match sub-tab)
+// — duplicated rather than shared, same convention as _laMoney/_lalpMoney
+// above. `up_to_date` here compares against THIS subtab's own last-scanned
+// seq (_lp_last_seq), independent of Direct Match's — the LP scan is far
+// slower (~90ms vs ~8ms) and self-paced rather than tick-synchronous, so it
+// can genuinely fall behind a burst of ticks even while Direct Match is
+// caught up.
+function _lalpFormatTickLine(d) {
+  const t = d.last_tick;
+  if (!t) return "Last received tick: none yet";
+  const bid = t.bid === null || t.bid === undefined ? "—" : Number(t.bid).toFixed(2);
+  const ask = t.ask === null || t.ask === undefined ? "—" : Number(t.ask).toFixed(2);
+  const secs = t.seconds_ago;
+  const age = secs < 90 ? `${secs.toFixed(1)}s` : `${Math.round(secs / 60)}m`;
+  const label = t.name && t.name !== t.code ? `${t.code} (${t.name})` : t.code;
+  const freshness = d.up_to_date
+    ? `<span style="color:var(--put)">arb is up to date</span>`
+    : `<span class="down">arb is NOT up to date</span>`;
+  return `Last received tick: ${t.kind} ${label} bid ${bid} / ask ${ask}, ${age} ago — ${freshness}`;
+}
+
 function _lalpStructureSummary(legs) {
   const nl = (legs || []).filter(l => l.side === "long").length;
   const ns = (legs || []).length - nl;
@@ -99,6 +120,8 @@ function _lalpPoll() {
       }
       document.getElementById("lalp-active-count").textContent = d.active_count;
       document.getElementById("lalp-logged-count").textContent = d.logged_count_today;
+      const tickEl = document.getElementById("lalp-last-tick");
+      if (tickEl) tickEl.innerHTML = _lalpFormatTickLine(d);
       _lalpRenderActive(d.active_structures || []);
       if (d.logged_count_today !== _lalpLastLoggedCount) {
         _lalpLastLoggedCount = d.logged_count_today;

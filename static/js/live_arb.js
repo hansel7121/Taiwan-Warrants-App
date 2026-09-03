@@ -15,6 +15,29 @@ function _laMoney(v) {
   return v === null || v === undefined ? "—" : Number(v).toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
+// "Last received tick: option CDA06500A4 (TSMC Call) bid 3.20 / ask 3.40,
+// 2.1s ago — arb is up to date". A debug line, not a status line: `up_to_date`
+// answers "does the currently-displayed scan actually reflect the latest
+// tick" by comparing a freshly-fetched tick-seq against the seq the last
+// scan iteration ran against (services/live_arb.py's `_tick_and_freshness`)
+// — this can legitimately read NOT up to date right after Stop (ticks keep
+// arriving, the scan loop just isn't consuming them any more), which is the
+// whole point of surfacing it rather than assuming the background loop
+// always keeps up.
+function _laFormatTickLine(d) {
+  const t = d.last_tick;
+  if (!t) return "Last received tick: none yet";
+  const bid = t.bid === null || t.bid === undefined ? "—" : Number(t.bid).toFixed(2);
+  const ask = t.ask === null || t.ask === undefined ? "—" : Number(t.ask).toFixed(2);
+  const secs = t.seconds_ago;
+  const age = secs < 90 ? `${secs.toFixed(1)}s` : `${Math.round(secs / 60)}m`;
+  const label = t.name && t.name !== t.code ? `${t.code} (${t.name})` : t.code;
+  const freshness = d.up_to_date
+    ? `<span style="color:var(--put)">arb is up to date</span>`
+    : `<span class="down">arb is NOT up to date</span>`;
+  return `Last received tick: ${t.kind} ${label} bid ${bid} / ask ${ask}, ${age} ago — ${freshness}`;
+}
+
 async function loadLiveArbOnce() {
   if (_laLoaded) return;
   _laLoaded = true;
@@ -106,6 +129,8 @@ function _laPoll() {
       }
       document.getElementById("la-active-count").textContent = d.active_count;
       document.getElementById("la-logged-count").textContent = d.logged_count_today;
+      const tickEl = document.getElementById("la-last-tick");
+      if (tickEl) tickEl.innerHTML = _laFormatTickLine(d);
       _laRenderActive(d.active_hits || []);
       if (d.logged_count_today !== _laLastLoggedCount) {
         _laLastLoggedCount = d.logged_count_today;

@@ -37,9 +37,20 @@ function _lwSetText(el, s) {
 }
 
 // price (vol), e.g. "12.05 (67)" — "—" when the level has no data.
+//
+// Always exactly 2 decimal places: a bare `.toLocaleString()` prints
+// whatever the value's natural JS representation is (its default max is 3
+// fraction digits, trailing zeros dropped), so 270.00 -> "270", 17.70 ->
+// "17.7", 107.50 -> "107.5" — real, correctly-priced quotes that just
+// looked "unrounded" next to a neighboring 3.09 or 11.35 that happened to
+// need every digit. Forcing minimumFractionDigits/maximumFractionDigits:2
+// makes every price render at the same hundredths precision regardless of
+// how many of its decimal digits are zero.
 function _lwLevelText(price, size) {
   if (price === null || price === undefined) return "—";
-  return `${price.toLocaleString()} (${size === null || size === undefined ? "—" : size.toLocaleString()})`;
+  const priceText = Number(price).toLocaleString(undefined,
+    { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `${priceText} (${size === null || size === undefined ? "—" : size.toLocaleString()})`;
 }
 
 function _lwAge(b) {
