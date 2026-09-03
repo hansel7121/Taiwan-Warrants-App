@@ -187,6 +187,27 @@ def parse_contract(row):
     }
 
 
+# A resting quote's bid and ask can legitimately sit far apart (a deep OTM
+# contract can be bid 0.01 / ask 1.0, an 100x spread that's just illiquidity,
+# not a data error) — this threshold is deliberately high so it only flags
+# the kind of gap a misplaced decimal point would produce (e.g. bid 2.03 /
+# ask 203, a 100x ratio at a price level where a 100x-wide market makes no
+# economic sense), not an ordinary wide market on a dead strike.
+SUSPICIOUS_RATIO = 50
+
+
+def is_suspicious_quote(bid, ask, threshold=SUSPICIOUS_RATIO):
+    """Whether a bid/ask pair looks like a misplaced-decimal-point tick
+    rather than a genuinely wide market — see services/live_options.py's
+    `_handle_message`, which logs the raw frame once per code when this
+    fires so a live occurrence leaves diagnosable evidence instead of just
+    a weird number on screen."""
+    if bid is None or ask is None or bid <= 0 or ask <= 0:
+        return False
+    ratio = ask / bid
+    return ratio >= threshold or ratio <= 1 / threshold
+
+
 def new_contract_codes(tracked_codes, parsed_codes):
     """Codes to subscribe: parsed minus already-tracked, deduped. Add-only —
     see services/live_options.py::load_chain's docstring for why no

@@ -3,9 +3,9 @@
 // strike ladder. No pricing computation anywhere in this file — it only
 // ever renders whatever raw best-bid/best-ask the payload carries.
 //
-// Reuses _lwSetText/_lwLevelText/_lwNum from live_warrant.js (both scripts
-// are always loaded together, and those three are pure globals with no
-// hardcoded element IDs). Does NOT reuse _lwSessionAction — it hardcodes
+// Reuses _lwSetText/_lwLevelText/_lwNum/_lwAge from live_warrant.js (both
+// scripts are always loaded together, and those four are pure globals with
+// no hardcoded element IDs). Does NOT reuse _lwSessionAction — it hardcodes
 // "live-status", so a local _loSessionAction hardcodes "lo-status" instead
 // rather than touching the already-shipped warrant tab.
 
@@ -74,6 +74,20 @@ function _loBuildStrikeRow() {
   };
 }
 
+// Title tooltip + a dimmed style on a side's two price cells when that
+// side's book came from the REST seed and hasn't ticked yet — same
+// "snapshot, Xs old" wording live_warrant.js's dedicated Age column uses
+// (_lwAge, reused here as a global), just surfaced as a tooltip instead of
+// its own column since the put/strike/call ladder has no room for one.
+function _loApplySnapshotState(bidTd, askTd, c) {
+  const age = c ? _lwAge(c) : "";
+  const isSnapshot = !!(c && c.src === "rest");
+  [bidTd, askTd].forEach(td => {
+    td.title = age;
+    td.classList.toggle("lo-snapshot", isSnapshot);
+  });
+}
+
 function _loPatchStrikeRow(el, strike, putC, callC) {
   _lwSetText(el.cells.strike, _lwNum(strike, 2));
 
@@ -83,6 +97,8 @@ function _loPatchStrikeRow(el, strike, putC, callC) {
   _lwSetText(el.cells.putAsk, _lwLevelText(putBest.ask, putBest.ask_size));
   _lwSetText(el.cells.callBid, _lwLevelText(callBest.bid, callBest.bid_size));
   _lwSetText(el.cells.callAsk, _lwLevelText(callBest.ask, callBest.ask_size));
+  _loApplySnapshotState(el.cells.putBid, el.cells.putAsk, putC);
+  _loApplySnapshotState(el.cells.callBid, el.cells.callAsk, callC);
 
   el.putRemoveBtn.style.visibility = putC ? "visible" : "hidden";
   el.putRemoveBtn.onclick = putC ? () => removeLiveOption(putC.code) : null;

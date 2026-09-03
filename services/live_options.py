@@ -5,14 +5,27 @@ websocket client from warrants, see docs/fubon_connection_runbook.md), and
 the in-process order-book cache the /live_options_data route reads from.
 
 Structurally parallel to services/live_warrant.py — same connection-pool
-shape, same subscribe/unsubscribe mechanics, same session lifecycle — but
-deliberately smaller: NO database persistence (the tracked contract list is
-in-memory only, lost on process restart — re-click "Load TSMC Chain"), NO
-REST-seed-before-first-tick step (a cell just shows "—" until its first
-websocket tick, same as an illiquid warrant already does today), and NO
-pricing computation of any kind (no IV, no Greeks, no time-value — this tab
-exists purely to prove out the Fubon subscription mechanism for options,
+shape, same subscribe/unsubscribe mechanics, same session lifecycle, and (as
+of the REST-seed addition below) the same REST-seed-before-first-tick step —
+but deliberately smaller: NO database persistence (the tracked contract list
+is in-memory only, lost on process restart — re-click "Load TSMC Chain"), and
+NO pricing computation of any kind (no IV, no Greeks, no time-value — this
+tab exists purely to prove out the Fubon subscription mechanism for options,
 one step before any analytics get layered on).
+
+REST seed (`_seed_from_rest`): the books channel is update-only — it pushes
+on change and sends no snapshot on subscribe — so a contract with no recent
+activity would show "—" until a market maker requotes it. Every newly
+subscribed contract gets one REST quote to fill its book immediately,
+exactly mirroring live_warrant.py's identical-purpose helper, with one
+option-specific wrinkle: futopt's quote() carries no bids/asks ladder at all
+(unlike stock's) — only a single lastTrade.bid/ask — confirmed live against
+a 2330 chain by scripts/fubon_quote_viewer.py's own `_seed_from_rest`, which
+this mirrors. A REST-seeded book is marked `src: "rest"` so the UI can show
+it as a snapshot (age included) until the first live tick overwrites it with
+`src: "ws"`. This is also what makes Live Arb (services/live_arb.py), which
+just reads this module's tracked books, see a contract's price the instant
+it's tracked rather than only after its first requote.
 
 TSMC (2330) only for now — SUPPORTED_UNDERLYING mirrors the exact framing of
 live_warrant.py's UNDERLYING_LIVE_PRICE_ALLOWLIST.
@@ -32,11 +45,13 @@ verified manually against the real Fubon connection during trading hours,
 not by the test suite (except for the one targeted _handle_message test in
 tests/services/test_live_options_ticks.py).
 """
+import collections
 import json
 import os
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from logic import live_options_logic, live_warrant_logic
@@ -50,6 +65,28 @@ RECONNECT_BACKOFF_S = 5
 # Codes re-attempted per retry_pending() call. Bounded so a scheduler tick
 # that inherits a fully failed chain load still finishes promptly.
 PENDING_RETRY_BATCH = 100
+# Parallel REST seed workers during a chain load — same figure as
+# live_warrant.py's SEED_WORKERS, same reasoning (bounded well under the
+# per-second quota the Fugle REST endpoint enforces).
+SEED_WORKERS = 8
+SEED_RETRIES = 3
+SEED_BACKOFF_S = 0.6
+# REST seeds a single load_chain() request will spend inline before leaving
+# the rest for retry_pending() — a full TSMC option chain (many strikes ×
+# several expiries × 2 types) can run past what fits in one request the same
+# way a full warrant chain does, see live_warrant.py's SEED_BUDGET_PER_SCAN.
+SEED_BUDGET_PER_LOAD = 200
+# Same measured Fugle account-wide REST ceiling live_warrant.py's _RestQuota
+# guards against — duplicated here rather than imported (see this module's
+# reuse-vs-duplicate note in the docstring above and live_options.js's
+# identical note): this module's futopt session is a wholly separate SDK
+# login from live_warrant.py's stock session, so there is nothing genuinely
+# shared to import.
+REST_QUOTA = 300
+REST_QUOTA_WINDOW_S = 60.0
+REST_BURST_LIMIT = 24
+REST_BURST_WINDOW_S = 1.0
+REST_ACQUIRE_TIMEOUT_S = 20.0
 
 # v1 hard-coded to one underlying, same framing as live_warrant.py's
 # UNDERLYING_LIVE_PRICE_ALLOWLIST — trivially widened once the contract-field
@@ -57,15 +94,17 @@ PENDING_RETRY_BATCH = 100
 SUPPORTED_UNDERLYING = "2330"
 
 _lock = threading.RLock()
-_books = {}        # code -> {"bids": [...], "asks": [...], "ts": datetime, "src": "ws"}
+_books = {}        # code -> {"bids": [...], "asks": [...], "ts": datetime, "src": "ws"|"rest"}
 _contracts = {}     # code -> {"expiry": date, "strike": float, "is_put": bool, "name": str}
 _tracked = []       # codes, add order. The ONLY persistence there is — lost on process restart.
 _connections = []   # each: {"sdk", "ws", "codes": set(), "sub_ids": {}, "state", "last_error"}
 _pending = set()    # tracked codes with no live subscription — retried by retry_pending()
-_track_errors = {}  # code -> last subscribe error, cleared on success
+_seeded = set()     # codes whose REST seed completed (an empty book still counts, see _seed_from_rest)
+_track_errors = {}  # code -> last subscribe/seed error, cleared on success
 _session_error = None  # set when the session can't even start (e.g. no credentials)
 _stopped_by_user = False  # set by stop_session(); blocks scheduler/load_chain from silently reopening it
 _diagnostic_logged = False  # one-shot: log the first raw tickers() row so the field-shape guess can be checked
+_suspicious_logged = set()  # codes whose book already triggered the decimal-point sanity log this process
 # Bumped on every books tick. Nothing in this module needs per-code dirty
 # tracking (see the module docstring — no derived columns here), but Live
 # Arb (services/live_arb.py) needs SOME cheap "has anything changed since I
@@ -86,6 +125,69 @@ def _error_detail(e):
     if status or message:
         return " ".join(str(x) for x in (type(e).__name__, status, message) if x)
     return f"{type(e).__name__}: {e}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REST quota — identical mechanism to live_warrant.py's `_RestQuota` (see its
+# docstring for the full sliding-window + burst-window reasoning); duplicated
+# rather than shared since this module's futopt SDK session is a separate
+# login from that module's stock session, see this module's docstring.
+# ─────────────────────────────────────────────────────────────────────────────
+class _RestQuota:
+    def __init__(self, limit=REST_QUOTA, window=REST_QUOTA_WINDOW_S,
+                 burst_limit=REST_BURST_LIMIT, burst_window=REST_BURST_WINDOW_S):
+        self._limit = limit
+        self._window = window
+        self._burst_limit = burst_limit
+        self._burst_window = burst_window
+        self._hits = collections.deque()
+        self._lock = threading.Lock()
+
+    def _burst_count_and_oldest(self, now):
+        count, oldest = 0, None
+        for t in reversed(self._hits):
+            if now - t >= self._burst_window:
+                break
+            count += 1
+            oldest = t
+        return count, oldest
+
+    def acquire(self, timeout=None):
+        """Claim one request slot. False if `timeout` elapsed without one."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                while self._hits and now - self._hits[0] >= self._window:
+                    self._hits.popleft()
+                burst_count, oldest_in_burst = self._burst_count_and_oldest(now)
+                has_slot = len(self._hits) < self._limit
+                has_burst_room = burst_count < self._burst_limit
+                if has_slot and has_burst_room:
+                    self._hits.append(now)
+                    return True
+                wait_slot = 0.0 if has_slot else self._window - (now - self._hits[0])
+                wait_burst = (0.0 if has_burst_room
+                              else self._burst_window - (now - oldest_in_burst))
+                wait = max(wait_slot, wait_burst)
+            if deadline is not None:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                wait = min(wait, left)
+            time.sleep(min(wait, 0.25) + 0.01)
+
+
+_rest_quota = _RestQuota()
+
+
+def _rest_call(label, fn, **params):
+    """Run one REST call against the shared quota."""
+    if not _rest_quota.acquire(timeout=REST_ACQUIRE_TIMEOUT_S):
+        raise RuntimeError(
+            f"REST quota exhausted: no slot for {label} within {REST_ACQUIRE_TIMEOUT_S:.0f}s "
+            f"({REST_QUOTA}/{REST_QUOTA_WINDOW_S:.0f}s)")
+    return fn(**params)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -177,15 +279,47 @@ def _handle_message(conn, raw):
     if not code:
         return
 
+    new_bids, new_asks = data.get("bids") or [], data.get("asks") or []
     global _tick_seq
     with _lock:
         _books[code] = {
-            "bids": data.get("bids") or [],
-            "asks": data.get("asks") or [],
+            "bids": new_bids,
+            "asks": new_asks,
             "ts": datetime.now(timezone.utc),
             "src": "ws",
         }
         _tick_seq += 1
+        already_flagged = code in _suspicious_logged
+    _log_if_suspicious(code, new_bids, new_asks, message, already_flagged)
+
+
+def _log_if_suspicious(code, bids, asks, raw_message, already_flagged):
+    """One-shot-per-code diagnostic for a bid/ask pair that looks like a
+    misplaced decimal point (see logic/live_options_logic.py's
+    `is_suspicious_quote`) rather than a genuinely wide market.
+
+    This module passes every price through untouched (`best_level` just
+    reads `bids[0]["price"]`/`asks[0]["price"]`) — if a quote really is off
+    by a factor of ~100, it arrived that way from the feed, and the only way
+    to tell whether it's a broker/exchange data quirk (see
+    logic/live_options_logic.py::parse_strike's confirmed one-decimal-place
+    quirk in the SYMBOL-encoded strike, a precedent for this class of bug)
+    or a genuine fat-fingered resting order is to see the raw frame. Logged
+    once per code (not every tick) so a persistently wide-but-real market
+    doesn't flood the log.
+    """
+    if already_flagged:
+        return
+    bid = bids[0]["price"] if bids else None
+    ask = asks[0]["price"] if asks else None
+    if not live_options_logic.is_suspicious_quote(bid, ask):
+        return
+    with _lock:
+        if code in _suspicious_logged:
+            return
+        _suspicious_logged.add(code)
+    print(f"LIVEOPTIONS: suspicious quote {code}: bid={bid} ask={ask} — "
+          f"raw frame: {json.dumps(raw_message, default=str, ensure_ascii=False)}", flush=True)
 
 
 def _handle_control(conn, event, message):
@@ -271,23 +405,82 @@ def _subscribe_one(code):
     return conn
 
 
+def _seed_from_rest(sdk, code):
+    """One REST quote per newly subscribed code: fills its first book before
+    any websocket tick arrives, mirroring live_warrant.py's identical-purpose
+    helper (see this module's docstring for the futopt-specific wrinkle).
+
+    Failure is retried, then recorded in `_track_errors` and left to
+    retry_pending() — never raises. `_seeded` is set on any successful REST
+    round trip, including one whose book comes back empty (a contract can
+    genuinely have no resting quote on either side) — that distinction is
+    what stops an empty book from being re-seeded on every retry_pending()
+    pass forever. Returns True when the quote came back.
+    """
+    for attempt in range(1, SEED_RETRIES + 1):
+        try:
+            q = _rest_call(f"quote {code}", sdk.marketdata.rest_client.futopt.intraday.quote, symbol=code)
+            break
+        except Exception as e:
+            detail = _error_detail(e)
+            if attempt == SEED_RETRIES:
+                with _lock:
+                    _track_errors[code] = f"seed failed: {detail}"
+                print(f"LIVEOPTIONS: seed {code} failed after {attempt} attempts: {detail}", flush=True)
+                return False
+            time.sleep(SEED_BACKOFF_S * attempt)
+
+    with _lock:
+        _track_errors.pop(code, None)
+        _seeded.add(code)
+
+    # futopt's quote() carries no bids/asks ladder (unlike stock's) — only a
+    # single lastTrade.bid/ask — so this synthesizes a 1-level book from it,
+    # exactly as scripts/fubon_quote_viewer.py's confirmed-live equivalent
+    # does. The live books push (5 levels) overwrites it on the first requote.
+    last = q.get("lastTrade") or {}
+    size = last.get("size") or 0
+    bids = [{"price": last["bid"], "size": size}] if last.get("bid") else []
+    asks = [{"price": last["ask"], "size": size}] if last.get("ask") else []
+    if not bids and not asks:
+        return True
+
+    stamp = q.get("lastUpdated")
+    try:
+        ts = datetime.fromtimestamp(stamp / 1_000_000, timezone.utc)
+    except (TypeError, ValueError, OSError):
+        ts = datetime.now(timezone.utc)
+    with _lock:
+        _books.setdefault(code, {"bids": bids, "asks": asks, "ts": ts, "src": "rest"})
+    return True
+
+
+def _reseed_one(code):
+    """One reseed attempt for retry_pending()'s parallel fan-out — same
+    purpose as live_warrant.py's identical helper."""
+    with _lock:
+        conn = next((c for c in _connections if code in c["codes"]), None)
+    return bool(conn and _seed_from_rest(conn["sdk"], code))
+
+
 def _track_one(code):
-    """Subscribe one code. Raises if the subscribe itself fails (the caller
-    decides what that means). No REST seed — see module docstring: a cell
-    just shows "—" until its first books-channel tick."""
-    _subscribe_one(code)
+    """Subscribe one code and seed its first book. Raises if the subscribe
+    itself fails (the caller decides what that means); a failed REST seed is
+    recorded, not raised."""
+    conn = _subscribe_one(code)
     with _lock:
         _pending.discard(code)
+    _seed_from_rest(conn["sdk"], code)
 
 
-def _track_many(codes):
-    """Subscribe a batch. Per-code failure collected, never raised — same
-    no-loss guarantee as live_warrant.py's `_track_many`, minus the REST-seed
-    fan-out (nothing to seed here)."""
-    failed = []
+def _track_many(codes, seed_budget=None):
+    """Subscribe a batch, then seed the books in parallel — same shape as
+    live_warrant.py's `_track_many` (see its docstring for why the REST seed
+    fans out over a thread pool while subscribing itself stays serial)."""
+    conns, failed = [], []
     for code in codes:
         try:
-            _subscribe_one(code)
+            conns.append((code, _subscribe_one(code)))
             with _lock:
                 _pending.discard(code)
         except Exception as e:
@@ -297,6 +490,14 @@ def _track_many(codes):
                 _pending.add(code)
                 _track_errors[code] = f"subscribe failed: {detail}"
             print(f"LIVEOPTIONS: subscribe {code} failed: {detail}", flush=True)
+
+    to_seed = conns if seed_budget is None else conns[:seed_budget]
+    if to_seed:
+        with ThreadPoolExecutor(max_workers=SEED_WORKERS) as pool:
+            list(pool.map(lambda pair: _seed_from_rest(pair[1]["sdk"], pair[0]), to_seed))
+    if len(to_seed) < len(conns):
+        print(f"LIVEOPTIONS: seeded {len(to_seed)}/{len(conns)} inline, "
+              f"{len(conns) - len(to_seed)} left for retry_pending", flush=True)
     return failed
 
 
@@ -305,8 +506,10 @@ def _untrack_one(code):
     state is cleared first — see live_warrant.py's identical ordering note."""
     with _lock:
         _pending.discard(code)
+        _seeded.discard(code)
         _track_errors.pop(code, None)
         _contracts.pop(code, None)
+        _suspicious_logged.discard(code)
         conn = next((c for c in _connections if code in c["codes"]), None)
         sub_id = conn["sub_ids"].get(code) if conn else None
     if conn is None:
@@ -339,6 +542,12 @@ def start_session():
     scheduler tick (services/scheduler.py::sync_live_options) safe to run
     unconditionally: before any chain load it's a true no-op, and after one
     it behaves exactly like the warrant version.
+
+    Uses `_track_many` (subscribe serially, then REST-seed in parallel,
+    inline budget SEED_BUDGET_PER_LOAD) rather than looping `_track_one`
+    per code — a reconnect on a large chain would otherwise pay one
+    serial REST round trip per code back to back, exactly the slow path
+    live_warrant.py's own start_session avoids the same way.
     """
     global _session_error
     with _lock:
@@ -346,42 +555,54 @@ def start_session():
             return
         codes = list(_tracked)
     _session_error = None
-    for code in codes:
-        try:
-            _track_one(code)
-        except Exception as e:
-            detail = _error_detail(e)
-            _session_error = f"{code}: {detail}"
-            with _lock:
-                _track_errors[code] = detail
-            print(f"LIVEOPTIONS: track {code} failed: {detail}", flush=True)
+    failed = _track_many(codes, seed_budget=SEED_BUDGET_PER_LOAD)
+    if failed:
+        _session_error = (f"{failed[0]}: subscribe failed"
+                          + (f" (+{len(failed) - 1} more)" if len(failed) > 1 else ""))
 
 
 def retry_pending(limit=PENDING_RETRY_BATCH):
-    """Re-attempt whatever the last chain load could not finish. Same
-    mechanism as live_warrant.py's version, minus every DB-backed step (no
-    terms, no name backfill, no MIS volume — none of that exists here)."""
+    """Re-attempt whatever the last chain load could not finish, AND reseed
+    whatever got subscribed but never got its first REST quote (the scan
+    spent its inline SEED_BUDGET_PER_LOAD before reaching it, or the quote
+    failed). Same mechanism as live_warrant.py's version, minus every
+    DB-backed step (no terms, no name backfill, no MIS volume — none of
+    that exists here)."""
     with _lock:
         if _stopped_by_user or not _connections:
-            return {"subscribed": 0, "pending": len(_pending)}
+            return {"subscribed": 0, "reseeded": 0, "pending": len(_pending)}
         todo = [c for c in _tracked if c in _pending][:limit]
+        reseed = [c for c in _tracked if c not in _pending and c not in _seeded][:limit]
 
     subscribed = 0
+    to_seed = []
     for code in todo:
         try:
-            _track_one(code)
+            _subscribe_one(code)
+            with _lock:
+                _pending.discard(code)
+            to_seed.append(code)
             subscribed += 1
         except Exception as e:
             detail = _error_detail(e)
             with _lock:
+                _pending.add(code)
                 _track_errors[code] = f"subscribe failed: {detail}"
             print(f"LIVEOPTIONS: retry subscribe {code} failed: {detail}", flush=True)
 
+    reseeded = 0
+    batch = to_seed + reseed
+    if batch:
+        with ThreadPoolExecutor(max_workers=SEED_WORKERS) as pool:
+            results = list(pool.map(_reseed_one, batch))
+        reseeded = sum(1 for r in results if r)
+
     with _lock:
         still = len(_pending)
-    if subscribed:
-        print(f"LIVEOPTIONS: retry_pending subscribed={subscribed} pending={still}", flush=True)
-    return {"subscribed": subscribed, "pending": still}
+    if subscribed or reseeded:
+        print(f"LIVEOPTIONS: retry_pending subscribed={subscribed} reseeded={reseeded} pending={still}",
+              flush=True)
+    return {"subscribed": subscribed, "reseeded": reseeded, "pending": still}
 
 
 def _teardown():
@@ -517,7 +738,7 @@ def load_chain(underlying=SUPPORTED_UNDERLYING):
         for code in new_codes:
             _tracked.append(code)
             _pending.add(code)
-    failed = _track_many(new_codes)
+    failed = _track_many(new_codes, seed_budget=SEED_BUDGET_PER_LOAD)
 
     print(f"LIVEOPTIONS: load_chain {underlying} products={product_codes} "
           f"(underlying_products={underlying_products}) "

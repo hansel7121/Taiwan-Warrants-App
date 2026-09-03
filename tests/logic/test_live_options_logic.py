@@ -191,3 +191,36 @@ def test_new_contract_codes_preserves_order():
 
 def test_new_contract_codes_empty_when_everything_already_tracked():
     assert lol.new_contract_codes(["A", "B"], ["A", "B"]) == []
+
+
+# ── is_suspicious_quote ──────────────────────────────────────────────────
+
+def test_is_suspicious_quote_flags_a_100x_gap():
+    assert lol.is_suspicious_quote(2.03, 203) is True
+
+
+def test_is_suspicious_quote_flags_the_gap_on_either_side():
+    assert lol.is_suspicious_quote(203, 2.03) is True
+
+
+def test_is_suspicious_quote_allows_a_plausibly_wide_otm_market():
+    assert lol.is_suspicious_quote(0.05, 1.0) is False  # 20x, illiquidity not a data error
+
+
+def test_is_suspicious_quote_allows_a_tight_market():
+    assert lol.is_suspicious_quote(3.2, 3.4) is False
+
+
+def test_is_suspicious_quote_false_when_a_side_is_missing():
+    assert lol.is_suspicious_quote(None, 203) is False
+    assert lol.is_suspicious_quote(2.03, None) is False
+
+
+def test_is_suspicious_quote_false_for_non_positive_prices():
+    assert lol.is_suspicious_quote(0, 203) is False
+    assert lol.is_suspicious_quote(2.03, 0) is False
+
+
+def test_is_suspicious_quote_respects_a_custom_threshold():
+    assert lol.is_suspicious_quote(1.0, 5.0, threshold=4) is True
+    assert lol.is_suspicious_quote(1.0, 3.0, threshold=4) is False
