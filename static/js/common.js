@@ -534,4 +534,65 @@ async function _boot() {
   restoreView();   // put the user back on the tab/market they had before reload
 }
 
+// ── Tick recorder download (Live Warrant / Live Options tabs) ──────────────
+// The recorder (services/tick_recorder.py) appends every books frame to a
+// gzipped daily CSV while the market is open; these drive the tabs' download
+// button and its size label.
+
+function _tickBytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
+  return (n / 1073741824).toFixed(2) + " GB";
+}
+
+// Label + button state for one stream. Polled slowly (the file only grows) and
+// only while its tab has been opened at least once.
+async function refreshTickStatus(stream, labelId, btnIds) {
+  const label = document.getElementById(labelId);
+  if (!label) return;
+  let st;
+  try {
+    st = await apiJson("/live_tick_status");
+  } catch (e) {
+    label.textContent = "tick log unavailable";
+    return;
+  }
+  const files = (st.files && st.files[stream]) || [];
+  const latest = files[0];
+  const dropped = (st.dropped || {})[stream] || 0;
+  (btnIds || []).forEach(id => {
+    const b = document.getElementById(id);
+    if (b) b.disabled = !latest;
+  });
+  if (!st.enabled) { label.textContent = "recorder disabled"; return; }
+  if (!latest) {
+    label.textContent = st.recording ? "recording — no ticks yet" : "no ticks recorded";
+    return;
+  }
+  const parts = [`${latest.day} · ${_tickBytes(latest.bytes)} gz`];
+  if (st.recording) parts.push("recording");
+  if (dropped) parts.push(`${dropped} dropped`);
+  label.textContent = parts.join(" · ");
+}
+
+// Downloads the newest day on disk. `raw` hands back the .csv.gz (~5x smaller
+// on the wire) instead of the decompressed CSV — worth it for a full day.
+async function downloadLiveTicks(stream, raw) {
+  const res = await api(`/live_tick_csv?stream=${stream}${raw ? "&raw=1" : ""}`);
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (JSON.parse(await res.text()) || {}).error || ""; } catch (e) {}
+    alert(detail || `download failed (${res.status})`);
+    return;
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${stream}-ticks.${raw ? "csv.gz" : "csv"}`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 document.addEventListener("DOMContentLoaded", _boot);

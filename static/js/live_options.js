@@ -10,6 +10,7 @@
 // rather than touching the already-shipped warrant tab.
 
 let _loLoaded = false;
+let _loTickStatusTimer = null;
 let _loPollTimer = null;
 let _loInFlight = false;
 let _loGrouped = {};        // expiry -> { strike -> {put, call} }
@@ -22,6 +23,9 @@ async function loadLiveOptionsOnce() {
   _loLoaded = true;
   _loPollTimer = setInterval(_loPoll, 500);
   _loPoll();
+  const tickArgs = ["option", "lo-ticks-status", ["lo-ticks-btn", "lo-ticks-gz-btn"]];
+  refreshTickStatus(...tickArgs);
+  _loTickStatusTimer = setInterval(() => refreshTickStatus(...tickArgs), 15000);
 }
 
 function _loGroup(contracts) {

@@ -55,6 +55,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from logic import live_options_logic, live_warrant_logic
+from services import tick_recorder
 from services.broker import credentials as broker_credentials
 
 FUBON_CRED_LABEL = os.environ.get("FUBON_CRED_LABEL", broker_credentials.DEFAULT_LABEL)
@@ -277,6 +278,8 @@ def _handle_message(conn, raw):
     code = data.get("symbol")
     if not code:
         return
+
+    tick_recorder.record("option", code, data.get("bids") or [], data.get("asks") or [])
 
     global _tick_seq
     with _lock:

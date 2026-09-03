@@ -1,6 +1,6 @@
 # Flask routes only: parse requests, call logic/ and services/, return JSON/CSV.
 # Also owns request logging (before/after/teardown hooks) and the JSON error handler.
-from flask import Flask, render_template, request, jsonify, Response, g
+from flask import Flask, render_template, request, jsonify, Response, g, stream_with_context
 from werkzeug.exceptions import HTTPException
 from services import applog
 from logic import warrant_logic
@@ -16,6 +16,7 @@ from services import roles
 from services import store
 from services import live_warrant
 from services import live_options
+from services import tick_recorder
 from services import live_arb, db_live_arb, db_live_arb_lp
 from logic import arb_logic
 from logic import live_warrant_logic
@@ -81,6 +82,7 @@ _ROUTE_LABELS = {
     "/match_warrant_tw_option_csv": "arb scan csv",
     "/match_static_arb": "static arb lp",
     "/match_static_arb_csv": "static arb lp csv",
+    "/live_tick_csv": "live ticks csv",
 }
 
 
@@ -752,6 +754,45 @@ def connect_live_options():
 def disconnect_live_options():
     live_options.stop_session()
     return jsonify({"ok": True})
+
+
+@app.route("/live_tick_status")
+@require_auth
+@require_role(ADMIN)
+def live_tick_status():
+    """What the tick recorder has on disk, per stream — drives the Download
+    Ticks button's size label and its enabled/disabled state."""
+    return jsonify(tick_recorder.status())
+
+
+@app.route("/live_tick_csv")
+@require_auth
+@require_role(ADMIN)
+def live_tick_csv():
+    """One trading day of raw ticks, newest day on disk by default.
+
+    Streamed straight off the gzip file: a full day is gigabytes and would
+    blow the single worker's memory if buffered the way the scanner CSV
+    routes do. `raw=1` hands back the .csv.gz untouched instead.
+    """
+    stream = request.args.get("stream", "warrant")
+    if stream not in tick_recorder.STREAMS:
+        return jsonify({"error": f"unknown stream: {stream}"}), 400
+    day = tick_recorder.resolve_day(stream, request.args.get("day"))
+    if not day:
+        return jsonify({"error": "no ticks recorded yet"}), 404
+    # Serve what was captured up to this instant, not up to the last flush.
+    tick_recorder.flush_now()
+
+    raw = request.args.get("raw") == "1"
+    body = tick_recorder.iter_raw(stream, day) if raw else tick_recorder.iter_csv(stream, day)
+    ext = "csv.gz" if raw else "csv"
+    return Response(
+        stream_with_context(body),
+        mimetype="application/gzip" if raw else "text/csv",
+        headers={"Content-Disposition":
+                 f"attachment; filename={stream}-ticks-{day}.{ext}"},
+    )
 
 
 @app.route("/live_arb_data")

@@ -14,3 +14,4 @@ notebooks/
 tests/
 arb_finder_report.pdf
 rust/*/target/
+data/

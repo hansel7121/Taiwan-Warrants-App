@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from logic import iv_engine, live_warrant_logic
-from services import db_live_warrant, memlog
+from services import db_live_warrant, memlog, tick_recorder
 from services.broker import credentials as broker_credentials
 
 FUBON_CRED_LABEL = os.environ.get("FUBON_CRED_LABEL", broker_credentials.DEFAULT_LABEL)
@@ -442,6 +442,9 @@ def _handle_message(conn, raw):
         return
 
     new_bids, new_asks = data.get("bids") or [], data.get("asks") or []
+    # Logged before the lock: recording is independent of the book cache and
+    # must not widen the critical section every subscription contends on.
+    tick_recorder.record("warrant", code, new_bids, new_asks)
     with _lock:
         if code in _underlying_codes:
             _fold_underlying_tick_locked(code, new_bids, new_asks)

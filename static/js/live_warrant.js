@@ -11,6 +11,7 @@
 let _lwLoaded = false;
 let _lwPollTimer = null;
 let _lwLogPollTimer = null;
+let _lwTickStatusTimer = null;
 let _lwInFlight = false;
 let _lwRows = {};           // code -> table row els, keyed by _lwBuildRow()
 let _lwLogLastId = 0;
@@ -69,6 +70,11 @@ async function loadLiveWarrantOnce() {
   _lwPollTimer = setInterval(_lwPoll, 500);
   _lwLogPollTimer = setInterval(_lwPollLog, 1000);
   _lwPoll();
+  // The tick file only grows, so its label doesn't belong on the 500ms book
+  // poll — 15s is well inside "notice it before you download it".
+  const tickArgs = ["warrant", "live-ticks-status", ["live-ticks-btn", "live-ticks-gz-btn"]];
+  refreshTickStatus(...tickArgs);
+  _lwTickStatusTimer = setInterval(() => refreshTickStatus(...tickArgs), 15000);
 }
 
 // ── Table view: one row per warrant ────────────────────────────────────────

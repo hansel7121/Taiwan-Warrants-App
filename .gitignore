@@ -23,3 +23,6 @@ log/
 
 # Rust IV engine build output
 rust/*/target/
+
+# Recorded live ticks (services/tick_recorder.py) — gigabytes/day, never committed
+data/ticks/

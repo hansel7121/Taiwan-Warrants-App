@@ -644,6 +644,17 @@
               Reconnect
             </button>
           </div>
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <button class="sm" id="live-ticks-btn" disabled onclick="downloadLiveTicks('warrant', false)"
+                    title="Every warrant book update recorded today, one row per tick (ts_ms,code,bid,bid_size,ask,ask_size). Recording runs only during TW-equity hours; the file is kept for a few days, so 'end of day' can also mean the next morning.">
+              Download Ticks (CSV)
+            </button>
+            <button class="sm" id="live-ticks-gz-btn" disabled onclick="downloadLiveTicks('warrant', true)"
+                    title="Same day, handed back as .csv.gz — roughly 5x less to transfer. Prefer this for a full session.">
+              .csv.gz
+            </button>
+            <span id="live-ticks-status" style="font-size:12px;color:var(--muted)"></span>
+          </div>
         </div>
 
         <div style="display:flex;align-items:center;gap:14px;margin:10px 0">
@@ -715,6 +726,17 @@
                     title="Hard restart: re-logs in and reopens however many connections the loaded chain needs.">
               Reconnect
             </button>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <button class="sm" id="lo-ticks-btn" disabled onclick="downloadLiveTicks('option', false)"
+                    title="Every option book update recorded today, one row per tick (ts_ms,code,bid,bid_size,ask,ask_size). Recording runs only during TW-equity hours; the file is kept for a few days, so 'end of day' can also mean the next morning.">
+              Download Ticks (CSV)
+            </button>
+            <button class="sm" id="lo-ticks-gz-btn" disabled onclick="downloadLiveTicks('option', true)"
+                    title="Same day, handed back as .csv.gz — roughly 5x less to transfer. Prefer this for a full session.">
+              .csv.gz
+            </button>
+            <span id="lo-ticks-status" style="font-size:12px;color:var(--muted)"></span>
           </div>
         </div>
 

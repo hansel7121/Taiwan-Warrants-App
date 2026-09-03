@@ -92,6 +92,7 @@ services/              side-effecting infrastructure
   db_market.py           market-data snapshot read/write (batch-pointer model)
   db_products.py         tracked-product CRUD (warrant/TW-option/US-option lists)
   db_suggestions.py      arb_suggestions CRUD (automated Direct-Arb output)
+  tick_recorder.py       append-only gzipped tick log for the Live tabs (see below)
   applog.py memlog.py    request logging + memory/timing measurement
 templates/index.html   single-page frontend shell (Jinja + Plotly)
 static/css/app.css     extracted stylesheet
@@ -127,8 +128,42 @@ scripts/               one-off maintenance/seeding scripts
 - Suggestions: `/list_suggestions`, `/remove_suggestion` (hard delete).
 - Products: `/list|add|remove_warrant_stock`, `/lookup_warrant_stock`, `/list|add|remove_tw_option_product`, `/list|add|remove_us_option_product`.
 - Manual refresh: `/sync_warrant`, `/sync_tw_option`, `/sync_us_option`, `/sync_universe` (debounced, run the scheduler's core writers synchronously).
+- Tick log: `/live_tick_status` (what's on disk, drives the Download Ticks button), `/live_tick_csv?stream=warrant|option[&day=YYYY-MM-DD][&raw=1]`.
 
 **Scheduler (`services/scheduler.py`):** one `BackgroundScheduler` with a single-worker executor, started once from `wsgi.py` (prod) or `app.py __main__` (dev). Jobs: `cmkey` (interval, ungated), `universe` (daily 07:00 TPE cron), and three intraday data syncs (`warrants`/`tw_options`/`us_options`) on a wall-clock 15-min grid, each `_gated` to its market's hours. The **suggest job** (`sync_suggestions`) runs a few minutes after the grid, gated on `tw_equity` hours: it scans the Direct tab's two strategies (`same_type`, `pcp`) via `arb_logic.match_warrant_tw_option` over the warrant∩tw-option universe, drops non-executable (short-warrant) PCP rows, and upserts profitable rows into `arb_suggestions` (stale rows flipped, not deleted). The Portfolio → Suggestions sub-tab reads them via `/list_suggestions`.
+
+**Tick recorder (`services/tick_recorder.py`):** `record()` is called from
+`live_warrant.py`/`live_options.py`'s `_handle_message` on every books frame —
+deliberately *before* they take `_lock`, so recording never widens the critical
+section every subscription contends on. Ticks land in an in-memory buffer that a
+daemon thread flushes every 250 ms to `data/ticks/{stream}-{YYYY-MM-DD}.csv.gz`,
+gated on `scheduler.is_market_open("tw_equity")` (resolved lazily — scheduler
+imports live_warrant, so a module-level import here would close the cycle).
+
+- **Long format, one row per tick** (`ts_ms,code,bid,bid_size,ask,ask_size`), not a
+  wide per-tick snapshot. A frame moves ONE contract, so a wide row would repeat
+  ~1,199 unchanged cells per tick: ~350 GB/day at 3k ticks/s against ~2.4 GB raw /
+  ~490 MB gzipped here. Pivot to wide at analysis time.
+- **Each flush appends a complete gzip member**, never writing into one long-lived
+  gzip stream. An open stream has no trailer and Python's own reader rejects it
+  ("Compressed file ended before the end-of-stream marker was reached") — which
+  would break the two cases that matter: downloading mid-session, and whatever the
+  process was holding when it died. Members concatenate transparently; the cost is
+  ~20 bytes per flush.
+- **It must never break quoting.** `record()` swallows every exception (it runs on
+  the SDK's websocket callback thread) and drops ticks with a counter once the
+  buffer outruns the writer, rather than growing without bound.
+- Env: `TICK_RECORDER=0` disables it, `TICK_RECORDER_DIR` (default `data/ticks`),
+  `TICK_RECORDER_KEEP_DAYS` (default 3), `TICK_RECORDER_FLUSH_S`,
+  `TICK_RECORDER_MAX_BUFFER`. Retention counts *day files present*, not calendar
+  days, so a long weekend can't expire the last session that actually traded.
+- ⚠️ **`TICK_RECORDER_DIR` must be a mounted volume.** The container filesystem is
+  wiped on every redeploy (Coolify → the service's Storages tab; see
+  `docs/adr/0002-hetzner-deploy-coolify-docker.md`). Unmounted, the day's ticks are
+  lost on deploy and the files grow inside the container layer instead.
+- `tests/conftest.py` disables it for the whole suite by default — the Live tab tick
+  tests call `_handle_message` directly, and a suite run during TW-equity hours
+  would otherwise write real tick files into the repo.
 
 **Supabase schema (`supabase/schema.sql`, migrations in `supabase/migrations/`):**
 - `allowed_users` — email allowlist for auth.
