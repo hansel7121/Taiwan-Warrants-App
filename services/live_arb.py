@@ -21,7 +21,7 @@ arb could open and close between two polls and never get logged (see the
 plan this shipped under).
 """
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from logic import iv_engine, live_arb_logic, live_arb_lp_logic
@@ -169,8 +169,46 @@ def stop_scan():
     _stop_event.set()
 
 
+def _format_tick(tick):
+    """JSON-able form of live_arb_logic.latest_tick()'s result — `ts` becomes
+    a seconds-ago float computed right now, same convention as
+    live_warrant.py's `_underlying_row_payload`/live_options.py's
+    `_contract_payload` age fields. None stays None (no tick yet)."""
+    if tick is None:
+        return None
+    return {
+        "kind": tick["kind"], "code": tick["code"], "name": tick["name"],
+        "bid": tick["bid"], "ask": tick["ask"],
+        "seconds_ago": round((datetime.now(timezone.utc) - tick["ts"]).total_seconds(), 1),
+    }
+
+
+def _tick_and_freshness(last_seq):
+    """Shared by get_data()/get_lp_data(): re-fetches the two live caches
+    fresh (never the scan loop's own possibly-stale `_last_seq`/
+    `_lp_last_seq` snapshot) and reports both what the most recent tick
+    looked like and whether `last_seq` (whichever loop's own bookkeeping
+    the caller passes in) has caught up to it.
+
+    This is what makes "Arb is/is not up to date" a real check rather than
+    an assumption: `last_seq` only advances when that loop's own
+    `_scan_once`/`_lp_scan_once` iteration runs, so if scanning is stopped
+    (or a slow LP scan is still catching up on a burst of ticks), the seq
+    computed here keeps moving while `last_seq` doesn't, and this reports
+    the mismatch honestly instead of just assuming the background loop is
+    keeping up.
+    """
+    seq, warrant_rows, option_rows = _combined_seq()
+    tick = live_arb_logic.latest_tick(warrant_rows, option_rows)
+    up_to_date = last_seq is not None and seq == last_seq
+    return _format_tick(tick), up_to_date
+
+
 def get_data():
     """Snapshot for the /live_arb_data poll route."""
+    with _lock:
+        last_seq = _last_seq
+    last_tick, up_to_date = _tick_and_freshness(last_seq)
     with _lock:
         return {
             "enabled": _enabled,
@@ -179,6 +217,8 @@ def get_data():
             "active_count": len(_active_hits),
             "logged_count_today": len(_logged_today),
             "trade_date": _trade_date.isoformat() if _trade_date else None,
+            "last_tick": last_tick,
+            "up_to_date": up_to_date,
         }
 
 
@@ -328,6 +368,9 @@ def stop_lp_scan():
 def get_lp_data():
     """Snapshot for the /live_arb_lp_data poll route."""
     with _lp_lock:
+        last_seq = _lp_last_seq
+    last_tick, up_to_date = _tick_and_freshness(last_seq)
+    with _lp_lock:
         return {
             "enabled": _lp_enabled,
             "session_error": _lp_session_error,
@@ -335,4 +378,6 @@ def get_lp_data():
             "active_count": len(_lp_active_structures),
             "logged_count_today": len(_lp_logged_today),
             "trade_date": _lp_trade_date.isoformat() if _lp_trade_date else None,
+            "last_tick": last_tick,
+            "up_to_date": up_to_date,
         }

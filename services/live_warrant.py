@@ -1583,6 +1583,11 @@ def snapshot_for_underlying(underlying):
                 "exercise_ratio": terms.get("exercise_ratio"),
                 "maturity": terms.get("maturity"),
                 "best": best,
+                # Raw book metadata, unrelated to the arb-matching fields
+                # above — feeds live_arb_logic.latest_tick()'s "Last
+                # received tick" debug line, not the matcher itself.
+                "ts": book["ts"] if book else None,
+                "src": book.get("src") if book else None,
             })
     return seq, rows
 
