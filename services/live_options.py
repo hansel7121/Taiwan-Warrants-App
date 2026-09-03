@@ -104,7 +104,6 @@ _track_errors = {}  # code -> last subscribe/seed error, cleared on success
 _session_error = None  # set when the session can't even start (e.g. no credentials)
 _stopped_by_user = False  # set by stop_session(); blocks scheduler/load_chain from silently reopening it
 _diagnostic_logged = False  # one-shot: log the first raw tickers() row so the field-shape guess can be checked
-_suspicious_logged = set()  # codes whose book already triggered the decimal-point sanity log this process
 # Bumped on every books tick. Nothing in this module needs per-code dirty
 # tracking (see the module docstring — no derived columns here), but Live
 # Arb (services/live_arb.py) needs SOME cheap "has anything changed since I
@@ -279,47 +278,15 @@ def _handle_message(conn, raw):
     if not code:
         return
 
-    new_bids, new_asks = data.get("bids") or [], data.get("asks") or []
     global _tick_seq
     with _lock:
         _books[code] = {
-            "bids": new_bids,
-            "asks": new_asks,
+            "bids": data.get("bids") or [],
+            "asks": data.get("asks") or [],
             "ts": datetime.now(timezone.utc),
             "src": "ws",
         }
         _tick_seq += 1
-        already_flagged = code in _suspicious_logged
-    _log_if_suspicious(code, new_bids, new_asks, message, already_flagged)
-
-
-def _log_if_suspicious(code, bids, asks, raw_message, already_flagged):
-    """One-shot-per-code diagnostic for a bid/ask pair that looks like a
-    misplaced decimal point (see logic/live_options_logic.py's
-    `is_suspicious_quote`) rather than a genuinely wide market.
-
-    This module passes every price through untouched (`best_level` just
-    reads `bids[0]["price"]`/`asks[0]["price"]`) — if a quote really is off
-    by a factor of ~100, it arrived that way from the feed, and the only way
-    to tell whether it's a broker/exchange data quirk (see
-    logic/live_options_logic.py::parse_strike's confirmed one-decimal-place
-    quirk in the SYMBOL-encoded strike, a precedent for this class of bug)
-    or a genuine fat-fingered resting order is to see the raw frame. Logged
-    once per code (not every tick) so a persistently wide-but-real market
-    doesn't flood the log.
-    """
-    if already_flagged:
-        return
-    bid = bids[0]["price"] if bids else None
-    ask = asks[0]["price"] if asks else None
-    if not live_options_logic.is_suspicious_quote(bid, ask):
-        return
-    with _lock:
-        if code in _suspicious_logged:
-            return
-        _suspicious_logged.add(code)
-    print(f"LIVEOPTIONS: suspicious quote {code}: bid={bid} ask={ask} — "
-          f"raw frame: {json.dumps(raw_message, default=str, ensure_ascii=False)}", flush=True)
 
 
 def _handle_control(conn, event, message):
@@ -509,7 +476,6 @@ def _untrack_one(code):
         _seeded.discard(code)
         _track_errors.pop(code, None)
         _contracts.pop(code, None)
-        _suspicious_logged.discard(code)
         conn = next((c for c in _connections if code in c["codes"]), None)
         sub_id = conn["sub_ids"].get(code) if conn else None
     if conn is None:

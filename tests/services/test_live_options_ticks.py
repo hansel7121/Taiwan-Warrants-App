@@ -41,7 +41,6 @@ def _clean():
     lo._books.clear()
     lo._seeded.clear()
     lo._track_errors.clear()
-    lo._suspicious_logged.clear()
 
 
 def test_handle_message_folds_a_books_tick():
@@ -95,35 +94,6 @@ def test_handle_message_malformed_json_is_a_no_op():
     try:
         lo._handle_message({}, "{not json")
         assert lo._books == {}
-    finally:
-        _clean()
-
-
-def test_handle_message_flags_a_100x_bid_ask_gap_once(capsys):
-    _clean()
-    try:
-        lo._handle_message({}, _frame([{"price": 2.03, "size": 5}], [{"price": 203, "size": 3}]))
-        out = capsys.readouterr().out
-        assert "suspicious quote" in out
-        assert CODE in lo._suspicious_logged
-
-        # A second tick with the same gap must not log again — the flag is
-        # one-shot per code so a persistently (if wrongly) wide book doesn't
-        # flood the console.
-        lo._handle_message({}, _frame([{"price": 2.03, "size": 5}], [{"price": 203, "size": 3}]))
-        assert "suspicious quote" not in capsys.readouterr().out
-    finally:
-        _clean()
-
-
-def test_handle_message_does_not_flag_a_plausibly_wide_market(capsys):
-    _clean()
-    try:
-        # A deep-OTM contract can genuinely be bid 0.05 / ask 1.00 (20x) —
-        # illiquidity, not a misplaced decimal point.
-        lo._handle_message({}, _frame([{"price": 0.05, "size": 5}], [{"price": 1.0, "size": 3}]))
-        assert "suspicious quote" not in capsys.readouterr().out
-        assert CODE not in lo._suspicious_logged
     finally:
         _clean()
 
