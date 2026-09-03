@@ -16,6 +16,8 @@ arb_logic.py's own comment: "No time-value cap / IV solve here: a positive
 price arb only needs warrant ask + option bid"), and those are exactly what
 a websocket tick carries.
 """
+import math
+
 from logic.iv_engine import direct_pairs
 
 # TW single-stock options: fixed 2,000 shares/contract (CLAUDE.md).
@@ -116,6 +118,17 @@ def scan(warrant_rows, option_rows, today, max_dte_diff=DEFAULT_MAX_DTE_DIFF):
     for (wi, oi, dir_code, price_diff, exec_opt, exec_warrant,
          strike_diff_pct, dte_diff, favorable, max_loss_per_share) in hits:
         if dir_code != 0:  # 0 == positive direction, see arb_logic.py's _match_warrants_to_options
+            continue
+        # direct_pairs deliberately lets a NaN-priced pair through when a
+        # side is missing (its own docstring: "NaN quotes propagate...").
+        # The batch arb_logic.py path never hits this in practice because a
+        # REST-fetched warrant frame essentially always has some ask value;
+        # a live websocket book genuinely can have no ask yet (illiquid /
+        # one-sided), so this filter is load-bearing here in a way it isn't
+        # upstream — without it, a NaN slips into the JSON response as the
+        # bare (invalid-per-spec) token `NaN`, which the browser's
+        # JSON.parse rejects outright.
+        if not (math.isfinite(price_diff) and math.isfinite(exec_warrant) and math.isfinite(exec_opt)):
             continue
         wr, opt = w[wi], o[oi]
         pair_key = (wr["code"], opt["code"])
