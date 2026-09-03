@@ -21,6 +21,7 @@ arb could open and close between two polls and never get logged (see the
 plan this shipped under).
 """
 import threading
+import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -36,12 +37,22 @@ UNDERLYING = "2330"
 # still reacts within roughly one tick's latency when something changes.
 POLL_INTERVAL_S = 0.15
 
+# How long a scan loop can go without completing an iteration before its
+# subtab is reported NOT up to date. Generous versus both loops' actual
+# cadence (POLL_INTERVAL_S=0.15s for Direct Match, LP's self-paced loop
+# re-launches the instant its ~90ms-measured scan finishes) specifically so
+# this reads as a stalled/stopped-loop health check, not a "did a tick land
+# in the last few milliseconds" race — see _tick_and_freshness's docstring
+# for the bug this replaced.
+STALE_AFTER_S = 1.0
+
 _lock = threading.RLock()
 _enabled = False
 _thread = None
 _stop_event = threading.Event()
 
 _last_seq = None
+_last_scan_at = None  # time.monotonic() of the scan loop's last completed iteration
 _active_hits = []
 _logged_today = set()   # dedup keys already inserted today (seeded from Supabase)
 _trade_date = None      # the TW date _logged_today was seeded for
@@ -133,12 +144,20 @@ def _scan_once():
 
 
 def _scan_loop():
+    global _last_scan_at
     print("LIVEARB: scan loop started", flush=True)
     while not _stop_event.is_set():
         try:
             _scan_once()
         except Exception as e:
             print(f"LIVEARB: scan tick failed: {type(e).__name__}: {e}", flush=True)
+        finally:
+            # Recorded whether or not _scan_once() raised, and whether or
+            # not it actually found anything new to rescan — this is a
+            # heartbeat ("the loop completed an iteration"), not a "data
+            # changed" signal. See get_data()'s up_to_date for why.
+            with _lock:
+                _last_scan_at = time.monotonic()
         _stop_event.wait(POLL_INTERVAL_S)
     print("LIVEARB: scan loop stopped", flush=True)
 
@@ -183,32 +202,37 @@ def _format_tick(tick):
     }
 
 
-def _tick_and_freshness(last_seq):
+def _tick_and_freshness(enabled, last_scan_at):
     """Shared by get_data()/get_lp_data(): re-fetches the two live caches
-    fresh (never the scan loop's own possibly-stale `_last_seq`/
-    `_lp_last_seq` snapshot) and reports both what the most recent tick
-    looked like and whether `last_seq` (whichever loop's own bookkeeping
-    the caller passes in) has caught up to it.
+    fresh and reports both what the most recent tick looked like and
+    whether the scan loop (`enabled` + `last_scan_at`, whichever loop's own
+    bookkeeping the caller passes in) is actively keeping up.
 
-    This is what makes "Arb is/is not up to date" a real check rather than
-    an assumption: `last_seq` only advances when that loop's own
-    `_scan_once`/`_lp_scan_once` iteration runs, so if scanning is stopped
-    (or a slow LP scan is still catching up on a burst of ticks), the seq
-    computed here keeps moving while `last_seq` doesn't, and this reports
-    the mismatch honestly instead of just assuming the background loop is
-    keeping up.
+    Freshness is a HEARTBEAT check (has that loop completed an iteration
+    within STALE_AFTER_S), not a seq-equality check. An earlier version
+    compared a freshly re-fetched combined tick-seq against the seq the
+    loop last scanned — that looked like a real check but was wrong in
+    practice: ticks arrive continuously (~250-330ms apart), so by the time
+    an HTTP request's own fresh seq fetch runs, at least one more tick has
+    almost always landed since the loop's last iteration regardless of how
+    fast that loop is. It reported NOT up to date almost constantly even
+    though Direct Match's own scan takes ~8ms — comparing against a
+    perpetually-moving target, not measuring whether the loop was actually
+    behind. A heartbeat answers the question that's actually useful here:
+    is the loop alive and cycling, not "did a tick land in the last few ms."
     """
-    seq, warrant_rows, option_rows = _combined_seq()
+    _, warrant_rows, option_rows = _combined_seq()
     tick = live_arb_logic.latest_tick(warrant_rows, option_rows)
-    up_to_date = last_seq is not None and seq == last_seq
+    up_to_date = (enabled and last_scan_at is not None
+                  and (time.monotonic() - last_scan_at) < STALE_AFTER_S)
     return _format_tick(tick), up_to_date
 
 
 def get_data():
     """Snapshot for the /live_arb_data poll route."""
     with _lock:
-        last_seq = _last_seq
-    last_tick, up_to_date = _tick_and_freshness(last_seq)
+        enabled, last_scan_at = _enabled, _last_scan_at
+    last_tick, up_to_date = _tick_and_freshness(enabled, last_scan_at)
     with _lock:
         return {
             "enabled": _enabled,
@@ -244,6 +268,7 @@ _lp_thread = None
 _lp_stop_event = threading.Event()
 
 _lp_last_seq = None
+_lp_last_scan_at = None  # time.monotonic() of the LP loop's last completed iteration
 _lp_active_structures = []
 _lp_logged_today = set()
 _lp_trade_date = None
@@ -318,6 +343,7 @@ def _lp_scan_once():
 
 
 def _lp_scan_loop():
+    global _lp_last_scan_at
     print("LIVEARB-LP: scan loop started", flush=True)
     while not _lp_stop_event.is_set():
         try:
@@ -326,6 +352,11 @@ def _lp_scan_loop():
             print(f"LIVEARB-LP: scan tick failed: {type(e).__name__}: {e}", flush=True)
             with _lp_lock:
                 _lp_session_error = f"{type(e).__name__}: {e}"
+        finally:
+            # Heartbeat — see _scan_loop's identical finally block for why
+            # this is recorded unconditionally, not just on a successful scan.
+            with _lp_lock:
+                _lp_last_scan_at = time.monotonic()
         _lp_stop_event.wait(LP_POLL_INTERVAL_S)
     print("LIVEARB-LP: scan loop stopped", flush=True)
 
@@ -368,8 +399,8 @@ def stop_lp_scan():
 def get_lp_data():
     """Snapshot for the /live_arb_lp_data poll route."""
     with _lp_lock:
-        last_seq = _lp_last_seq
-    last_tick, up_to_date = _tick_and_freshness(last_seq)
+        enabled, last_scan_at = _lp_enabled, _lp_last_scan_at
+    last_tick, up_to_date = _tick_and_freshness(enabled, last_scan_at)
     with _lp_lock:
         return {
             "enabled": _lp_enabled,
