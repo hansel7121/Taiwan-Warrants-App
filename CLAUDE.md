@@ -45,6 +45,7 @@ pip install -r requirements.txt
 # Benchmark every ported path against the committed fixtures, either engine
 python scripts/bench_engines.py
 python scripts/bench_iv.py
+python scripts/bench_static_arb.py   # static-arb LP: times each engine and diffs their rows
 
 # Dev server — ALWAYS prefix with the Taiwan timezone (see note)
 TZ=Asia/Taipei python app.py                 # http://127.0.0.1:5001
@@ -115,7 +116,8 @@ scripts/               one-off maintenance/seeding scripts
 - Both engines must produce identical output after `round(..., 4)` — same values, same NaN/None placement, same row order, **same dtypes**. Enforced by `tests/logic/test_iv_engine_parity.py`, `test_arb_engine_parity.py` and the recorded fixtures in `tests/fixtures/arb/`. **Any change to one implementation must be mirrored in the other**, or those tests fail.
 - Rust returns **column arrays and row indices** — never strings, nested dicts, pandas or finished JSON. The Supabase snapshot path builds the same frames from Postgres and feeds the same filters, so a richer return type would need a second implementation of everything downstream. Nothing Rust-owned ever enters a TTL cache, Supabase or a response.
 - ⚠️ `arb_logic`/`warrant_logic` round with Python's builtin `round(x, n)` (decimal, ties to even) while `_refine_iv_for_rounding` uses NumPy's `np.round` (scale-rint-unscale). **They disagree on ties.** Passing a numpy array where a list is expected silently switches which one runs. Rust reproduces the builtin via `arb::round_py`.
-- See `docs/adr/0004-rust-engine-expansion.md` for what was deliberately NOT ported (`griddata`, the static-arb LP, WASM, the MIS frame) and why.
+- The **static-arb LP** also runs in Rust, under the `arb` feature: `rust/warrants_core/src/lp.rs` (a bounded-variable simplex) plus `static_arb.rs` (row-and-column generation over it), reached via `iv_engine.scan_static_arb`. It is exact but **not vertex-identical** to the scipy path — see `docs/adr/0005-static-arb-lp-in-rust.md` and `tests/logic/test_static_arb_lp_parity.py` for the bound that is actually held. `logic/static_arb.py` keeps the scipy loop as the fallback and the parity reference.
+- See `docs/adr/0004-rust-engine-expansion.md` for what was deliberately NOT ported (`griddata`, WASM, the MIS frame) and why.
 - Black-Scholes delta with a continuous risk-free rate: Taiwan CBC benchmark `options_logic.R` (~1.875%); US leg uses `us_options_logic.R_US`.
 - All TW single-stock options: exercise ratio = **2,000 shares/contract**; TXO index = **50 NT$/point**.
 - Warrant per-underlying-share price = `warrant_ask / exercise_ratio`, and units-to-cover = `contract_size / exercise_ratio` — the normalization used across every arb path (`logic/arb_logic.py`, `_match_warrants_to_options` ~L399/L407).
