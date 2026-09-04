@@ -477,6 +477,7 @@ def _handle_message(conn, raw):
             "name": tick_name,
             "type": live_warrant_logic.parse_warrant_type(tick_name),
             "strike": terms.get("strike"),
+            "exercise_ratio": terms.get("exercise_ratio"),
             "expiry": maturity.isoformat() if maturity else None,
             "dte": _days_to_expiry(maturity),
             "bid": tick_best.get("bid"),

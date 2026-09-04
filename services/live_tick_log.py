@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 TW_TZ = ZoneInfo("Asia/Taipei")
 
 _DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "live_tick_logs")
-COLUMNS = ["ts", "kind", "code", "name", "type", "strike", "expiry", "dte",
+COLUMNS = ["ts", "kind", "code", "name", "type", "strike", "exercise_ratio", "expiry", "dte",
            "bid", "ask", "bid_size", "ask_size", "src"]
 
 _lock = threading.Lock()
