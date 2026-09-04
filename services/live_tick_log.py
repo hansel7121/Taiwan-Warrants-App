@@ -61,6 +61,34 @@ def stop():
         _writer = None
 
 
+def reset():
+    """Stop recording (if active) and delete today's file entirely, clearing
+    every captured row. Recording must be explicitly restarted via start()
+    afterward — a reset never leaves the recorder silently running against a
+    file that no longer exists.
+
+    Closes the handle before deleting: Windows holds an exclusive lock on an
+    open file, so os.remove() would fail if the recorder were still writing
+    to it. Falls back to today's expected path when nothing has been started
+    yet this process (e.g. right after a restart) but a same-day file from
+    an earlier run is still on disk.
+    """
+    global _active, _file, _writer, _path, _rows_logged, _started_at
+    with _lock:
+        if _file is not None:
+            _file.flush()
+            _file.close()
+        target = _path or _today_path()
+        if os.path.exists(target):
+            os.remove(target)
+        _active = False
+        _file = None
+        _writer = None
+        _path = None
+        _rows_logged = 0
+        _started_at = None
+
+
 def is_active():
     return _active
 

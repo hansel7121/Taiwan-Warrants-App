@@ -222,3 +222,17 @@ async function _laDownloadRecordCSV() {
     if (statusEl) statusEl.textContent = "download failed: " + (e.message || e);
   }
 }
+
+async function _laResetRecordCSV() {
+  if (!confirm("Delete all recorded ticks and reset? This removes today's CSV file entirely and cannot be undone.")) return;
+  const btn = document.getElementById("la-record-reset-btn");
+  if (btn) btn.disabled = true;
+  try {
+    _laApplyRecordStatus(await apiJson("/reset_live_tick_log", { method: "POST", headers: { "Content-Type": "application/json" } }));
+  } catch (e) {
+    const statusEl = document.getElementById("la-record-status");
+    if (statusEl) statusEl.textContent = "reset failed: " + (e.message || e);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}

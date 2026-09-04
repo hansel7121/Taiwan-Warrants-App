@@ -785,6 +785,10 @@
                     title="Download whatever has been recorded so far today.">
               Download CSV
             </button>
+            <button class="sm" id="la-record-reset-btn" onclick="_laResetRecordCSV()"
+                    title="Delete today's recorded ticks entirely and start over. Cannot be undone.">
+              Reset CSV
+            </button>
             <div id="la-record-status" style="font-size:12px;color:var(--muted)">not recording</div>
           </div>
 
@@ -863,6 +867,10 @@
             <button class="sm" onclick="_lalpDownloadRecordCSV()"
                     title="Download whatever has been recorded so far today.">
               Download CSV
+            </button>
+            <button class="sm" id="lalp-record-reset-btn" onclick="_lalpResetRecordCSV()"
+                    title="Delete today's recorded ticks entirely and start over. Cannot be undone.">
+              Reset CSV
             </button>
             <div id="lalp-record-status" style="font-size:12px;color:var(--muted)">not recording</div>
           </div>
