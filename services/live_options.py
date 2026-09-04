@@ -55,7 +55,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from logic import live_options_logic, live_warrant_logic
-from services import live_tick_log
 from services.broker import credentials as broker_credentials
 
 FUBON_CRED_LABEL = os.environ.get("FUBON_CRED_LABEL", broker_credentials.DEFAULT_LABEL)
@@ -280,42 +279,14 @@ def _handle_message(conn, raw):
         return
 
     global _tick_seq
-    new_bids, new_asks = data.get("bids") or [], data.get("asks") or []
     with _lock:
         _books[code] = {
-            "bids": new_bids,
-            "asks": new_asks,
+            "bids": data.get("bids") or [],
+            "asks": data.get("asks") or [],
             "ts": datetime.now(timezone.utc),
             "src": "ws",
         }
         _tick_seq += 1
-        # Tick-log capture (services/live_tick_log.py) for the Live Arb tab's
-        # Download CSV button, mirroring live_warrant.py's identical hook.
-        # This module only ever tracks TSMC (SUPPORTED_UNDERLYING), so no
-        # underlying filter is needed here.
-        record_tick = live_tick_log.is_active()
-        if record_tick:
-            contract = _contracts.get(code) or {}
-            tick_best = live_warrant_logic.best_level(new_bids, new_asks)
-
-    if record_tick:
-        expiry = contract.get("expiry")
-        is_put = contract.get("is_put")
-        live_tick_log.record({
-            "ts": datetime.now(live_tick_log.TW_TZ).isoformat(timespec="milliseconds"),
-            "kind": "option",
-            "code": code,
-            "name": contract.get("name") or code,
-            "type": None if is_put is None else ("Put" if is_put else "Call"),
-            "strike": contract.get("strike"),
-            "expiry": expiry.isoformat() if expiry else None,
-            "dte": (expiry - datetime.now(live_tick_log.TW_TZ).date()).days if expiry else None,
-            "bid": tick_best.get("bid"),
-            "ask": tick_best.get("ask"),
-            "bid_size": tick_best.get("bid_size"),
-            "ask_size": tick_best.get("ask_size"),
-            "src": "ws",
-        })
 
 
 def _handle_control(conn, event, message):
