@@ -127,6 +127,7 @@ function _lalpPoll() {
         _lalpLastLoggedCount = d.logged_count_today;
         _lalpFetchTrades();
       }
+      _lalpPollRecordStatus();
     })
     .catch(e => {
       _lalpInFlight = false;
@@ -151,3 +152,64 @@ async function _lalpAction(btnId, endpoint, verb) {
 
 function startLiveArbLp() { return _lalpAction("lalp-start-btn", "/start_live_arb_lp", "start"); }
 function stopLiveArbLp() { return _lalpAction("lalp-stop-btn", "/stop_live_arb_lp", "stop"); }
+
+// ── Tick-by-tick CSV recorder (services/live_tick_log.py) ──────────────────
+// Same shared recorder as live_arb.js's Direct Match copy — duplicated here
+// rather than factored out, same convention as this file's other _lalp*
+// mirrors of _la* functions. Starting/stopping/downloading from either
+// subtab acts on the one global recorder.
+
+function _lalpFormatRecordLine(s) {
+  if (!s) return "not recording";
+  const rows = (s.rows_logged || 0).toLocaleString();
+  return s.active
+    ? `<span style="color:var(--put)">recording</span> — ${rows} rows so far`
+    : (s.rows_logged ? `stopped — ${rows} rows captured` : "not recording");
+}
+
+function _lalpApplyRecordStatus(s) {
+  const btn = document.getElementById("lalp-record-btn");
+  const statusEl = document.getElementById("lalp-record-status");
+  if (btn) btn.textContent = s && s.active ? "Stop Recording" : "Record";
+  if (statusEl) statusEl.innerHTML = _lalpFormatRecordLine(s);
+}
+
+async function _lalpPollRecordStatus() {
+  try {
+    _lalpApplyRecordStatus(await apiJson("/live_tick_log_status"));
+  } catch (e) {
+    // best-effort — the main status line already surfaces server-unreachable
+  }
+}
+
+async function _lalpToggleRecord() {
+  const btn = document.getElementById("lalp-record-btn");
+  if (btn) btn.disabled = true;
+  try {
+    const s = await apiJson("/live_tick_log_status");
+    const endpoint = s.active ? "/stop_live_tick_log" : "/start_live_tick_log";
+    _lalpApplyRecordStatus(await apiJson(endpoint, { method: "POST", headers: { "Content-Type": "application/json" } }));
+  } catch (e) {
+    const statusEl = document.getElementById("lalp-record-status");
+    if (statusEl) statusEl.textContent = "toggle failed: " + (e.message || e);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function _lalpDownloadRecordCSV() {
+  const statusEl = document.getElementById("lalp-record-status");
+  try {
+    const res = await api("/live_tick_log_csv");
+    if (!res.ok) {
+      if (statusEl) statusEl.textContent = "download failed: no ticks recorded yet";
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "tsmc_ticks.csv"; a.click();
+  } catch (e) {
+    if (statusEl) statusEl.textContent = "download failed: " + (e.message || e);
+  }
+}

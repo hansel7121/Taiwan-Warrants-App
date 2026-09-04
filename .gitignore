@@ -21,5 +21,8 @@ local_certs/
 # fubon_neo SDK log output
 log/
 
+# Live Arb tick-by-tick CSV recordings — local capture, not committed
+live_tick_logs/
+
 # Rust IV engine build output
 rust/*/target/

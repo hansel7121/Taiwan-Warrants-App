@@ -136,6 +136,7 @@ function _laPoll() {
         _laLastLoggedCount = d.logged_count_today;
         _laFetchTrades();
       }
+      _laPollRecordStatus();
     })
     .catch(e => {
       _laInFlight = false;
@@ -160,3 +161,64 @@ async function _laAction(btnId, endpoint, verb) {
 
 function startLiveArb() { return _laAction("la-start-btn", "/start_live_arb", "start"); }
 function stopLiveArb() { return _laAction("la-stop-btn", "/stop_live_arb", "stop"); }
+
+// ── Tick-by-tick CSV recorder (services/live_tick_log.py) ──────────────────
+// One shared recorder behind /start_live_tick_log, /stop_live_tick_log,
+// /live_tick_log_csv — Direct Match and the LP subtab (live_arb_lp.js) both
+// point at the same backend state, so starting it from either subtab records
+// for both. Status is refreshed as part of the normal 500ms poll below.
+
+function _laFormatRecordLine(s) {
+  if (!s) return "not recording";
+  const rows = (s.rows_logged || 0).toLocaleString();
+  return s.active
+    ? `<span style="color:var(--put)">recording</span> — ${rows} rows so far`
+    : (s.rows_logged ? `stopped — ${rows} rows captured` : "not recording");
+}
+
+function _laApplyRecordStatus(s) {
+  const btn = document.getElementById("la-record-btn");
+  const statusEl = document.getElementById("la-record-status");
+  if (btn) btn.textContent = s && s.active ? "Stop Recording" : "Record";
+  if (statusEl) statusEl.innerHTML = _laFormatRecordLine(s);
+}
+
+async function _laPollRecordStatus() {
+  try {
+    _laApplyRecordStatus(await apiJson("/live_tick_log_status"));
+  } catch (e) {
+    // best-effort — the main status line already surfaces server-unreachable
+  }
+}
+
+async function _laToggleRecord() {
+  const btn = document.getElementById("la-record-btn");
+  if (btn) btn.disabled = true;
+  try {
+    const s = await apiJson("/live_tick_log_status");
+    const endpoint = s.active ? "/stop_live_tick_log" : "/start_live_tick_log";
+    _laApplyRecordStatus(await apiJson(endpoint, { method: "POST", headers: { "Content-Type": "application/json" } }));
+  } catch (e) {
+    const statusEl = document.getElementById("la-record-status");
+    if (statusEl) statusEl.textContent = "toggle failed: " + (e.message || e);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function _laDownloadRecordCSV() {
+  const statusEl = document.getElementById("la-record-status");
+  try {
+    const res = await api("/live_tick_log_csv");
+    if (!res.ok) {
+      if (statusEl) statusEl.textContent = "download failed: no ticks recorded yet";
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "tsmc_ticks.csv"; a.click();
+  } catch (e) {
+    if (statusEl) statusEl.textContent = "download failed: " + (e.message || e);
+  }
+}
