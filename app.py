@@ -1,6 +1,6 @@
 # Flask routes only: parse requests, call logic/ and services/, return JSON/CSV.
 # Also owns request logging (before/after/teardown hooks) and the JSON error handler.
-from flask import Flask, render_template, request, jsonify, Response, g
+from flask import Flask, render_template, request, jsonify, Response, g, send_file
 from werkzeug.exceptions import HTTPException
 from services import applog
 from logic import warrant_logic
@@ -17,6 +17,7 @@ from services import store
 from services import live_warrant
 from services import live_options
 from services import live_arb, db_live_arb, db_live_arb_lp
+from services import live_tick_log
 from logic import arb_logic
 from logic import live_warrant_logic
 from logic import static_arb
@@ -815,6 +816,41 @@ def stop_live_arb_lp():
     """The Live Arb LP subtab's kill switch's "off"."""
     live_arb.stop_lp_scan()
     return jsonify({"ok": True})
+
+
+@app.route("/live_tick_log_status")
+@require_auth
+@require_role(ADMIN)
+def live_tick_log_status():
+    return jsonify(live_tick_log.status())
+
+
+@app.route("/start_live_tick_log", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def start_live_tick_log():
+    """Begin (or resume) appending every TSMC warrant/option tick to today's
+    CSV, shared by both Live Arb subtabs — see services/live_tick_log.py."""
+    live_tick_log.start()
+    return jsonify({"ok": True, **live_tick_log.status()})
+
+
+@app.route("/stop_live_tick_log", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def stop_live_tick_log():
+    live_tick_log.stop()
+    return jsonify({"ok": True, **live_tick_log.status()})
+
+
+@app.route("/live_tick_log_csv")
+@require_auth
+@require_role(ADMIN)
+def live_tick_log_csv():
+    path = live_tick_log.current_path()
+    if not path or not os.path.exists(path):
+        return jsonify({"error": "no ticks recorded yet"}), 404
+    return send_file(path, as_attachment=True, download_name=os.path.basename(path), mimetype="text/csv")
 
 
 @app.route("/live_arb_lp_trades")

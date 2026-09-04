@@ -776,6 +776,18 @@
             <div id="la-status" style="font-size:12px;color:var(--muted)"></div>
           </div>
 
+          <div style="display:flex;align-items:center;gap:10px;margin:0 0 14px">
+            <button class="sm" id="la-record-btn" onclick="_laToggleRecord()"
+                    title="Record every TSMC warrant/option tick to a local CSV. Shared with the LP subtab below — one recording either way.">
+              Record
+            </button>
+            <button class="sm" onclick="_laDownloadRecordCSV()"
+                    title="Download whatever has been recorded so far today.">
+              Download CSV
+            </button>
+            <div id="la-record-status" style="font-size:12px;color:var(--muted)">not recording</div>
+          </div>
+
           <div style="display:flex;align-items:center;gap:24px;margin:0 0 14px">
             <div><span style="font-size:12px;color:var(--muted)">Active arbs</span>
               <div id="la-active-count" style="font-size:22px;font-weight:600">0</div></div>
@@ -841,6 +853,18 @@
               Stop
             </button>
             <div id="lalp-status" style="font-size:12px;color:var(--muted)"></div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:10px;margin:0 0 14px">
+            <button class="sm" id="lalp-record-btn" onclick="_lalpToggleRecord()"
+                    title="Record every TSMC warrant/option tick to a local CSV. Shared with Direct Match above — one recording either way.">
+              Record
+            </button>
+            <button class="sm" onclick="_lalpDownloadRecordCSV()"
+                    title="Download whatever has been recorded so far today.">
+              Download CSV
+            </button>
+            <div id="lalp-record-status" style="font-size:12px;color:var(--muted)">not recording</div>
           </div>
 
           <div style="display:flex;align-items:center;gap:24px;margin:0 0 14px">

@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from logic import iv_engine, live_warrant_logic
-from services import db_live_warrant, memlog
+from services import db_live_warrant, live_tick_log, memlog
 from services.broker import credentials as broker_credentials
 
 FUBON_CRED_LABEL = os.environ.get("FUBON_CRED_LABEL", broker_credentials.DEFAULT_LABEL)
@@ -459,6 +459,32 @@ def _handle_message(conn, raw):
         # burn exactly the compute this design exists to avoid.
         if dirty:
             _book_seq[code] = _book_seq.get(code, 0) + 1
+        # Tick-log capture (services/live_tick_log.py) for the Live Arb tab's
+        # Download CSV button — TSMC only, gated behind the recorder's own
+        # on/off flag so this costs one bool check per tick when it's off.
+        record_tick = live_tick_log.is_active() and _underlying_of.get(code) == "2330"
+        if record_tick:
+            terms = _terms.get(code) or {}
+            tick_name = _display_name(code)
+            tick_best = live_warrant_logic.best_level(new_bids, new_asks)
+
+    if record_tick:
+        maturity = terms.get("maturity")
+        live_tick_log.record({
+            "ts": datetime.now(live_tick_log.TW_TZ).isoformat(timespec="milliseconds"),
+            "kind": "warrant",
+            "code": code,
+            "name": tick_name,
+            "type": live_warrant_logic.parse_warrant_type(tick_name),
+            "strike": terms.get("strike"),
+            "expiry": maturity.isoformat() if maturity else None,
+            "dte": _days_to_expiry(maturity),
+            "bid": tick_best.get("bid"),
+            "ask": tick_best.get("ask"),
+            "bid_size": tick_best.get("bid_size"),
+            "ask_size": tick_best.get("ask_size"),
+            "src": "ws",
+        })
 
 
 def _fold_underlying_tick_locked(code, bids, asks):
