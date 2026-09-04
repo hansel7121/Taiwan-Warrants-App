@@ -26,7 +26,7 @@ import pandas as pd
 import pytest
 
 from logic import iv_engine, static_arb
-from tests.conftest import rust_only
+from tests.conftest import static_arb_rust
 
 M = 2000.0
 R = 0.01875
@@ -145,7 +145,7 @@ def verify(row):
 
 # ── the continuous relaxation ────────────────────────────────────────────────
 
-@rust_only
+@static_arb_rust
 @pytest.mark.parametrize("seed", range(12))
 def test_relaxation_credit_matches_scipy(seed):
     """The LP optimum is unique even when the vertex attaining it is not, so
@@ -177,7 +177,7 @@ def test_relaxation_credit_matches_scipy(seed):
 
 # ── every reported structure is riskless on its own terms ────────────────────
 
-@rust_only
+@static_arb_rust
 @pytest.mark.parametrize("seed", range(20))
 def test_reported_structures_are_riskless(seed):
     wdf, odf = random_book(seed)
@@ -195,7 +195,7 @@ def test_reported_structures_are_riskless(seed):
 
 # ── the finished rows against the scipy loop ─────────────────────────────────
 
-@rust_only
+@static_arb_rust
 @pytest.mark.parametrize("seed", range(12))
 def test_batched_scan_matches_the_scipy_loop(seed):
     """Same horizons, same rows — except where a tied optimal face lets the two
@@ -220,7 +220,7 @@ def test_batched_scan_matches_the_scipy_loop(seed):
             "is a regression, not a tie-break")
 
 
-@rust_only
+@static_arb_rust
 def test_rows_match_the_scipy_loop_on_almost_every_horizon():
     """The aggregate the per-seed test cannot make: tied vertices are rare, and
     a change that makes them common should fail here even though every
@@ -237,7 +237,7 @@ def test_rows_match_the_scipy_loop_on_almost_every_horizon():
     assert identical / total >= 0.95, f"only {identical}/{total} horizons matched exactly"
 
 
-@rust_only
+@static_arb_rust
 @pytest.mark.parametrize("seed", range(6))
 def test_per_horizon_kernel_matches_the_batched_scan(seed):
     """The column-array entry point `logic/live_arb_lp_logic.py` calls, on legs
@@ -276,7 +276,7 @@ def test_per_horizon_kernel_matches_the_batched_scan(seed):
 
 # ── the shapes the random books do not reach ─────────────────────────────────
 
-@rust_only
+@static_arb_rust
 def test_one_vol_chain_agrees_with_scipy_on_what_is_there():
     """One vol across the whole chain and zero option spread — every quote
     consistent with every other, so what little the LP can still find (warrant
@@ -297,7 +297,7 @@ def test_one_vol_chain_agrees_with_scipy_on_what_is_there():
         assert credit > 0
 
 
-@rust_only
+@static_arb_rust
 def test_scan_without_warrants_still_matches():
     """Options can be bought as well as sold, so an empty warrant frame is a
     thinner chain, not an empty one."""
@@ -312,7 +312,7 @@ def test_scan_without_warrants_still_matches():
         assert worst >= -tol
 
 
-@rust_only
+@static_arb_rust
 def test_scan_without_options_is_empty():
     """Shorts are options only, so no option chain means no structure — and no
     horizons to scan in the first place."""
@@ -320,7 +320,7 @@ def test_scan_without_options_is_empty():
     assert static_arb._scan_chain(wdf, odf.iloc[0:0], [], M, R, 0.0) == ([], 0)
 
 
-@rust_only
+@static_arb_rust
 def test_min_edge_floor_is_respected():
     """Raising the floor can only remove rows, never change the ones that stay."""
     wdf, odf = random_book(3)

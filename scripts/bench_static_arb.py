@@ -23,7 +23,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from logic import static_arb  # noqa: E402
+from logic import iv_engine, static_arb  # noqa: E402
 
 M = 2000.0
 R = 0.01875
@@ -126,8 +126,8 @@ def scan_python(wdf, odf, min_edge=0.0, r=R):
 
 
 def scan_rust_per_horizon(wdf, odf, min_edge=0.0, r=R):
-    """Python leg-building + the Rust per-horizon kernel (the shipped path)."""
-    from logic import iv_engine
+    """Python leg-building + the Rust per-horizon kernel — what
+    `logic/live_arb_lp_logic.py` calls, and what the batch path replaces."""
     out = []
     for T_star in sorted({int(d) for d in odf["days_to_expiry"].unique()}):
         longs, shorts, _ = static_arb._build_legs(wdf, odf, T_star, M, r)
@@ -163,7 +163,11 @@ def scan_batched(wdf, odf, min_edge=0.0, r=R):
     return [_row_summary(row, row["horizon_dte"]) for row in rows]
 
 
-IMPLS = {"python": scan_python, "rust": scan_rust_per_horizon, "batched": scan_batched}
+IMPLS = {"python": scan_python}
+if iv_engine.RUST_AVAILABLE:
+    IMPLS["rust"] = scan_rust_per_horizon
+if iv_engine.SCAN_STATIC_ARB:
+    IMPLS["batched"] = scan_batched
 
 
 # ── diff + timing ────────────────────────────────────────────────────────────
