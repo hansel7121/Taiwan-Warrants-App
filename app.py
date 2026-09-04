@@ -843,6 +843,17 @@ def stop_live_tick_log():
     return jsonify({"ok": True, **live_tick_log.status()})
 
 
+@app.route("/reset_live_tick_log", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def reset_live_tick_log():
+    """Delete today's recording entirely and stop; the button's own confirm()
+    dialog is the only guard against an accidental click, so nothing here
+    keeps a backup."""
+    live_tick_log.reset()
+    return jsonify({"ok": True, **live_tick_log.status()})
+
+
 @app.route("/live_tick_log_csv")
 @require_auth
 @require_role(ADMIN)
