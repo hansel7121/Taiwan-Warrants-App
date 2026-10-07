@@ -18,6 +18,7 @@ from services import live_warrant
 from services import live_options
 from services import live_arb, db_live_arb, db_live_arb_lp
 from services import live_tick_log
+from services import db_eod_arb
 from logic import arb_logic
 from logic import live_warrant_logic
 from logic import static_arb
@@ -862,6 +863,58 @@ def live_tick_log_csv():
     if not path or not os.path.exists(path):
         return jsonify({"error": "no ticks recorded yet"}), 404
     return send_file(path, as_attachment=True, download_name=os.path.basename(path), mimetype="text/csv")
+
+
+@app.route("/eod_arb_dates")
+@require_auth
+@require_role(ADMIN)
+def eod_arb_dates():
+    """Every replayed day (newest first) plus which tick files are still on disk."""
+    files = {f["date"]: f for f in live_tick_log.available_dates()}
+    runs = db_eod_arb.list_runs()
+    for r in runs:
+        f = files.get(r["trade_date"])
+        r["tick_file_bytes"] = f["bytes"] if f else None
+    return jsonify({"runs": runs, "files": list(files.values()),
+                    "replay_running": scheduler.eod_replay_running()})
+
+
+@app.route("/eod_arb_episodes")
+@require_auth
+@require_role(ADMIN)
+def eod_arb_episodes():
+    trade_date = date.fromisoformat(request.args["date"])
+    return jsonify({
+        "run": db_eod_arb.get_run(trade_date),
+        "direct": db_eod_arb.list_episodes("eod_arb_direct_episodes", trade_date),
+        "lp": db_eod_arb.list_episodes("eod_arb_lp_episodes", trade_date),
+        "replay_running": scheduler.eod_replay_running(),
+    })
+
+
+@app.route("/eod_arb_run", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def eod_arb_run():
+    """Re-run the EOD replay for a day (runs in a subprocess; poll /eod_arb_episodes)."""
+    date_str = (request.json or {}).get("date") or request.args.get("date")
+    trade_date = date.fromisoformat(date_str) if date_str else datetime.now(live_tick_log.TW_TZ).date()
+    if live_tick_log.existing_path_for(trade_date) is None:
+        return jsonify({"ok": False, "error": f"no tick file on disk for {trade_date}"}), 404
+    started = scheduler.launch_eod_replay(trade_date)
+    return jsonify({"ok": started, "error": None if started else "a replay is already running"})
+
+
+@app.route("/eod_tick_csv")
+@require_auth
+@require_role(ADMIN)
+def eod_tick_csv():
+    trade_date = date.fromisoformat(request.args["date"])
+    path = live_tick_log.existing_path_for(trade_date)
+    if path is None:
+        return jsonify({"error": f"no tick file on disk for {trade_date}"}), 404
+    mimetype = "application/gzip" if path.endswith(".gz") else "text/csv"
+    return send_file(path, as_attachment=True, download_name=os.path.basename(path), mimetype=mimetype)
 
 
 @app.route("/live_arb_lp_trades")

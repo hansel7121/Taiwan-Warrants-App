@@ -71,6 +71,8 @@ def _build_legs(warrant_rows, option_rows, horizon, today, m=OPT_CONTRACT_SIZE, 
                 "strike": float(w["strike"]), "dte": dte,
                 "price_ps": ask / ratio, "lot_shares": lot_shares,
                 "depth_shares": float(qty) * lot_shares,
+                "name": w.get("name") or w["code"], "type": w["type"], "quote": ask,
+                "depth_lots": qty, "ratio": ratio,
             })
 
     for o in option_rows:
@@ -88,6 +90,8 @@ def _build_legs(warrant_rows, option_rows, horizon, today, m=OPT_CONTRACT_SIZE, 
                     "strike": float(o["strike"]), "dte": dte,
                     "price_ps": bid, "lot_shares": float(m),
                     "depth_shares": float(size) * float(m),
+                    "name": o.get("name") or o["code"], "type": o["type"], "quote": bid,
+                    "depth_lots": size, "ratio": None,
                 })
 
         if o["expiry"] >= horizon:
@@ -98,6 +102,8 @@ def _build_legs(warrant_rows, option_rows, horizon, today, m=OPT_CONTRACT_SIZE, 
                     "strike": float(o["strike"]), "dte": dte,
                     "price_ps": ask, "lot_shares": float(m),
                     "depth_shares": float(size) * float(m),
+                    "name": o.get("name") or o["code"], "type": o["type"], "quote": ask,
+                    "depth_lots": size, "ratio": None,
                 })
 
     horizon_dte = (horizon - today).days
@@ -126,47 +132,68 @@ def _leg_out(leg, side, lots):
     }
 
 
-def scan(warrant_rows, option_rows, today, min_edge=0.0):
+def _solve_rust(longs, shorts, horizon, today, min_edge):
+    """One horizon through the Rust kernel; a finished row or None."""
+    result = iv_engine.solve_static_arb_horizon(
+        [l["price_ps"] for l in longs], [l["eff_strike"] for l in longs], [l["is_call"] for l in longs],
+        [l["lot_shares"] for l in longs], [l["depth_shares"] for l in longs],
+        [s["price_ps"] for s in shorts], [s["eff_strike"] for s in shorts], [s["is_call"] for s in shorts],
+        [s["lot_shares"] for s in shorts], [s["depth_shares"] for s in shorts],
+        min_edge,
+    )
+    if result is None:
+        return None
+    (long_idx, long_lots, short_idx, short_lots,
+     net_credit, min_payoff, guaranteed_profit, worst_spot, gross_debit) = result
+
+    legs_out = [_leg_out(longs[i], "long", lots) for i, lots in zip(long_idx, long_lots)]
+    legs_out += [_leg_out(shorts[i], "short", lots) for i, lots in zip(short_idx, short_lots)]
+    return_pct = round(guaranteed_profit / gross_debit * 100, 2) if gross_debit > 0 else None
+    return {
+        "horizon_dte": (horizon - today).days,
+        "n_long": len(long_idx), "n_short": len(short_idx),
+        "legs": legs_out,
+        "net_credit": net_credit, "min_payoff": min_payoff,
+        "guaranteed_profit": guaranteed_profit, "worst_spot": worst_spot,
+        "gross_debit": gross_debit, "return_pct": return_pct,
+    }
+
+
+def _solve_python(longs, shorts, horizon, today, min_edge):
+    """One horizon through logic/static_arb.py's scipy/HiGHS solver; a finished row or None."""
+    from logic import static_arb  # heavy import (scipy), only needed by the EOD replay
+    row = static_arb._solve_horizon(longs, shorts, (horizon - today).days, min_edge)
+    if row is None:
+        return None
+    keep = ("horizon_dte", "n_long", "n_short", "legs", "net_credit", "min_payoff",
+            "guaranteed_profit", "worst_spot", "gross_debit", "return_pct")
+    return {k: row[k] for k in keep}
+
+
+def scan_horizon(warrant_rows, option_rows, horizon, today, min_edge=0.0, engine="rust"):
+    """The LP for one horizon (an option expiry date); a row or None."""
+    longs, shorts = _build_legs(warrant_rows, option_rows, horizon, today)
+    if not longs or not shorts:
+        return None
+    solve = _solve_python if engine == "python" else _solve_rust
+    return solve(longs, shorts, horizon, today, min_edge)
+
+
+def scan(warrant_rows, option_rows, today, min_edge=0.0, engine="rust"):
     """Run the LP for every horizon in the live TSMC option book.
 
-    Raises RuntimeError if the Rust engine isn't available -- there is no
-    Python fallback for this kernel (see iv_engine.solve_static_arb_horizon's
-    docstring); the caller (services/live_arb.py) is expected to check
-    iv_engine.RUST_AVAILABLE up front and surface a clear "Rust engine
-    required" state instead of ever reaching this.
+    `engine="rust"` (the live subtab) raises RuntimeError if the Rust engine
+    isn't available; `engine="python"` (the EOD replay) uses
+    logic/static_arb.py's scipy solver and needs no Rust.
     """
-    if not iv_engine.RUST_AVAILABLE:
+    if engine != "python" and not iv_engine.RUST_AVAILABLE:
         raise RuntimeError("Live Arb LP requires the Rust engine, which is not available in this process")
 
     rows = []
     for horizon in horizons(option_rows):
-        longs, shorts = _build_legs(warrant_rows, option_rows, horizon, today)
-        if not longs or not shorts:
-            continue
-        result = iv_engine.solve_static_arb_horizon(
-            [l["price_ps"] for l in longs], [l["eff_strike"] for l in longs], [l["is_call"] for l in longs],
-            [l["lot_shares"] for l in longs], [l["depth_shares"] for l in longs],
-            [s["price_ps"] for s in shorts], [s["eff_strike"] for s in shorts], [s["is_call"] for s in shorts],
-            [s["lot_shares"] for s in shorts], [s["depth_shares"] for s in shorts],
-            min_edge,
-        )
-        if result is None:
-            continue
-        (long_idx, long_lots, short_idx, short_lots,
-         net_credit, min_payoff, guaranteed_profit, worst_spot, gross_debit) = result
-
-        legs_out = [_leg_out(longs[i], "long", lots) for i, lots in zip(long_idx, long_lots)]
-        legs_out += [_leg_out(shorts[i], "short", lots) for i, lots in zip(short_idx, short_lots)]
-        return_pct = round(guaranteed_profit / gross_debit * 100, 2) if gross_debit > 0 else None
-
-        rows.append({
-            "horizon_dte": (horizon - today).days,
-            "n_long": len(long_idx), "n_short": len(short_idx),
-            "legs": legs_out,
-            "net_credit": net_credit, "min_payoff": min_payoff,
-            "guaranteed_profit": guaranteed_profit, "worst_spot": worst_spot,
-            "gross_debit": gross_debit, "return_pct": return_pct,
-        })
+        row = scan_horizon(warrant_rows, option_rows, horizon, today, min_edge, engine)
+        if row is not None:
+            rows.append(row)
     return rows
 
 

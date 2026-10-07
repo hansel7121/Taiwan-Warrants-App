@@ -756,6 +756,7 @@
         <div style="display:flex;gap:6px;border-bottom:1px solid var(--border);margin-bottom:16px">
           <button id="lasub-btn-direct" class="lasub-btn active" onclick="switchLaSub('direct', this)">Direct Match</button>
           <button id="lasub-btn-lp"     class="lasub-btn"        onclick="switchLaSub('lp', this)">LP</button>
+          <button id="lasub-btn-eod"    class="lasub-btn"        onclick="switchLaSub('eod', this)">EOD Replay</button>
         </div>
 
         <div id="lasub-direct" class="lasub-content" style="display:block">
@@ -786,7 +787,7 @@
               Download CSV
             </button>
             <button class="sm" id="la-record-reset-btn" onclick="_laResetRecordCSV()"
-                    title="Delete today's recorded ticks entirely and start over. Cannot be undone.">
+                    title="Delete today's recorded ticks entirely and start over. Cannot be undone — this is also the file the 13:40 EOD Replay runs on.">
               Reset CSV
             </button>
             <div id="la-record-status" style="font-size:12px;color:var(--muted)">not recording</div>
@@ -869,7 +870,7 @@
               Download CSV
             </button>
             <button class="sm" id="lalp-record-reset-btn" onclick="_lalpResetRecordCSV()"
-                    title="Delete today's recorded ticks entirely and start over. Cannot be undone.">
+                    title="Delete today's recorded ticks entirely and start over. Cannot be undone — this is also the file the 13:40 EOD Replay runs on.">
               Reset CSV
             </button>
             <div id="lalp-record-status" style="font-size:12px;color:var(--muted)">not recording</div>
@@ -918,6 +919,72 @@
           <p id="lalp-log-empty" style="display:none;padding:16px;color:var(--muted)">
             Nothing logged yet today.
           </p>
+        </div>
+
+        <div id="lasub-eod" class="lasub-content" style="display:none">
+          <p style="font-size:12px;color:var(--muted);margin:0 0 14px">
+            Every trading day the server records every TSMC (2330) warrant and option tick from 09:00 to 13:30, then at 13:40 replays the day
+            through Direct Match and the LP arb finder (Python implementations) on every change. Each arb is logged as an episode: when it
+            appeared, when it disappeared, how long it lasted, and its edge at open and at peak. An LP episode means "some riskless structure
+            existed at this expiry"; the legs shown are the structure at open (click a row for the peak structure).
+          </p>
+
+          <div style="display:flex;align-items:center;gap:10px;margin:0 0 14px;flex-wrap:wrap">
+            <select id="eod-date" onchange="_eodLoadDay()" style="min-width:150px"></select>
+            <button class="sm" onclick="_eodRefresh()">Refresh</button>
+            <button class="sm" id="eod-rerun-btn" onclick="_eodRerun()"
+                    title="Replay this day again from its tick file (if still on disk). Replaces the day's logged episodes.">
+              Re-run
+            </button>
+            <button class="sm" id="eod-csv-btn" onclick="_eodDownloadTicks()"
+                    title="Download this day's recorded tick file (gzipped once the replay has run).">
+              Download ticks
+            </button>
+            <div id="eod-status" style="font-size:12px;color:var(--muted)"></div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:24px;margin:0 0 14px">
+            <div><span style="font-size:12px;color:var(--muted)">Direct episodes</span>
+              <div id="eod-direct-count" style="font-size:22px;font-weight:600">—</div></div>
+            <div><span style="font-size:12px;color:var(--muted)">LP episodes</span>
+              <div id="eod-lp-count" style="font-size:22px;font-weight:600">—</div></div>
+            <div><span style="font-size:12px;color:var(--muted)">Ticks replayed</span>
+              <div id="eod-tick-count" style="font-size:22px;font-weight:600">—</div></div>
+          </div>
+
+          <h3 style="font-size:13px;font-weight:600;margin:10px 0 10px">Direct Match episodes</h3>
+          <div style="overflow-x:auto">
+            <table>
+              <thead>
+                <tr>
+                  <th>Start</th><th>End</th><th style="text-align:right">Lasted</th>
+                  <th>Warrant</th><th>Option</th><th>Type</th>
+                  <th title="Warrant strike vs option strike">Strikes (W / O)</th>
+                  <th title="Days to expiry, warrant / option">DTE (W / O)</th>
+                  <th style="text-align:right">W Ask (size)</th><th style="text-align:right">O Bid (size)</th>
+                  <th style="text-align:right">Edge / share</th><th style="text-align:right">Peak edge</th>
+                </tr>
+              </thead>
+              <tbody id="eod-direct-tbody"></tbody>
+            </table>
+          </div>
+          <p id="eod-direct-empty" style="display:none;padding:16px;color:var(--muted)">No Direct Match arb this day.</p>
+
+          <h3 style="font-size:13px;font-weight:600;margin:26px 0 10px">LP episodes</h3>
+          <div style="overflow-x:auto">
+            <table>
+              <thead>
+                <tr>
+                  <th>Start</th><th>End</th><th style="text-align:right">Lasted</th>
+                  <th>Horizon</th><th>Structure at open</th>
+                  <th style="text-align:right">Net credit</th><th style="text-align:right">Guaranteed</th>
+                  <th style="text-align:right">Return</th><th style="text-align:right">Peak guaranteed</th>
+                </tr>
+              </thead>
+              <tbody id="eod-lp-tbody"></tbody>
+            </table>
+          </div>
+          <p id="eod-lp-empty" style="display:none;padding:16px;color:var(--muted)">No LP arb this day.</p>
         </div>
       </main>
     </div>
@@ -1294,6 +1361,7 @@
     <script src="{{ url_for('static', filename='js/live_options.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/live_arb.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/live_arb_lp.js', v=ASSET_VERSION) }}"></script>
+    <script src="{{ url_for('static', filename='js/live_arb_eod.js', v=ASSET_VERSION) }}"></script>
     {% endif %}
   </body>
 </html>

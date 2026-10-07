@@ -289,33 +289,42 @@ def _handle_message(conn, raw):
             "src": "ws",
         }
         _tick_seq += 1
-        # Tick-log capture (services/live_tick_log.py) for the Live Arb tab's
-        # Download CSV button, mirroring live_warrant.py's identical hook.
-        # This module only ever tracks TSMC (SUPPORTED_UNDERLYING), so no
-        # underlying filter is needed here.
-        record_tick = live_tick_log.is_active()
-        if record_tick:
-            contract = _contracts.get(code) or {}
-            tick_best = live_warrant_logic.best_level(new_bids, new_asks)
+        # Tick-log capture (services/live_tick_log.py); every tracked contract is TSMC.
+        row = _tick_row_locked(code, "ws") if live_tick_log.is_active() else None
 
-    if record_tick:
-        expiry = contract.get("expiry")
-        is_put = contract.get("is_put")
-        live_tick_log.record({
-            "ts": datetime.now(live_tick_log.TW_TZ).isoformat(timespec="milliseconds"),
-            "kind": "option",
-            "code": code,
-            "name": contract.get("name") or code,
-            "type": None if is_put is None else ("Put" if is_put else "Call"),
-            "strike": contract.get("strike"),
-            "expiry": expiry.isoformat() if expiry else None,
-            "dte": (expiry - datetime.now(live_tick_log.TW_TZ).date()).days if expiry else None,
-            "bid": tick_best.get("bid"),
-            "ask": tick_best.get("ask"),
-            "bid_size": tick_best.get("bid_size"),
-            "ask_size": tick_best.get("ask_size"),
-            "src": "ws",
-        })
+    if row is not None:
+        live_tick_log.record(row)
+
+
+def _tick_row_locked(code, src):
+    """One live_tick_log row for a tracked contract's current book. Caller holds `_lock`."""
+    book = _books.get(code)
+    contract = _contracts.get(code) or {}
+    best = (live_warrant_logic.best_level(book["bids"], book["asks"])
+            if book else live_warrant_logic.best_level([], []))
+    expiry = contract.get("expiry")
+    is_put = contract.get("is_put")
+    return {
+        "ts": datetime.now(live_tick_log.TW_TZ).isoformat(timespec="milliseconds"),
+        "kind": "option",
+        "code": code,
+        "name": contract.get("name") or code,
+        "type": None if is_put is None else ("Put" if is_put else "Call"),
+        "strike": contract.get("strike"),
+        "expiry": expiry.isoformat() if expiry else None,
+        "dte": (expiry - datetime.now(live_tick_log.TW_TZ).date()).days if expiry else None,
+        "bid": best.get("bid"),
+        "ask": best.get("ask"),
+        "bid_size": best.get("bid_size"),
+        "ask_size": best.get("ask_size"),
+        "src": src,
+    }
+
+
+def tick_rows_for_underlying(src="snapshot"):
+    """Every tracked contract's current book as live_tick_log rows — written when recording starts."""
+    with _lock:
+        return [_tick_row_locked(c, src) for c in _tracked]
 
 
 def _handle_control(conn, event, message):
@@ -448,6 +457,9 @@ def _seed_from_rest(sdk, code):
         ts = datetime.now(timezone.utc)
     with _lock:
         _books.setdefault(code, {"bids": bids, "asks": asks, "ts": ts, "src": "rest"})
+        row = _tick_row_locked(code, "rest") if live_tick_log.is_active() else None
+    if row is not None:
+        live_tick_log.record(row)
     return True
 
 

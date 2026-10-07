@@ -84,18 +84,20 @@ def build_direct_arrays(warrant_rows, option_rows, today):
     return w, o
 
 
-def scan(warrant_rows, option_rows, today, max_dte_diff=DEFAULT_MAX_DTE_DIFF):
+def scan(warrant_rows, option_rows, today, max_dte_diff=DEFAULT_MAX_DTE_DIFF, pairs_fn=None):
     """Run direct_pairs against a live TSMC snapshot; return only the
     executable direction (positive: buy warrant / sell option). Warrants are
     long-only (CLAUDE.md), so the sell-warrant/buy-option direction is never
     actionable and is dropped here rather than surfaced for display.
+    `pairs_fn` overrides the engine-bound kernel (the EOD replay passes
+    arb_kernels_py.direct_pairs to force the Python implementation).
     """
     w, o = build_direct_arrays(warrant_rows, option_rows, today)
     if not w or not o:
         return []
 
     codes = _type_codes(w, o)
-    hits = direct_pairs(
+    hits = (pairs_fn or direct_pairs)(
         [codes[r["type"]] for r in w],
         [r["type"] == "Put" for r in w],
         [r["strike"] for r in w],

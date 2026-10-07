@@ -10,6 +10,7 @@ import threading
 from logic import iv_engine
 from services import live_warrant
 from services import live_options
+from services import live_tick_log
 from services import memlog
 from services import scheduler
 from app import app
@@ -34,6 +35,10 @@ _SHUTDOWN_TEARDOWN_TIMEOUT_S = 8
 
 
 def _safe_stop_session():
+    try:
+        live_tick_log.stop()  # flush buffered tick rows; the next process resumes the same file
+    except Exception as e:
+        print(f"WSGI: tick recorder flush on shutdown failed: {e}", flush=True)
     try:
         live_warrant.stop_session()
     except Exception as e:
