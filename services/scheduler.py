@@ -1,6 +1,9 @@
 """In-process APScheduler jobs that refresh market-data snapshots and the Direct-Arb suggestions log."""
 import hashlib
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -18,6 +21,7 @@ from services import db_products
 from services import db_suggestions
 from services import live_warrant
 from services import live_options
+from services import live_tick_log
 from logic import arb_logic
 from logic import static_arb
 from logic import ttl_cache
@@ -357,6 +361,81 @@ def sync_live_options():
 
 
 # ---------------------------------------------------------------------------
+# Daily TSMC tick recording + end-of-day arb replay
+# ---------------------------------------------------------------------------
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_EOD_SCRIPT = os.path.join(_REPO_ROOT, "scripts", "eod_arb_replay.py")
+_eod_lock = threading.Lock()
+_eod_proc = None
+
+
+def prepare_tick_recording():
+    """Pre-open: connect both Fubon sessions and subscribe TSMC's whole warrant + option chain."""
+    u = live_tick_log.UNDERLYING
+    live_warrant.connect_session()
+    try:
+        res = live_warrant.scan_underlying(u, 0)
+        print(f"SCHED: tick prep warrants chain={res['chain']} +{len(res['added'])} "
+              f"-{len(res['removed'])} failed={len(res['failed'])} pending={res['pending']}", flush=True)
+    except Exception as e:
+        print(f"SCHED: tick prep warrant scan FAILED: {type(e).__name__}: {e}", flush=True)
+    live_options.connect_session()
+    live_options.load_chain(u)
+    print(f"SCHED: tick prep options tracked={len(live_options.snapshot_for_underlying(u)[1])}", flush=True)
+
+
+def ensure_tick_recording():
+    """Intraday: (re)start the recorder; on (re)start, write every current book so the replay has full state."""
+    u = live_tick_log.UNDERLYING
+    if not live_options.snapshot_for_underlying(u)[1]:
+        # Options' tracked list is in-memory only, so a mid-day restart loses it.
+        live_options.connect_session()
+        live_options.load_chain(u)
+    if live_tick_log.start():
+        rows = live_warrant.tick_rows_for_underlying() + live_options.tick_rows_for_underlying()
+        live_tick_log.record_many(rows)
+        print(f"SCHED: tick recorder started, snapshot rows={len(rows)}", flush=True)
+
+
+def stop_tick_recording():
+    live_tick_log.stop()
+
+
+def eod_replay_running():
+    return _eod_proc is not None and _eod_proc.poll() is None
+
+
+def launch_eod_replay(trade_date=None):
+    """Start scripts/eod_arb_replay.py in a subprocess (CPU-heavy, so off the web process's GIL);
+    gzip + prune tick files once it exits. Returns False if a replay is already running."""
+    global _eod_proc
+    with _eod_lock:
+        if eod_replay_running():
+            return False
+        d = trade_date or datetime.now(_TZ_TAIPEI).date()
+        cmd = [sys.executable, _EOD_SCRIPT, "--date", d.isoformat()]
+        _eod_proc = subprocess.Popen(cmd, cwd=_REPO_ROOT)
+        proc = _eod_proc
+    print(f"SCHED: eod replay {d} launched (pid {proc.pid})", flush=True)
+
+    def _after():
+        code = proc.wait()
+        print(f"SCHED: eod replay {d} exited {code}", flush=True)
+        if code == 0:
+            try:
+                live_tick_log.compress(d)
+            except Exception as e:
+                print(f"SCHED: compress {d} failed: {e}", flush=True)
+        try:
+            live_tick_log.prune()
+        except Exception as e:
+            print(f"SCHED: tick prune failed: {e}", flush=True)
+
+    threading.Thread(target=_after, name="eod-replay-wait", daemon=True).start()
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Job / gate wrappers used at registration time
 # ---------------------------------------------------------------------------
 def _job(name, fn):
@@ -456,6 +535,22 @@ def _run_live_options():
     _job("live_options", sync_live_options)
 
 
+def _run_tick_prepare():
+    _job("tick_prepare", prepare_tick_recording)
+
+
+def _run_tick_record():
+    _job("tick_record", ensure_tick_recording)
+
+
+def _run_tick_stop():
+    _job("tick_stop", stop_tick_recording)
+
+
+def _run_eod_replay():
+    _job("eod_replay", launch_eod_replay)
+
+
 _FORCE_MAP = {
     "warrants": _run_warrants,
     "tw_options": _run_tw_options,
@@ -532,6 +627,21 @@ def start():
         sched.add_job(_gated("tw_equity", _run_live_options),
                       CronTrigger(minute="*/5", timezone=_TZ_TAIPEI),
                       next_run_time=now + timedelta(seconds=2))
+        # Daily TSMC tick recording + EOD arb replay (logic/eod_arb_replay.py):
+        # subscribe the whole chain pre-open, keep the recorder running through
+        # the session (restarts it after a redeploy), stop at the bell, then
+        # replay the day in a subprocess. ENABLE_TICK_RECORDING=0 turns it off.
+        if os.environ.get("ENABLE_TICK_RECORDING", "1") != "0":
+            weekdays = "mon-fri"
+            sched.add_job(_run_tick_prepare,
+                          CronTrigger(day_of_week=weekdays, hour=8, minute=40, timezone=_TZ_TAIPEI))
+            sched.add_job(_gated("tw_equity", _run_tick_record),
+                          CronTrigger(minute="*/5", timezone=_TZ_TAIPEI),
+                          next_run_time=now + timedelta(seconds=5))
+            sched.add_job(_run_tick_stop,
+                          CronTrigger(day_of_week=weekdays, hour=13, minute=31, timezone=_TZ_TAIPEI))
+            sched.add_job(_run_eod_replay,
+                          CronTrigger(day_of_week=weekdays, hour=13, minute=40, timezone=_TZ_TAIPEI))
         # Memory/CPU-limit snapshot: ungated, every 2 min, always — not tied
         # to trading hours or any Live Warrant/Options activity, so it keeps
         # a resource-usage trail even when nothing else is running. See

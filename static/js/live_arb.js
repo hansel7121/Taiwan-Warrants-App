@@ -55,6 +55,7 @@ function switchLaSub(sub, btn) {
   document.getElementById("lasub-" + sub).style.display = "block";
   btn.classList.add("active");
   if (sub === "lp") loadLiveArbLpOnce();
+  if (sub === "eod") loadEodReplayOnce();
 }
 
 function _laRenderActive(hits) {

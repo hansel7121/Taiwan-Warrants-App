@@ -459,33 +459,57 @@ def _handle_message(conn, raw):
         # burn exactly the compute this design exists to avoid.
         if dirty:
             _book_seq[code] = _book_seq.get(code, 0) + 1
-        # Tick-log capture (services/live_tick_log.py) for the Live Arb tab's
-        # Download CSV button — TSMC only, gated behind the recorder's own
-        # on/off flag so this costs one bool check per tick when it's off.
-        record_tick = live_tick_log.is_active() and _underlying_of.get(code) == "2330"
-        if record_tick:
-            terms = _terms.get(code) or {}
-            tick_name = _display_name(code)
-            tick_best = live_warrant_logic.best_level(new_bids, new_asks)
+        # Tick-log capture (services/live_tick_log.py) — TSMC only, one bool
+        # check per tick while the recorder is off.
+        row = _tick_row_locked(code, "ws") if live_tick_log.is_active() else None
 
-    if record_tick:
-        maturity = terms.get("maturity")
-        live_tick_log.record({
-            "ts": datetime.now(live_tick_log.TW_TZ).isoformat(timespec="milliseconds"),
-            "kind": "warrant",
-            "code": code,
-            "name": tick_name,
-            "type": live_warrant_logic.parse_warrant_type(tick_name),
-            "strike": terms.get("strike"),
-            "exercise_ratio": terms.get("exercise_ratio"),
-            "expiry": maturity.isoformat() if maturity else None,
-            "dte": _days_to_expiry(maturity),
-            "bid": tick_best.get("bid"),
-            "ask": tick_best.get("ask"),
-            "bid_size": tick_best.get("bid_size"),
-            "ask_size": tick_best.get("ask_size"),
-            "src": "ws",
-        })
+    if row is not None:
+        live_tick_log.record(row)
+
+
+def _tick_row_locked(code, src):
+    """One live_tick_log row for a tracked TSMC warrant's current book, or None. Caller holds `_lock`."""
+    if _underlying_of.get(code) != live_tick_log.UNDERLYING:
+        return None
+    book = _books.get(code)
+    terms = _terms.get(code) or {}
+    name = _display_name(code)
+    best = (live_warrant_logic.best_level(book["bids"], book["asks"])
+            if book else live_warrant_logic.best_level([], []))
+    maturity = terms.get("maturity")
+    return {
+        "ts": datetime.now(live_tick_log.TW_TZ).isoformat(timespec="milliseconds"),
+        "kind": "warrant",
+        "code": code,
+        "name": name,
+        "type": live_warrant_logic.parse_warrant_type(name),
+        "strike": terms.get("strike"),
+        "exercise_ratio": terms.get("exercise_ratio"),
+        "expiry": maturity.isoformat() if maturity else None,
+        "dte": _days_to_expiry(maturity),
+        "bid": best.get("bid"),
+        "ask": best.get("ask"),
+        "bid_size": best.get("bid_size"),
+        "ask_size": best.get("ask_size"),
+        "src": src,
+    }
+
+
+def _record_current(code, src):
+    """Log `code`'s current book + terms (REST seed, late terms) so the EOD replay sees it without a tick."""
+    if not live_tick_log.is_active():
+        return
+    with _lock:
+        row = _tick_row_locked(code, src)
+    if row is not None:
+        live_tick_log.record(row)
+
+
+def tick_rows_for_underlying(src="snapshot"):
+    """Every tracked TSMC warrant's current book as live_tick_log rows — written when recording starts."""
+    with _lock:
+        rows = [(c, _tick_row_locked(c, src)) for c in _tracked]
+        return [live_tick_log.drop_stale_quote(r, (_books.get(c) or {}).get("ts")) for c, r in rows if r is not None]
 
 
 def _fold_underlying_tick_locked(code, bids, asks):
@@ -645,6 +669,7 @@ def _seed_from_rest(sdk, code):
         ts = datetime.now(timezone.utc)
     with _lock:
         _books.setdefault(code, {"bids": bids, "asks": asks, "ts": ts, "src": "rest"})
+    _record_current(code, "rest")
     return True
 
 
@@ -726,6 +751,7 @@ def _fetch_terms(sdk, code):
         db_live_warrant.update_terms(code, terms["strike"], terms["exercise_ratio"], terms["maturity"])
     except Exception as e:
         print(f"LIVEWARRANT: terms persist {code} failed: {e}", flush=True)
+    _record_current(code, "terms")
     return True
 
 
