@@ -210,6 +210,14 @@ def record_many(rows):
             _buffer.extend(rows)
 
 
+def drop_stale_quote(row, book_ts):
+    """Blank a snapshot row's prices when its book was last updated before today (Taipei):
+    TW orders are day orders, so yesterday's quote is not on the book any more."""
+    if book_ts is not None and book_ts.astimezone(TW_TZ).date() < datetime.now(TW_TZ).date():
+        row = {**row, "bid": None, "ask": None, "bid_size": None, "ask_size": None}
+    return row
+
+
 def compress(d):
     """Gzip day `d`'s CSV in place (removing the plain file). Never touches
     the file currently being recorded. Returns the .gz path or None."""

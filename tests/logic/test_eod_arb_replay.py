@@ -93,7 +93,7 @@ def test_incremental_direct_equals_full_rescan(tmp_path):
 
     books = {"warrant": {}, "option": {}}
     tracker = eod.EpisodeTracker("price_diff")
-    stats = {"n_ticks": 0}
+    stats = {"n_ticks": 0, "n_ws": 0}
     last = None
     for ts, group in eod._groups_by_ts(eod.iter_ticks(path), stats):
         for t in group:
@@ -149,3 +149,22 @@ def test_lp_screen_gives_the_same_episodes_as_always_solving(tmp_path):
         return [(e["key"], e["started_at"], e["ended_at"], e["peak_row"]["guaranteed_profit"]) for e in r["lp"]]
     assert summary(fast) and summary(fast) == summary(slow)
     assert fast["stats"]["n_lp_solves"] < slow["stats"]["n_lp_solves"]
+
+
+def test_holiday_file_with_only_snapshot_rows_logs_nothing(tmp_path):
+    """A weekday holiday: the recorder starts and snapshots stale books, but nothing ever ticks."""
+    import csv
+    src = tmp_path / "arb.csv"
+    gen.generate(src, True, every_s=30.0)
+    snap = tmp_path / "tsmc_ticks_20261007.csv"
+    with open(src, newline="") as fi, open(snap, "w", newline="") as fo:
+        r = csv.DictReader(fi)
+        w = csv.DictWriter(fo, fieldnames=r.fieldnames)
+        w.writeheader()
+        w.writerows(row for row in r if row["src"] == "snapshot")
+    spec = importlib.util.spec_from_file_location(
+        "eod_cli", Path(__file__).resolve().parents[2] / "scripts" / "eod_arb_replay.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    res = cli.run(csv_path=str(snap), dry_run=True)
+    assert res["status"] == "no_ticks" and res["direct"] == [] and res["lp"] == []

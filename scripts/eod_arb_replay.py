@@ -79,11 +79,15 @@ def run(trade_date=None, csv_path=None, dry_run=False, run_lp=True):
             eod_arb_replay.iter_ticks(csv_path), trade_date, run_lp=run_lp,
             progress=lambda s: _log(f"{s['n_ticks']:,} ticks, {s['n_scans']:,} scans, "
                                     f"{s['n_lp_screens']:,} LP screens, {s['n_lp_solves']:,} full LP solves"))
+        st = result["stats"]
+        if st["n_ws"] == 0:
+            # Only snapshot/seed rows — the exchange never ticked (a holiday the
+            # weekday-only market gate let through), so every quote is stale.
+            result["direct"], result["lp"] = [], []
         direct = _jsonable(eod_arb_replay.direct_records(result["direct"], trade_date))
         lp = _jsonable(eod_arb_replay.lp_records(result["lp"], trade_date))
-        st = result["stats"]
         fields = {
-            "status": "ok" if st["n_ticks"] else "no_ticks",
+            "status": "ok" if st["n_ws"] else "no_ticks",
             "n_ticks": st["n_ticks"], "n_changes": st["n_changes"], "n_scans": st["n_scans"],
             "n_lp_screens": st["n_lp_screens"], "n_lp_solves": st["n_lp_solves"], "n_direct": len(direct), "n_lp": len(lp),
             "first_tick_at": _jsonable(st["first_ts"]), "last_tick_at": _jsonable(st["last_ts"]),

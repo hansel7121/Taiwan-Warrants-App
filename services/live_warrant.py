@@ -508,7 +508,8 @@ def _record_current(code, src):
 def tick_rows_for_underlying(src="snapshot"):
     """Every tracked TSMC warrant's current book as live_tick_log rows — written when recording starts."""
     with _lock:
-        return [r for r in (_tick_row_locked(c, src) for c in _tracked) if r is not None]
+        rows = [(c, _tick_row_locked(c, src)) for c in _tracked]
+        return [live_tick_log.drop_stale_quote(r, (_books.get(c) or {}).get("ts")) for c, r in rows if r is not None]
 
 
 def _fold_underlying_tick_locked(code, bids, asks):

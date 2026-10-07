@@ -180,6 +180,8 @@ def _groups_by_ts(ticks, stats):
     cur_ts, group = None, []
     for tick in ticks:
         stats["n_ticks"] += 1
+        if tick["src"] == "ws":
+            stats["n_ws"] += 1
         ts = tick["ts"] if cur_ts is None or tick["ts"] >= cur_ts else cur_ts
         if group and ts != cur_ts:
             yield cur_ts, group
@@ -212,7 +214,7 @@ def replay(ticks, trade_date, run_lp=True, lp_min_edge=0.0, progress=None, progr
     screens = {}          # expiry date -> lp_screen.HorizonScreen
     direct_tracker = EpisodeTracker("price_diff")
     lp_tracker = EpisodeTracker("guaranteed_profit", codes_fn=lp_codes)
-    stats = {"n_ticks": 0, "n_changes": 0, "n_scans": 0, "n_lp_skips": 0, "n_lp_screens": 0, "n_lp_solves": 0,
+    stats = {"n_ticks": 0, "n_changes": 0, "n_scans": 0, "n_ws": 0, "n_lp_skips": 0, "n_lp_screens": 0, "n_lp_solves": 0,
              "first_ts": None, "last_ts": None}
     last_ts = None
     primed = False   # full scan done for the current session stretch

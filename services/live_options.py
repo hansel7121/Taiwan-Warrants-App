@@ -324,7 +324,8 @@ def _tick_row_locked(code, src):
 def tick_rows_for_underlying(src="snapshot"):
     """Every tracked contract's current book as live_tick_log rows — written when recording starts."""
     with _lock:
-        return [_tick_row_locked(c, src) for c in _tracked]
+        return [live_tick_log.drop_stale_quote(_tick_row_locked(c, src), (_books.get(c) or {}).get("ts"))
+                for c in _tracked]
 
 
 def _handle_control(conn, event, message):
