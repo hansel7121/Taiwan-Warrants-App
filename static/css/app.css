@@ -120,6 +120,52 @@ header .badge {
 .lasub-btn:hover { color: var(--text); }
 .lasub-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
 
+/* ── Top-level sections (admin): Warrant Arbitrage | Forced Short Squeeze.
+   body.fss-mode hides the warrant tab bar and whichever tab was active. ── */
+.section-bar {
+  display: flex; gap: 2px; padding: 10px 24px 0;
+  background: var(--panel-2); border-bottom: 1px solid var(--border);
+}
+.section-bar button {
+  padding: 8px 18px; border: none; border-bottom: 2px solid transparent; background: transparent;
+  color: var(--muted); cursor: pointer; font-size: 13px; font-family: inherit; font-weight: 600;
+}
+.section-bar button:hover { color: var(--text-strong); }
+.section-bar button.active { color: var(--accent); border-bottom-color: var(--accent); }
+#section-fss { display: none; }
+body.fss-mode #section-fss { display: block; }
+body.fss-mode .tab-bar, body.fss-mode .tab-content.active { display: none; }
+
+/* ── Forced Short Squeeze sub-tabs (own class, same reason as .lasub-btn) ── */
+.fsssub-btn {
+  background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--muted); font-family: inherit; font-size: 13px; font-weight: 600;
+  padding: 8px 14px; cursor: pointer; margin-bottom: -1px;
+}
+.fsssub-btn:hover { color: var(--text); }
+.fsssub-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+.fss-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.fss-status { font-size: 12px; color: var(--muted); }
+.fss-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.fss-kpi { background: var(--panel); border: 1px solid var(--border); padding: 12px 14px; border-left: 3px solid var(--accent); }
+.fss-kpi-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); font-weight: 600; }
+.fss-kpi-val { font-size: 20px; font-weight: 600; margin-top: 6px; font-variant-numeric: tabular-nums; }
+.fss-kpi-foot { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.fss-grid { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.fss-card { background: var(--panel); border: 1px solid var(--border); padding: 14px 15px; overflow-x: auto; }
+.fss-card-h { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
+#section-fss .pos { color: var(--put); }
+#section-fss .neg { color: var(--call); }
+.fss-pill { display: inline-block; padding: 1px 7px; font-size: 11px; font-weight: 600; border: 1px solid var(--border); white-space: nowrap; }
+.fss-pill.traded { color: var(--accent); border-color: var(--accent); }
+.fss-pill.signal { color: var(--text-strong); }
+.fss-note { font-size: 11px; color: var(--muted); margin-top: 2px; white-space: normal; max-width: 300px; }
+.fss-marks td { background: var(--panel-2); font-size: 12px; }
+.fss-method { font-size: 13px; line-height: 1.65; color: var(--text); max-width: 900px; }
+.fss-method h3 { font-size: 13px; margin: 14px 0 6px; color: var(--text-strong); }
+.fss-method li { margin-bottom: 4px; }
+@media (max-width: 900px) { .fss-grid { grid-template-columns: 1fr; } }
+
 /* ── Main layout ── */
 .tab-content { display: none; }
 .tab-content.active { display: block; }

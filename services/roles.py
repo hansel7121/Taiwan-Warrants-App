@@ -27,6 +27,7 @@ FEATURES = {
     "positions": USER,
     "usoptions": ADMIN,
     "arb": ADMIN,
+    "fss": ADMIN,
     "portfolio": ADMIN,
     "suggestions": ADMIN,
     "home": ADMIN,

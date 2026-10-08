@@ -15,6 +15,7 @@ const FEATURES = {
   positions: "user",
   usoptions: "admin",
   arb: "admin",
+  fss: "admin",
   portfolio: "admin",
   suggestions: "admin",
   home: "admin",

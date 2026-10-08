@@ -19,6 +19,7 @@ from services import live_options
 from services import live_arb, db_live_arb, db_live_arb_lp
 from services import live_tick_log
 from services import db_eod_arb
+from services import fss
 from logic import arb_logic
 from logic import live_warrant_logic
 from logic import static_arb
@@ -915,6 +916,26 @@ def eod_tick_csv():
         return jsonify({"error": f"no tick file on disk for {trade_date}"}), 404
     mimetype = "application/gzip" if path.endswith(".gz") else "text/csv"
     return send_file(path, as_attachment=True, download_name=os.path.basename(path), mimetype=mimetype)
+
+
+@app.route("/fss_state")
+@require_auth
+@require_role(ADMIN)
+def fss_state():
+    """Forced Short Squeeze section: live deadlines, paper trades, daily P&L, quintile edges and recent runs."""
+    return jsonify(fss.state())
+
+
+@app.route("/fss_run", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def fss_run():
+    """Start a Forced Short Squeeze run now (kind = full | scrape); poll /fss_state for the result."""
+    kind = (request.json or {}).get("kind", "full")
+    if kind not in ("full", "scrape"):
+        return jsonify({"ok": False, "error": "kind must be full or scrape"}), 400
+    started = fss.start_run(kind)
+    return jsonify({"ok": started, "error": None if started else "a run is already going"})
 
 
 @app.route("/live_arb_lp_trades")

@@ -2,6 +2,8 @@
 <!--
   Single-page shell for the app's four tabs (Warrant Scanner, IV Surface,
   Options Scanner, Arb Finder) plus the user Dashboard and admin Portfolio tabs.
+  In admin mode a section bar splits the app into Warrant Arbitrage (every tab
+  above) and Forced Short Squeeze (the paper trader in #section-fss, fss.js).
   Server-side Jinja (roles.template_flags/auth.public_config) decides which
   markup and script tags actually render for the current mode.
 -->
@@ -27,6 +29,90 @@
       <span class="badge">TW</span>
     </header>
 
+
+    {% if show_admin %}
+    <!-- Top-level sections: every tab below belongs to Warrant Arbitrage. -->
+    <div class="section-bar">
+      <button id="section-btn-warrant" class="active" onclick="switchSection('warrant')">Warrant Arbitrage</button>
+      <button id="section-btn-fss" onclick="switchSection('fss')">Forced Short Squeeze</button>
+    </div>
+
+    <!-- FORCED SHORT SQUEEZE SECTION (paper trading, services/fss.py) -->
+    <div id="section-fss">
+      <main>
+        <div style="display:flex;gap:6px;border-bottom:1px solid var(--border);margin-bottom:14px">
+          <button id="fsssub-btn-overview" class="fsssub-btn active" onclick="switchFssSub('overview', this)">Overview</button>
+          <button id="fsssub-btn-pipeline" class="fsssub-btn" onclick="switchFssSub('pipeline', this)">Deadlines</button>
+          <button id="fsssub-btn-trades" class="fsssub-btn" onclick="switchFssSub('trades', this)">Trades</button>
+          <button id="fsssub-btn-method" class="fsssub-btn" onclick="switchFssSub('method', this)">Method</button>
+        </div>
+
+        <div class="fss-head">
+          <span id="fss-status" class="fss-status">loading…</span>
+          <span style="flex:1"></span>
+          <button class="sm" onclick="_fssRefresh()">Refresh</button>
+          <button class="sm" id="fss-scrape-btn" onclick="_fssRun('scrape')"
+                  title="Check BFI84U, TWT48U, the AGM list and MOPS for new deadlines now. Sightings are timestamped, which is what the 'public before the D-6 close' rule checks.">Check deadlines</button>
+          <button class="sm" id="fss-run-btn" onclick="_fssRun('full')"
+                  title="Fetch any missing TWSE days, rebuild the quintile cutoff and re-mark every trade. The first run backfills ~18 months of data (about 30 minutes).">Run now</button>
+        </div>
+
+        <div id="fsssub-overview" class="fsssub-content" style="display:block">
+          <div id="fss-kpis" class="fss-kpis"></div>
+          <div class="fss-grid">
+            <div class="fss-card">
+              <div class="fss-card-h">Cumulative paper P&amp;L (NT$, fixed notional per trade)</div>
+              <div id="fss-equity" style="width:100%;height:300px"></div>
+              <p id="fss-equity-empty" class="dash-hint" style="display:none">No trade has a marked day yet.</p>
+            </div>
+            <div class="fss-card">
+              <div class="fss-card-h">Days-to-cover quintiles today</div>
+              <p class="dash-hint" id="fss-edges-note"></p>
+              <table id="fss-edges"></table>
+            </div>
+          </div>
+          <div class="fss-card" style="margin-top:16px">
+            <div class="fss-card-h">Open positions</div>
+            <table><thead><tr><th>Stock</th><th>Name</th><th>Reason</th><th>Side</th><th>Entry (D−6)</th><th>D</th><th>Exit (D+5)</th>
+              <th>Entry px</th><th>Last px</th><th>Beta</th><th>Days-to-cover</th><th>P&amp;L %</th><th>P&amp;L NT$</th></tr></thead>
+              <tbody id="fss-open-tbody"></tbody></table>
+            <p id="fss-open-empty" class="dash-hint" style="display:none;margin-top:8px">No open positions.</p>
+          </div>
+        </div>
+
+        <div id="fsssub-pipeline" class="fsssub-content" style="display:none">
+          <p class="dash-hint">Every forced short-covering deadline found by the scraper from 30 trading days back, newest deadline first. A deadline is scored on
+            D−17 against that day's Q5 cutoff and bought at the close of D−6 if it is Q5, liquid, an ex-dividend or AGM deadline, and was public
+            before 13:25 on D−6.</p>
+          <div class="fss-head" style="margin-bottom:8px">
+            <label style="flex-direction:row;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer">
+              <input type="checkbox" id="fss-hide-skipped" onchange="_fssRenderPipeline()" /> hide skipped
+            </label>
+            <label style="flex-direction:row;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer">
+              <input type="checkbox" id="fss-q5-only" onchange="_fssRenderPipeline()" /> Q5 only
+            </label>
+          </div>
+          <div class="fss-card"><table><thead><tr><th>Stock</th><th>Name</th><th>Reason</th><th>D</th><th>Signal (D−17)</th><th>Entry (D−6)</th>
+            <th>Public since</th><th>Short bal</th><th>Days-to-cover</th><th>Bucket</th><th>Q5 cutoff</th>
+            <th>Turnover 20d</th><th>Status</th></tr></thead>
+            <tbody id="fss-pipeline-tbody"></tbody></table></div>
+          <p id="fss-pipeline-empty" class="dash-hint" style="display:none;margin-top:8px">No deadlines scraped yet.</p>
+        </div>
+
+        <div id="fsssub-trades" class="fsssub-content" style="display:none">
+          <p class="dash-hint">Every paper trade. Click a row for its daily marks.</p>
+          <div class="fss-card"><table><thead><tr><th>Stock</th><th>Name</th><th>Reason</th><th>State</th><th>Entry (D−6)</th><th>D</th><th>Exit (D+5)</th>
+            <th>Beta</th><th>Days-to-cover</th><th>Q5 cutoff</th><th>Long leg %</th><th>Short leg %</th><th>Net %</th><th>P&amp;L NT$</th></tr></thead>
+            <tbody id="fss-trades-tbody"></tbody></table></div>
+          <p id="fss-trades-empty" class="dash-hint" style="display:none;margin-top:8px">No trades yet.</p>
+        </div>
+
+        <div id="fsssub-method" class="fsssub-content" style="display:none">
+          <div id="fss-method" class="fss-card fss-method"></div>
+        </div>
+      </main>
+    </div>
+    {% endif %}
 
     <!-- Home is the landing tab in admin mode; user mode starts on Options. -->
     <div class="tab-bar">
@@ -1362,6 +1448,7 @@
     <script src="{{ url_for('static', filename='js/live_arb.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/live_arb_lp.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/live_arb_eod.js', v=ASSET_VERSION) }}"></script>
+    <script src="{{ url_for('static', filename='js/fss.js', v=ASSET_VERSION) }}"></script>
     {% endif %}
   </body>
 </html>

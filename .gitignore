@@ -26,3 +26,6 @@ live_tick_logs/
 
 # Rust IV engine build output
 rust/*/target/
+
+# Forced Short Squeeze daily panel (services/fss.py) — rebuilt from TWSE, not committed
+fss_data/

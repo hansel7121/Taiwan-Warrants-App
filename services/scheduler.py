@@ -1,4 +1,5 @@
-"""In-process APScheduler jobs that refresh market-data snapshots and the Direct-Arb suggestions log."""
+"""In-process APScheduler jobs that refresh market-data snapshots, the Direct-Arb suggestions log, and the Forced
+Short Squeeze paper trader."""
 import hashlib
 import json
 import os
@@ -22,6 +23,7 @@ from services import db_suggestions
 from services import live_warrant
 from services import live_options
 from services import live_tick_log
+from services import fss
 from logic import arb_logic
 from logic import static_arb
 from logic import ttl_cache
@@ -551,6 +553,14 @@ def _run_eod_replay():
     _job("eod_replay", launch_eod_replay)
 
 
+def _run_fss(kind):
+    """Start a Forced Short Squeeze run on its own thread (a cold start backfills for ~30 min; never hold _sync_lock)."""
+    def run():
+        started = fss.start_run(kind)
+        print(f"SCHED: fss_{kind} {'started' if started else 'skipped, a run is already going'}", flush=True)
+    return run
+
+
 _FORCE_MAP = {
     "warrants": _run_warrants,
     "tw_options": _run_tw_options,
@@ -642,6 +652,16 @@ def start():
                           CronTrigger(day_of_week=weekdays, hour=13, minute=31, timezone=_TZ_TAIPEI))
             sched.add_job(_run_eod_replay,
                           CronTrigger(day_of_week=weekdays, hour=13, minute=40, timezone=_TZ_TAIPEI))
+        # Forced Short Squeeze paper trader (services/fss.py): deadline sightings through the session (the
+        # "public before the D-6 close" rule needs to know when each one first appeared), then the full run
+        # once TWSE has posted the day's short balances. ENABLE_FSS=0 turns it off.
+        if os.environ.get("ENABLE_FSS", "1") != "0":
+            sched.add_job(_run_fss("scrape"),
+                          CronTrigger(day_of_week="mon-fri", hour="8,10,12", minute=45, timezone=_TZ_TAIPEI))
+            sched.add_job(_run_fss("scrape"),
+                          CronTrigger(day_of_week="mon-fri", hour=13, minute=15, timezone=_TZ_TAIPEI))
+            sched.add_job(_run_fss("full"),
+                          CronTrigger(day_of_week="mon-fri", hour="21,23", minute=40, timezone=_TZ_TAIPEI))
         # Memory/CPU-limit snapshot: ungated, every 2 min, always — not tied
         # to trading hours or any Live Warrant/Options activity, so it keeps
         # a resource-usage trail even when nothing else is running. See

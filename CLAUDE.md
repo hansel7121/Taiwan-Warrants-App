@@ -28,6 +28,8 @@ A local Flask web app for scanning Taiwan stock warrants and equity options, com
 
 There is also a **Portfolio** tab (persisted per-user to Supabase) with a **Suggestions** sub-tab fed by an automated scanner (see below).
 
+In admin mode a **section bar** splits the app in two: **Warrant Arbitrage** (every tab above) and **Forced Short Squeeze** (a daily paper trader for the forced short-covering trade, see below). `body.fss-mode` hides the warrant tab bar; `static/js/fss.js` owns the switch.
+
 Supported underlyings and their option IDs are managed as data in Supabase product tables (`warrant_stocks`, `tw_option_products`, `us_option_products`) — e.g. 2330 (TSMC), 2303 (UMC), 2603, 2881, 2882, plus TXO. Add/remove via the product routes; nothing is hard-coded.
 
 ## Commands
@@ -84,6 +86,7 @@ logic/                 pure market-data + math, no side effects, own in-process 
   options_logic.py       TAIFEX TW option fetch + computation; R (risk-free rate); _commodity_map()
   us_options_logic.py    US ADR option fetch, TWD conversion; R_US; _adr_map(); contract_tw_shares()
   arb_logic.py           warrant<->option matching, put-call parity, butterfly, TW/US leg arb
+  fss_logic.py           Forced Short Squeeze engine: TWSE/MOPS parsers, trading calendar, panel, expanding Q5, trades
 services/              side-effecting infrastructure
   db.py                  Supabase client (loads root .env; service-role key)
   store.py               per-user portfolio persistence (Supabase + local JSON mirror, tombstone sync)
@@ -92,6 +95,7 @@ services/              side-effecting infrastructure
   db_market.py           market-data snapshot read/write (batch-pointer model)
   db_products.py         tracked-product CRUD (warrant/TW-option/US-option lists)
   db_suggestions.py      arb_suggestions CRUD (automated Direct-Arb output)
+  fss.py db_fss.py       Forced Short Squeeze paper trader: fetch, on-disk panel, daily run; its Supabase tables
   applog.py memlog.py    request logging + memory/timing measurement
 templates/index.html   single-page frontend shell (Jinja + Plotly)
 static/css/app.css     extracted stylesheet
@@ -127,11 +131,14 @@ scripts/               one-off maintenance/seeding scripts
 - Suggestions: `/list_suggestions`, `/remove_suggestion` (hard delete).
 - Products: `/list|add|remove_warrant_stock`, `/lookup_warrant_stock`, `/list|add|remove_tw_option_product`, `/list|add|remove_us_option_product`.
 - EOD replay: `/eod_arb_dates`, `/eod_arb_episodes?date=`, `/eod_arb_run` (POST, re-runs a day), `/eod_tick_csv?date=`.
+- Forced Short Squeeze: `/fss_state`, `/fss_run` (POST `{kind: full|scrape}`, runs on a background thread).
 - Manual refresh: `/sync_warrant`, `/sync_tw_option`, `/sync_us_option`, `/sync_universe` (debounced, run the scheduler's core writers synchronously).
 
 **Scheduler (`services/scheduler.py`):** one `BackgroundScheduler` with a single-worker executor, started once from `wsgi.py` (prod) or `app.py __main__` (dev). Jobs: `cmkey` (interval, ungated), `universe` (daily 07:00 TPE cron), and three intraday data syncs (`warrants`/`tw_options`/`us_options`) on a wall-clock 15-min grid, each `_gated` to its market's hours. The **suggest job** (`sync_suggestions`) runs a few minutes after the grid, gated on `tw_equity` hours: it scans the Direct tab's two strategies (`same_type`, `pcp`) via `arb_logic.match_warrant_tw_option` over the warrant∩tw-option universe, drops non-executable (short-warrant) PCP rows, and upserts profitable rows into `arb_suggestions` (stale rows flipped, not deleted). The Portfolio → Suggestions sub-tab reads them via `/list_suggestions`.
 
 **Daily TSMC tick recording + EOD arb replay (Live Arb → EOD Replay subtab):** scheduler jobs, Mon–Fri Taipei time, on unless `ENABLE_TICK_RECORDING=0`. 08:40 `tick_prepare` connects both Fubon sessions and subscribes TSMC's whole warrant chain (`scan_underlying("2330", 0)`) and option chain (`load_chain`). Every 5 min during `tw_equity` hours, `tick_record` (re)starts `services/live_tick_log.py` and writes a snapshot row for every tracked book, so a mid-session redeploy resumes into the same file with full state. 13:31 `tick_stop`; 13:40 `eod_replay` launches `scripts/eod_arb_replay.py` as a **subprocess** (CPU-heavy, kept off the web process), then gzips the CSV and prunes old ones (`TICK_LOG_KEEP_DAYS`, default 90, and `TICK_LOG_MAX_GB`, default 20). `logic/eod_arb_replay.py` folds ticks into books and re-runs Direct Match (`arb_kernels_py.direct_pairs`, incremental per changed code) and the static-arb LP (`static_arb._solve_horizon`, Python) after every change, turning the arb sets into **episodes**: Direct is keyed by warrant:option pair, LP by horizon. `logic/lp_screen.py` keeps a warm-started HiGHS model of each horizon's LP relaxation. It skips the full solve when the answer is provably unchanged (same result as always solving, see `test_lp_screen_gives_the_same_episodes_as_always_solving`). The tick CSV lives in `LIVE_TICK_LOG_DIR`, which must be a persistent volume in production. Test with fake days via `scripts/gen_fake_ticks.py`.
+
+**Forced Short Squeeze paper trader (`services/fss.py`, `logic/fss_logic.py`):** live version of set D in QFS-Pitch-Code `Taiwan Pitch/backtest_noahead.ipynb`. A deadline D (停券起日, the last day shorts can cover) is scored on D−17 by days-to-cover (short balance ÷ 20-day mean volume in lots); Q5 = at or above the 80th percentile of every past deadline whose D fell before that D−17 (expanding window, burn-in 200, seeded from the pitch's `suspension.csv`). Q5, NT$20m-turnover, ex-dividend/ex-rights or AGM deadlines that were public before 13:25 on D−6 are bought at the D−6 close, flipped short at the D close, covered at the D+5 close, β-hedged with TAIEX (Dimson β, Blume-shrunk); 20bp + β×2bp on D and D+5. `scripts/fss_seed.py` was checked against the notebook: identical per-trade P&L, β, cutoffs and trade set. Deadline sources: TWSE BFI84U (D as listed), TWT48U and MOPS t108sb27 (ex-date − 4 trading days), OpenAPI t187ap38_L (AGM book closure − 6). "Public since" = MOPS posting time if any, else the first scrape that saw it — so scrape-only runs at 08:45/10:45/12:45/13:15 matter. Full run 21:40 and 23:40 TPE (after TWSE posts short balances). `ENABLE_FSS=0` turns the jobs off; `FSS_START_DATE` (go-live, entries before it are never traded), `FSS_NOTIONAL` (NT$ per trade), `FSS_DATA_DIR` (default `$LIVE_TICK_LOG_DIR/fss`, i.e. the persistent volume). The panel is one gzipped JSON per trading day; a cold start backfills ~18 months from TWSE (~30 min) unless seeded with `python scripts/fss_seed.py --qfs-data "<Taiwan Pitch>/data"`. That script also fills `fss_pool` (run it once after migration 028).
 
 **Supabase schema (`supabase/schema.sql`, migrations in `supabase/migrations/`):**
 - `allowed_users` — email allowlist for auth.
@@ -139,6 +146,7 @@ scripts/               one-off maintenance/seeding scripts
 - `md_*` + `md_batches` + `cmoney_key` — server-only market-data snapshots (service-role key, RLS enabled with **no policy** — never add one). Batch-pointer model: write a new batch, flip `md_batches`, delete the old batch (supabase-py has no transactions, so the pointer flip is the atomicity mechanism).
 - `warrant_stocks` / `tw_option_products` / `us_option_products` — shared tracked-product lists (server-only).
 - `eod_arb_runs` / `eod_arb_direct_episodes` / `eod_arb_lp_episodes` — end-of-day replay results (one run row per day + episodes); a re-run deletes and re-inserts that day; server-only.
+- `fss_pool` / `fss_events` / `fss_trades` / `fss_runs` — Forced Short Squeeze: seeded quintile pool, scraped deadlines (first-seen times only move earlier), paper trades with daily marks, run log; server-only.
 - `arb_suggestions` — automated Direct-Arb output; deterministic `id` = `{arb_type}:{warrant_code}:{option_contract}` so re-finding upserts the same row; server-only.
 
 **Notebooks:** `notebooks/` holds exploratory research. Commit **without outputs** (`jupyter nbconvert --clear-output --inplace notebooks/*.ipynb`) to keep diffs small.
