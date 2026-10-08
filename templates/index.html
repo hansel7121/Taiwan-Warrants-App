@@ -372,6 +372,7 @@
           <button id="arb-mode-us" class="pfsub-btn" onclick="setArbMode('us')">US Option Match</button>
           <button id="arb-mode-twus" class="pfsub-btn" onclick="setArbMode('twus')">TW Opt / US Opt</button>
           <button id="arb-mode-experiment" class="pfsub-btn" onclick="setArbMode('experiment')">Experiment</button>
+          <button id="arb-mode-statarb" class="pfsub-btn" onclick="setArbMode('statarb')">StatArb</button>
         </div>
 
         <!-- ── Direct Match sub-tab ── -->
@@ -596,6 +597,30 @@
 
           <div id="exp-status"></div>
           <div id="exp-tableContainer"></div>
+        </div>
+
+        <!-- ── StatArb sub-tab (logic/statarb_logic.py, static/js/statarb.js) ── -->
+        <div id="arb-sub-statarb" style="display:none">
+          <div class="sa-head">
+            <span style="font-size:14px;font-weight:600;color:var(--text)">StatArb — 2330 vol regime and simulated price paths</span>
+            <span id="sa-status" class="sa-status"></span>
+            <span style="flex:1"></span>
+            <button class="sm" id="sa-update-btn" onclick="statarbUpdate()"
+                    title="Re-download 2330 closes from Yahoo Finance, refit EWMA/GARCH and re-simulate 10,000 paths per model.">Update</button>
+          </div>
+          <div id="sa-kpis" class="sa-kpis"></div>
+          <div class="sa-card"><div class="sa-card-h">1. EWMA vol tracks the regime: rises after big moves, decays in calm periods</div>
+            <div id="sa-ewma" class="sa-plot"></div></div>
+          <div class="sa-card"><div class="sa-card-h">2. Standardised shocks z = r / σ: fat tails vs normal</div>
+            <div class="sa-row"><div id="sa-zhist" class="sa-plot"></div><div id="sa-qq" class="sa-plot"></div></div></div>
+          <div class="sa-card"><div class="sa-card-h">3. Distribution of daily EWMA vol (annualised) over the sample</div>
+            <div id="sa-volhist" class="sa-plot"></div></div>
+          <div class="sa-card"><div class="sa-card-h">4. GARCH vol forecast</div>
+            <div class="sa-row"><div id="sa-volpath" class="sa-plot"></div><div id="sa-avgvol" class="sa-plot"></div></div></div>
+          <div class="sa-card"><div class="sa-card-h" id="sa-fan-h">5. Simulated price paths</div>
+            <div class="sa-row"><div id="sa-fan-boot" class="sa-plot sa-tall"></div><div id="sa-fan-gbm" class="sa-plot sa-tall"></div></div></div>
+          <div class="sa-card"><div class="sa-card-h">6. Two-sample t-test: bootstrap vs GBM fed the vol path</div>
+            <div class="sa-grid2" id="sa-ttest"></div></div>
         </div>
       </main>
     </div>
@@ -1355,6 +1380,7 @@
     <script src="{{ url_for('static', filename='js/quant.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/arb.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/static_arb.js', v=ASSET_VERSION) }}"></script>
+    <script src="{{ url_for('static', filename='js/statarb.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/portfolio.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/home.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/live_warrant.js', v=ASSET_VERSION) }}"></script>

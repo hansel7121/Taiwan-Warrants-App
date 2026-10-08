@@ -22,6 +22,7 @@ from services import db_eod_arb
 from logic import arb_logic
 from logic import live_warrant_logic
 from logic import static_arb
+from logic import statarb_logic
 # Aliased: the route functions below are named iv_surface / close_quote.
 from logic import iv_surface as iv_surface_logic
 from logic import iv_engine
@@ -1456,6 +1457,28 @@ def _static_arb_as_of(stock_codes):
                      options_logic.data_as_of(stock_codes)) if t),
         default=None,
     )
+
+
+@app.route("/statarb_state")
+@require_auth
+@require_role(ADMIN)
+def statarb_state():
+    """Arb Finder → StatArb: cached TSMC vol model + simulated paths (built on first call)."""
+    try:
+        return jsonify(statarb_logic.state())
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
+
+
+@app.route("/statarb_update", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def statarb_update():
+    """Refetch 2330 prices and rebuild every StatArb chart."""
+    try:
+        return jsonify(statarb_logic.update())
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
 
 
 @app.route("/match_static_arb", methods=["POST"])
