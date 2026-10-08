@@ -608,13 +608,14 @@ let arbSortCol = null;
 let arbSortAsc = true;
 
 function setArbMode(mode) {
-  const modes = ["direct", "us", "twus", "experiment"];
+  const modes = ["direct", "us", "twus", "experiment", "statarb"];
   modes.forEach(m => {
     const active = m === mode;
     const btn = document.getElementById("arb-mode-" + m);
     btn.classList.toggle("active", active);
     document.getElementById("arb-sub-" + m).style.display = active ? "block" : "none";
   });
+  if (mode === "statarb") statarbLoadOnce();
 }
 
 function matchWarrantTwOption() {
