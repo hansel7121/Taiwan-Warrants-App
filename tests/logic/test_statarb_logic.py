@@ -81,7 +81,8 @@ def _scan(sim, warrants, options):
     cols = ["contract", "type", "strike", "days_to_expiry", "bid", "bid_live"]
     o = pd.DataFrame(options, columns=cols + ["ask"] if options and len(options[0]) == 7 else cols)
     today = (pd.Timestamp(sim["asof"]) + pd.Timedelta(days=1)).date()
-    return {(r["warrant_code"], r["option_contract"]): r for r in S.scan_pairs(w, o, 2000, sim, 100.0, today)}
+    return {(r["warrant_code"], r["option_contract"]) + ((r["rounding"],) if r["rounding"] != "exact" else ()): r
+            for r in S.scan_pairs(w, o, 2000, sim, 100.0, today)}
 
 
 def test_scan_flags_pure_arb_and_scores_loss_region(sim):
@@ -114,3 +115,29 @@ def test_scan_skips_crossed_option_quotes(sim):
                  [("C110", "Call", 110.0, 30, 3.0, True, 2.0),      # bid above ask: stale
                   ("C111", "Call", 111.0, 30, 3.0, True, 3.2)])
     assert set(rows) == {("W100", "C111")}
+
+
+def test_scan_tests_fractional_hedge_rounded_down_and_up_separately(sim):
+    # ratio 0.3 -> 6.67 lots needed: down = 6 lots (1,800 shares), up = 7 lots (2,100 shares)
+    rows = _scan(sim, [("W100", "w", "Call", 100.0, 40, 0.3, 0.3, 10)], [("C110", "Call", 110.0, 30, 3.0, True)])
+    down, up = rows[("W100", "C110", "down")], rows[("W100", "C110", "up")]
+    assert (down["lots"], up["lots"]) == (6, 7) and down["exact_lots"] == pytest.approx(6.666667)
+    assert down["credit"] == 6000 - 1800 and up["credit"] == 6000 - 2100
+    assert not down["pure"] and down["loss_region"][0][1] is None   # under-hedged: loses far above the strikes
+    assert up["pure"]                                                # over-hedged: no loss anywhere
+
+
+def test_bigger_vol_buffer_widens_only_the_stressed_sets(sim):
+    w = pd.DataFrame([("W110", "w", "Call", 110.0, 40, 1.0, 1.0, 5)],
+                     columns=["warrant_code", "warrant_name", "type", "strike", "days_to_expiry", "exercise_ratio", "ask", "ask_qty"])
+    o = pd.DataFrame([("C100", "Call", 100.0, 30, 6.0, True)],
+                     columns=["contract", "type", "strike", "days_to_expiry", "bid", "bid_live"])
+    today = (pd.Timestamp(sim["asof"]) + pd.Timedelta(days=1)).date()
+    base, wide = (S.scan_pairs(w, o, 2000, sim, 100.0, today, k)[0]["p_touch"] for k in (1.2, 1.6))
+    assert wide["zero"] == base["zero"] and wide["drift"] == base["drift"]
+    assert wide["stress"] > base["stress"] and wide["stress_drift"] > base["stress_drift"]
+
+
+def test_scan_rejects_out_of_range_vol_buffer():
+    with pytest.raises(ValueError):
+        S.scan(vol_stress=5.0)

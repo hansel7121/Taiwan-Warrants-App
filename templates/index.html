@@ -625,6 +625,9 @@
             <div class="sa-grid2" id="sa-ttest"></div></div>
           <div class="sa-card"><div class="sa-card-h">8. Pair scanner: long warrant / short option on 2330</div>
             <div class="sa-ctrl">
+              <label title="Stressed path sets scale every simulated daily return by this factor (1.2 = vol 20% higher). Changing it re-runs the scan.">vol buffer ×
+                <input type="number" id="sa-scan-stress" value="1.2" min="1" max="3" step="0.05" style="width:64px"
+                       onchange="statarbScan()"></label>
               <button class="sm" id="sa-scan-btn" onclick="statarbScan()"
                       title="Fetch 2330 warrants and options, then price every long-warrant / short-option pair with a net credit against the simulated paths above.">Scan</button>
               <label title="Touch: the price reaches the loss region at any point before the option expires. At expiry: the price ends in the loss region on expiry day.">P(loss) measure

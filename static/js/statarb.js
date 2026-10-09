@@ -190,14 +190,18 @@ function _saRender(d) {
 // 8. Pair scanner: POST /statarb_scan, then filter client-side by the P(loss) slider.
 let _saScan = null;
 let _saShown = [];
-const SA_SCEN = [["zero", "P zero drift"], ["drift", "P drift"], ["stress", "P vol ×1.2"], ["stress_drift", "P vol ×1.2 + drift"]];
+// Column labels per path set; the stressed ones show the buffer the scan actually ran with.
+const _saScen = k => [["zero", "P zero drift"], ["drift", "P drift"],
+                      ["stress", `P vol ×${k}`], ["stress_drift", `P vol ×${k} + drift`]];
 
 async function statarbScan() {
   const status = document.getElementById("sa-scan-status"), btn = document.getElementById("sa-scan-btn");
   status.textContent = "Fetching 2330 warrants and options and scoring every pair…";
   btn.disabled = true;
   try {
-    _saScan = await apiJson("/statarb_scan", { method: "POST" });
+    const volStress = parseFloat(document.getElementById("sa-scan-stress").value) || 1.2;
+    _saScan = await apiJson("/statarb_scan", { method: "POST", headers: { "Content-Type": "application/json" },
+                                               body: JSON.stringify({ vol_stress: volStress }) });
     status.textContent = `scanned ${_saScan.scanned_at.replace("T", " ").slice(0, 16)} TPE · quotes as of ` +
       `${(_saScan.quotes_as_of || "?").replace("T", " ").slice(0, 16)} UTC · paths as of ${_saScan.sim_asof}`;
     _saScanRender();
@@ -232,17 +236,17 @@ function _saScanRender() {
   document.getElementById("sa-scan-summary").innerHTML =
     `Spot <b>${fmtN(_saScan.spot)}</b> · ${_saScan.n_warrants} warrants, ${_saScan.n_options_live_bid} options with a live bid · ` +
     `<b>${rows.length}</b> pairs with a net credit · pure arb <b>${pure.length}</b> · ` +
-    `pass at max P(loss) ${(thrRaw / 100).toFixed(2)}% on all four path sets <b>${pass.length}</b> ` +
+    `pass at max P(loss) ${(thrRaw / 100).toFixed(2)}% on all four path sets (vol buffer ×${_saScan.vol_stress}) <b>${pass.length}</b> ` +
     `(fillable at ask depth <b>${pass.filter(r => r.fillable).length}</b>)` +
     (untestable.length ? ` · ${untestable.length} expire beyond ${_saScan.n_max} trading days, not testable` : "") +
     `<br>PnL is measured at the option's expiry with the warrant valued at intrinsic only, one option contract against ` +
-    `whole board lots of warrants, before fees and tax. ${_saScan.n_sims.toLocaleString()} paths per set.`;
+    `whole board lots of warrants (each pair tested twice: lots rounded down and rounded up), before fees and tax. ${_saScan.n_sims.toLocaleString()} paths per set.`;
 
   const shown = showAll ? rows : pass;
   _saShown = shown;
   const head = ["Status", "Warrant", "Name", "Option", "Type", "K warrant", "K option", "W DTE", "O DTE", "Trading days",
-                "Lots", "Fillable", "Credit (TWD)", "Max loss (TWD)", "Loss region", "Dist. to loss",
-                ...SA_SCEN.map(s => s[1]), "Worst"];
+                "Rounding", "Lots", "Fillable", "Credit (TWD)", "Max loss (TWD)", "Loss region", "Dist. to loss",
+                ..._saScen(_saScan.vol_stress).map(s => s[1]), "Worst"];
   const region = r => r.loss_region.map(([a, b]) => `${fmtN(a)}–${b === null ? "∞" : fmtN(b)}`).join(", ") || "none";
   const body = shown.map((r, i) => {
     const worst = _saWorst(r, measure), ok = passes(r);
@@ -250,10 +254,10 @@ function _saScanRender() {
     return `<tr onclick="_saOpenPair(${i})" title="Click for the trade legs and payoff at expiry"><td class="${ok ? "sa-pass" : "sa-fail"}">${r.pure ? "PURE" : ok ? "PASS" : r.testable ? "fail" : "untestable"}</td>` +
       `<td>${escHtml(r.warrant_code)}</td><td>${escHtml(r.warrant_name)}</td><td>${escHtml(r.option_contract)}</td>` +
       `<td>${r.type}</td><td>${r.warrant_strike.toLocaleString()}</td><td>${r.opt_strike.toLocaleString()}</td>` +
-      `<td>${r.warrant_dte}</td><td>${r.opt_dte}</td><td>${r.trading_days}</td><td>${r.lots}</td>` +
+      `<td>${r.warrant_dte}</td><td>${r.opt_dte}</td><td>${r.trading_days}</td><td title="exact hedge ${r.exact_lots} lots">${r.rounding}</td><td>${r.lots}</td>` +
       `<td>${r.fillable ? "yes" : "no"}</td><td>${fmtN(r.credit)}</td><td>${fmtN(r.max_loss)}</td>` +
       `<td>${region(r)}</td><td>${r.dist_to_loss_pct === null ? "—" : r.dist_to_loss_pct.toFixed(1) + "%"}</td>` +
-      SA_SCEN.map(([k]) => `<td>${r.pure ? "0.00%" : fmtP(p[k])}</td>`).join("") +
+      _saScen(_saScan.vol_stress).map(([k]) => `<td>${r.pure ? "0.00%" : fmtP(p[k])}</td>`).join("") +
       `<td>${fmtP(worst)}</td></tr>`;
   }).join("");
   document.getElementById("sa-scan-table").innerHTML = shown.length
@@ -264,14 +268,14 @@ function _saScanRender() {
 // Open the Direct Match trade modal (legs, depth, payoff at expiry) for scanner row i.
 function _saOpenPair(i) {
   const r = _saShown[i], cs = r.opt_contract_size;
-  _pcpChartMode = "whole";             // the scanner sizes the warrant leg in whole board lots
+  _pcpChartMode = "whole";             // the row's own whole-lot sizing (rounded down or up)
   openDirectModal({
     warrant_code: r.warrant_code, warrant_name: r.warrant_name, type: r.type, option_contract: r.option_contract,
     underlying_price: _saScan.spot, warrant_dte: r.warrant_dte, opt_dte: r.opt_dte,
     dte_diff: Math.abs(r.warrant_dte - r.opt_dte), warrant_strike: r.warrant_strike, opt_strike: r.opt_strike,
     strike_diff_pct: Math.abs(r.opt_strike - r.warrant_strike) / r.warrant_strike * 100,
     warrants_needed: Math.round(cs / r.exercise_ratio), opt_contract_size: cs,
-    warrant_depth_lots: r.warrant_depth_lots, fillable: r.fillable,
+    warrant_depth_lots: r.warrant_depth_lots, fillable: r.fillable, whole_lots: r.lots,
     warrant_ask: r.warrant_ask, warrant_bid: r.warrant_bid, opt_bid: r.opt_bid, opt_ask: r.opt_ask,
     warrant_per_share: r.warrant_ask / r.exercise_ratio, opt_per_share: r.opt_bid,
     price_diff: r.price_diff, price_diff_pct: r.price_diff / r.opt_bid * 100,

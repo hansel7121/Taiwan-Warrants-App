@@ -861,6 +861,7 @@ function openDirectModal(row) {
     opt_contract_size:row.opt_contract_size,
     warrant_depth_lots: row.warrant_depth_lots,
     fillable:         row.fillable,
+    whole_lots:       row.whole_lots,   // set only by the StatArb scanner (fixed 張 count)
     warrant_ask:      row.warrant_ask,
     warrant_bid:      row.warrant_bid,
     opt_bid:          row.opt_bid,
@@ -959,8 +960,10 @@ function openArbModal(row, mode) {
         price: row.opt_per_share, cf: (longTw ? 1 : -1) * contractSize * row.opt_per_share },
     ];
   } else if (mode === "direct" || mode === "us") {
-    // Simple 2-leg trade: buy cheaper warrant, sell pricier same-type option
-    const wLabel = `${(n/1000).toLocaleString(undefined,{maximumFractionDigits:3})} 張 (${n.toLocaleString()} units) × ${row.warrant_code} (${row.warrant_type.toLowerCase()} warrant)`;
+    // Simple 2-leg trade: buy cheaper warrant, sell pricier same-type option.
+    // row.whole_lots (StatArb scanner) fixes the warrant leg at that many 張.
+    const nLeg = row.whole_lots ? row.whole_lots * 1000 : n;
+    const wLabel = `${(nLeg/1000).toLocaleString(undefined,{maximumFractionDigits:3})} 張 (${nLeg.toLocaleString()} units) × ${row.warrant_code} (${row.warrant_type.toLowerCase()} warrant)`;
     const oLabel = `${row.option_contract} ${row.opt_type.toLowerCase()} option (×${contractSize.toLocaleString()} shares)`;
     // Loose (positive) prices the legs the way the backend price_diff did:
     // buy the warrant at its BID, sell the option at its ASK. Tight uses
@@ -974,7 +977,7 @@ function openArbModal(row, mode) {
       const buyPrice  = loose ? (row.warrant_bid ?? row.warrant_ask) : row.warrant_ask;
       const optSellPrice = loose ? row.opt_ask : (row.opt_bid ?? row.opt_per_share);
       legs = [
-        { action:"BUY",  instrument:wLabel,  qty:n,    price:buyPrice,  cf:-(n*buyPrice) },
+        { action:"BUY",  instrument:wLabel,  qty:nLeg, price:buyPrice,  cf:-(nLeg*buyPrice) },
         { action:"SELL", instrument:oLabel,  qty:contractSize, price:optSellPrice, cf: contractSize*optSellPrice },
       ];
     } else {
@@ -1068,7 +1071,7 @@ function openArbModal(row, mode) {
   const warrantModeDepth = ["direct", "pcp", "us", "uspcp"].includes(mode);
   if (row.warrant_depth_lots != null && warrantModeDepth) {
     const depth = row.warrant_depth_lots;                 // 張 resting at best level
-    const lotsNeeded = row.warrants_needed / 1000;        // 張 needed (fractional)
+    const lotsNeeded = row.whole_lots ?? row.warrants_needed / 1000;   // 張 needed (fractional unless fixed)
     // Executable PCP + cheap-warrant same-type both BUY the warrant (ask side);
     // the warrant-rich same-type direction SELLS it (bid side).
     const buyWarrant = (mode === "pcp" || mode === "uspcp") ? (row.executable !== false) : (row.pcp_diff >= 0);
@@ -1283,7 +1286,7 @@ function renderGreeks(row) {
   const optionShares = contractSize;
   const exactUnits = row.warrants_needed;
   const ratio = exactUnits > 0 ? contractSize / exactUnits : 1;
-  const wholeLots = Math.max(1, Math.round(exactUnits / 1000));
+  const wholeLots = row.whole_lots ?? Math.max(1, Math.round(exactUnits / 1000));
   const wsExact = contractSize;
   const wsWhole = wholeLots * 1000 * ratio;
 
@@ -1342,7 +1345,7 @@ function renderPcpChart(dte) {
   const optionShares = contractSize;
   let warrantShares, hedgeNote;
   if (_pcpChartMode === "whole") {
-    const wholeLots = Math.max(1, Math.round(exactUnits / 1000));
+    const wholeLots = row.whole_lots ?? Math.max(1, Math.round(exactUnits / 1000));
     warrantShares = wholeLots * 1000 * ratio;
     const exactLots = exactUnits / 1000;
     const notionGap = Math.round(warrantShares - optionShares);

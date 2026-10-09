@@ -4,8 +4,9 @@
 shock pool, GARCH vol forecast, and 10,000 simulated paths from a filtered block bootstrap and from GBM fed the same
 vol path, the bootstrap again with the historical drift added back, plus a two-sample t-test between bootstrap and GBM.
 `state()` serves the cached result; `update()` refetches and rebuilds. `scan()` prices every long-warrant / short-option
-pair on 2330 against the cached bootstrap paths (`scan_pairs` is the pure core): pure arbs, and for the rest the share of
-paths that reach the loss region under zero drift, historical drift, and both again with vol × VOL_STRESS.
+pair on 2330 against the cached bootstrap paths (`scan_pairs` is the pure core), with the warrant leg rounded down and up
+to whole board lots as two separate trades: pure arbs, and for the rest the share of paths that reach the loss region
+under zero drift, historical drift, and both again with vol × VOL_STRESS.
 """
 import threading
 from datetime import datetime
@@ -187,11 +188,11 @@ def state():
     return _cache if _cache is not None else update()
 
 
-def scenarios(sim):
+def scenarios(sim, vol_stress=VOL_STRESS):
     """The four scanner path sets as cumulative log returns, keyed by name."""
     boot = sim["boot"].astype(np.float64)
     drift = sim["mu"] * np.arange(1, boot.shape[1] + 1)
-    return {"zero": boot, "drift": boot + drift, "stress": VOL_STRESS * boot, "stress_drift": VOL_STRESS * boot + drift}
+    return {"zero": boot, "drift": boot + drift, "stress": vol_stress * boot, "stress_drift": vol_stress * boot + drift}
 
 
 def _loss_intervals(grid, pnl):
@@ -212,15 +213,15 @@ def _quote(v):
     return float(v) if v is not None and np.isfinite(v) and v > 0 else None
 
 
-def scan_pairs(warrant_df, opt_df, contract_size, sim, spot, today):
-    """Every long-warrant / short-option pair with a net credit, with its loss region and P(loss) per scenario."""
+def scan_pairs(warrant_df, opt_df, contract_size, sim, spot, today, vol_stress=VOL_STRESS):
+    """Every long-warrant / short-option pair with a net credit, sized down and up to whole lots, with loss region and P(loss)."""
     w = warrant_df[(warrant_df["ask"] > 0) & (warrant_df["exercise_ratio"] > 0)]
     o = opt_df[opt_df["bid_live"] & (opt_df["bid"] > 0)]
     if "ask" in o.columns:
         o = o[~((o["ask"] > 0) & (o["bid"] > o["ask"]))]      # crossed quote = stale, its bid isn't really there
     grid = np.linspace(spot * 3 / GRID_POINTS, spot * 3, GRID_POINTS)
     first_day = np.datetime64(sim["asof"]) + np.timedelta64(1, "D")
-    paths = {k: spot * np.exp(c) for k, c in scenarios(sim).items()}
+    paths = {k: spot * np.exp(c) for k, c in scenarios(sim, vol_stress).items()}
     n_max = sim["boot"].shape[1]
     lo_hi = {}      # (scenario, N) -> (running min, running max, price at N), filled on demand
 
@@ -233,55 +234,63 @@ def scan_pairs(warrant_df, opt_df, contract_size, sim, spot, today):
     rows = []
     for ww in w.itertuples(index=False):
         ratio = float(ww.exercise_ratio)
-        lots = round(contract_size / ratio / 1000)
-        if lots < 1:
-            continue
-        n_w = lots * 1000
+        exact_lots = round(contract_size / ratio / 1000, 6)
+        lo_lots, hi_lots = int(np.floor(exact_lots)), int(np.ceil(exact_lots))
+        sizings = [("exact", lo_lots)] if lo_lots == hi_lots else [("down", lo_lots), ("up", hi_lots)]
         call = ww.type == "Call"
         iw = np.maximum(grid - ww.strike, 0) if call else np.maximum(ww.strike - grid, 0)
         for oo in o.itertuples(index=False):
             if oo.type != ww.type or oo.days_to_expiry > ww.days_to_expiry:
                 continue
-            credit = float(oo.bid) * contract_size - float(ww.ask) * n_w
             diff_ps = round(float(oo.bid) - float(ww.ask) / ratio, 4)     # Direct Match's price_diff
-            if credit <= 0 or diff_ps <= 0:
+            if diff_ps <= 0:
                 continue
             io = np.maximum(grid - oo.strike, 0) if call else np.maximum(oo.strike - grid, 0)
-            pnl = credit + n_w * ratio * iw - contract_size * io      # at option expiry, warrant at intrinsic
-            ivs = _loss_intervals(grid, pnl)
             expiry = np.datetime64(today) + np.timedelta64(int(oo.days_to_expiry), "D")
             n = int(np.busday_count(first_day, expiry + np.timedelta64(1, "D")))
-            row = {"warrant_code": ww.warrant_code, "warrant_name": ww.warrant_name, "option_contract": oo.contract,
-                   "type": ww.type, "warrant_strike": round(float(ww.strike), 2), "opt_strike": round(float(oo.strike), 2),
-                   "warrant_dte": int(ww.days_to_expiry), "opt_dte": int(oo.days_to_expiry), "trading_days": n,
-                   "exercise_ratio": ratio, "opt_contract_size": int(contract_size),
-                   "lots": lots, "warrant_depth_lots": int(ww.ask_qty or 0), "fillable": int(ww.ask_qty or 0) >= lots,
-                   "warrant_ask": float(ww.ask), "warrant_bid": _quote(getattr(ww, "bid", None)),
-                   "opt_bid": float(oo.bid), "opt_ask": _quote(getattr(oo, "ask", None)), "price_diff": diff_ps,
-                   "credit": round(credit), "max_loss": round(min(float(pnl.min()), 0.0)),
-                   "pure": not ivs, "loss_region": [[a, None if not np.isfinite(b) else b] for a, b in ivs],
-                   "dist_to_loss_pct": None, "testable": bool(ivs) and 1 <= n <= n_max,
-                   "p_touch": None, "p_expiry": None}
-            if ivs:
-                row["dist_to_loss_pct"] = round(100 * min(0.0 if a <= spot <= b else min(abs(a - spot), abs(b - spot))
-                                                          for a, b in ivs) / spot, 2)
-            if row["testable"]:
-                row["p_touch"], row["p_expiry"] = {}, {}
-                for k in paths:
-                    lo, hi, end = path_stats(k, n)
-                    touch = np.zeros(len(lo), bool)
-                    at_end = np.zeros(len(lo), bool)
-                    for a, b in ivs:
-                        touch |= (lo < b) & (hi > a)
-                        at_end |= (end > a) & (end < b)
-                    row["p_touch"][k] = round(float(touch.mean()), 6)
-                    row["p_expiry"][k] = round(float(at_end.mean()), 6)
-            rows.append(row)
+            for rounding, lots in sizings:
+                if lots < 1:
+                    continue
+                n_w = lots * 1000
+                credit = float(oo.bid) * contract_size - float(ww.ask) * n_w
+                if credit <= 0:
+                    continue
+                pnl = credit + n_w * ratio * iw - contract_size * io      # at option expiry, warrant at intrinsic
+                ivs = _loss_intervals(grid, pnl)
+                row = {"warrant_code": ww.warrant_code, "warrant_name": ww.warrant_name, "option_contract": oo.contract,
+                       "type": ww.type, "warrant_strike": round(float(ww.strike), 2), "opt_strike": round(float(oo.strike), 2),
+                       "warrant_dte": int(ww.days_to_expiry), "opt_dte": int(oo.days_to_expiry), "trading_days": n,
+                       "exercise_ratio": ratio, "opt_contract_size": int(contract_size),
+                       "rounding": rounding, "exact_lots": exact_lots, "lots": lots,
+                       "warrant_depth_lots": int(ww.ask_qty or 0), "fillable": int(ww.ask_qty or 0) >= lots,
+                       "warrant_ask": float(ww.ask), "warrant_bid": _quote(getattr(ww, "bid", None)),
+                       "opt_bid": float(oo.bid), "opt_ask": _quote(getattr(oo, "ask", None)), "price_diff": diff_ps,
+                       "credit": round(credit), "max_loss": round(min(float(pnl.min()), 0.0)),
+                       "pure": not ivs, "loss_region": [[a, None if not np.isfinite(b) else b] for a, b in ivs],
+                       "dist_to_loss_pct": None, "testable": bool(ivs) and 1 <= n <= n_max,
+                       "p_touch": None, "p_expiry": None}
+                if ivs:
+                    row["dist_to_loss_pct"] = round(100 * min(0.0 if a <= spot <= b else min(abs(a - spot), abs(b - spot))
+                                                              for a, b in ivs) / spot, 2)
+                if row["testable"]:
+                    row["p_touch"], row["p_expiry"] = {}, {}
+                    for k in paths:
+                        lo, hi, end = path_stats(k, n)
+                        touch = np.zeros(len(lo), bool)
+                        at_end = np.zeros(len(lo), bool)
+                        for a, b in ivs:
+                            touch |= (lo < b) & (hi > a)
+                            at_end |= (end > a) & (end < b)
+                        row["p_touch"][k] = round(float(touch.mean()), 6)
+                        row["p_expiry"][k] = round(float(at_end.mean()), 6)
+                rows.append(row)
     return rows
 
 
-def scan(now=None):
+def scan(vol_stress=VOL_STRESS, now=None):
     """Fetch 2330 warrants and options and score every pair against the cached simulation."""
+    if not 1.0 <= vol_stress <= 3.0:
+        raise ValueError(f"vol_stress must be between 1.0 and 3.0, got {vol_stress}")
     from logic import options_logic, warrant_logic
     state()
     now = now or datetime.now(TW_TZ)
@@ -291,9 +300,9 @@ def scan(now=None):
         raise RuntimeError(f"no data: warrants {w_err or len(w)}, options {o_err or len(o)}")
     spot = float(w["underlying_price"].iloc[0])
     contract_size = options_logic._commodity_map()[STOCK_CODE]["exercise_ratio"]
-    rows = scan_pairs(w, o, contract_size, _sim, spot, now.date())
+    rows = scan_pairs(w, o, contract_size, _sim, spot, now.date(), vol_stress)
     rows.sort(key=lambda r: (not r["pure"], max(r["p_touch"].values()) if r["p_touch"] else 2, -r["credit"]))
     return {"spot": spot, "sim_asof": str(_sim["asof"]), "quotes_as_of": (w_meta or {}).get("as_of"),
-            "scanned_at": now.isoformat(timespec="seconds"), "vol_stress": VOL_STRESS, "n_sims": int(_sim["boot"].shape[0]),
+            "scanned_at": now.isoformat(timespec="seconds"), "vol_stress": vol_stress, "n_sims": int(_sim["boot"].shape[0]),
             "n_max": int(_sim["boot"].shape[1]), "n_warrants": int(len(w)), "n_options_live_bid": int(o["bid_live"].sum()),
             "rows": rows}

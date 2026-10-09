@@ -1487,7 +1487,10 @@ def statarb_update():
 def statarb_scan():
     """Score every 2330 long-warrant / short-option pair against the cached simulated paths."""
     try:
-        return jsonify(statarb_logic.scan())
+        vol_stress = float((request.get_json(silent=True) or {}).get("vol_stress", statarb_logic.VOL_STRESS))
+        return jsonify(statarb_logic.scan(vol_stress))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
 
