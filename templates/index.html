@@ -619,8 +619,27 @@
             <div class="sa-row"><div id="sa-volpath" class="sa-plot"></div><div id="sa-avgvol" class="sa-plot"></div></div></div>
           <div class="sa-card"><div class="sa-card-h" id="sa-fan-h">5. Simulated price paths</div>
             <div class="sa-row"><div id="sa-fan-boot" class="sa-plot sa-tall"></div><div id="sa-fan-gbm" class="sa-plot sa-tall"></div></div></div>
-          <div class="sa-card"><div class="sa-card-h">6. Two-sample t-test: bootstrap vs GBM fed the vol path</div>
+          <div class="sa-card"><div class="sa-card-h" id="sa-drift-h">6. Bootstrap paths: zero drift vs historical drift</div>
+            <div class="sa-row"><div id="sa-fan-zero" class="sa-plot sa-tall"></div><div id="sa-fan-drift" class="sa-plot sa-tall"></div></div></div>
+          <div class="sa-card"><div class="sa-card-h">7. Two-sample t-test: bootstrap vs GBM fed the vol path</div>
             <div class="sa-grid2" id="sa-ttest"></div></div>
+          <div class="sa-card"><div class="sa-card-h">8. Pair scanner: long warrant / short option on 2330</div>
+            <div class="sa-ctrl">
+              <button class="sm" id="sa-scan-btn" onclick="statarbScan()"
+                      title="Fetch 2330 warrants and options, then price every long-warrant / short-option pair with a net credit against the simulated paths above.">Scan</button>
+              <label title="Touch: the price reaches the loss region at any point before the option expires. At expiry: the price ends in the loss region on expiry day.">P(loss) measure
+                <select id="sa-scan-measure" onchange="_saScanRender()">
+                  <option value="p_touch">touches loss region before expiry</option>
+                  <option value="p_expiry">ends in loss region at expiry</option>
+                </select></label>
+              <label class="sa-slider">max P(loss)
+                <input type="range" id="sa-scan-thr" min="0" max="500" step="1" value="0" oninput="_saScanRender()">
+                <b id="sa-scan-thr-v">0.00%</b></label>
+              <label><input type="checkbox" id="sa-scan-all" onchange="_saScanRender()"> show failing pairs too</label>
+              <span id="sa-scan-status" class="sa-status"></span>
+            </div>
+            <div id="sa-scan-summary" class="sa-scan-summary"></div>
+            <div class="sa-scan-table" id="sa-scan-table"></div></div>
         </div>
       </main>
     </div>
