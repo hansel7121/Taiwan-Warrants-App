@@ -207,10 +207,17 @@ def _loss_intervals(grid, pnl):
     return out
 
 
+def _quote(v):
+    """A positive quote as float, else None (missing or zero side)."""
+    return float(v) if v is not None and np.isfinite(v) and v > 0 else None
+
+
 def scan_pairs(warrant_df, opt_df, contract_size, sim, spot, today):
     """Every long-warrant / short-option pair with a net credit, with its loss region and P(loss) per scenario."""
     w = warrant_df[(warrant_df["ask"] > 0) & (warrant_df["exercise_ratio"] > 0)]
     o = opt_df[opt_df["bid_live"] & (opt_df["bid"] > 0)]
+    if "ask" in o.columns:
+        o = o[~((o["ask"] > 0) & (o["bid"] > o["ask"]))]      # crossed quote = stale, its bid isn't really there
     grid = np.linspace(spot * 3 / GRID_POINTS, spot * 3, GRID_POINTS)
     first_day = np.datetime64(sim["asof"]) + np.timedelta64(1, "D")
     paths = {k: spot * np.exp(c) for k, c in scenarios(sim).items()}
@@ -236,7 +243,8 @@ def scan_pairs(warrant_df, opt_df, contract_size, sim, spot, today):
             if oo.type != ww.type or oo.days_to_expiry > ww.days_to_expiry:
                 continue
             credit = float(oo.bid) * contract_size - float(ww.ask) * n_w
-            if credit <= 0:
+            diff_ps = round(float(oo.bid) - float(ww.ask) / ratio, 4)     # Direct Match's price_diff
+            if credit <= 0 or diff_ps <= 0:
                 continue
             io = np.maximum(grid - oo.strike, 0) if call else np.maximum(oo.strike - grid, 0)
             pnl = credit + n_w * ratio * iw - contract_size * io      # at option expiry, warrant at intrinsic
@@ -246,8 +254,11 @@ def scan_pairs(warrant_df, opt_df, contract_size, sim, spot, today):
             row = {"warrant_code": ww.warrant_code, "warrant_name": ww.warrant_name, "option_contract": oo.contract,
                    "type": ww.type, "warrant_strike": round(float(ww.strike), 2), "opt_strike": round(float(oo.strike), 2),
                    "warrant_dte": int(ww.days_to_expiry), "opt_dte": int(oo.days_to_expiry), "trading_days": n,
-                   "lots": lots, "fillable": int(ww.ask_qty or 0) >= lots, "warrant_ask": float(ww.ask),
-                   "opt_bid": float(oo.bid), "credit": round(credit), "max_loss": round(min(float(pnl.min()), 0.0)),
+                   "exercise_ratio": ratio, "opt_contract_size": int(contract_size),
+                   "lots": lots, "warrant_depth_lots": int(ww.ask_qty or 0), "fillable": int(ww.ask_qty or 0) >= lots,
+                   "warrant_ask": float(ww.ask), "warrant_bid": _quote(getattr(ww, "bid", None)),
+                   "opt_bid": float(oo.bid), "opt_ask": _quote(getattr(oo, "ask", None)), "price_diff": diff_ps,
+                   "credit": round(credit), "max_loss": round(min(float(pnl.min()), 0.0)),
                    "pure": not ivs, "loss_region": [[a, None if not np.isfinite(b) else b] for a, b in ivs],
                    "dist_to_loss_pct": None, "testable": bool(ivs) and 1 <= n <= n_max,
                    "p_touch": None, "p_expiry": None}

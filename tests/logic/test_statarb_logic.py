@@ -78,7 +78,8 @@ def sim():
 def _scan(sim, warrants, options):
     w = pd.DataFrame(warrants, columns=["warrant_code", "warrant_name", "type", "strike", "days_to_expiry",
                                         "exercise_ratio", "ask", "ask_qty"])
-    o = pd.DataFrame(options, columns=["contract", "type", "strike", "days_to_expiry", "bid", "bid_live"])
+    cols = ["contract", "type", "strike", "days_to_expiry", "bid", "bid_live"]
+    o = pd.DataFrame(options, columns=cols + ["ask"] if options and len(options[0]) == 7 else cols)
     today = (pd.Timestamp(sim["asof"]) + pd.Timedelta(days=1)).date()
     return {(r["warrant_code"], r["option_contract"]): r for r in S.scan_pairs(w, o, 2000, sim, 100.0, today)}
 
@@ -89,6 +90,7 @@ def test_scan_flags_pure_arb_and_scores_loss_region(sim):
                  [("C110", "Call", 110.0, 30, 3.0, True), ("C100", "Call", 100.0, 30, 6.0, True)])
     pure = rows[("W100", "C110")]                 # long the lower strike, short the higher: never loses
     assert pure["pure"] and pure["credit"] == 4000 and pure["max_loss"] == 0 and pure["p_touch"] is None
+    assert pure["price_diff"] == 2.0 and pure["warrant_bid"] is None and pure["exercise_ratio"] == 1.0
     risky = rows[("W110", "C100")]                # short the lower strike: loses above 100 + 5 credit per share
     assert not risky["pure"] and risky["max_loss"] == -10000
     assert risky["loss_region"][0][0] == pytest.approx(105, abs=0.1) and risky["loss_region"][0][1] is None
@@ -105,3 +107,10 @@ def test_scan_skips_debits_type_mismatch_and_short_leg_outliving_warrant(sim):
                   ("C110d", "Call", 110.0, 10, 0.4, True),     # net debit
                   ("C110n", "Call", 110.0, 10, 3.0, False)])   # no live bid
     assert rows == {}
+
+
+def test_scan_skips_crossed_option_quotes(sim):
+    rows = _scan(sim, [("W100", "w", "Call", 100.0, 40, 1.0, 1.0, 5)],
+                 [("C110", "Call", 110.0, 30, 3.0, True, 2.0),      # bid above ask: stale
+                  ("C111", "Call", 111.0, 30, 3.0, True, 3.2)])
+    assert set(rows) == {("W100", "C111")}

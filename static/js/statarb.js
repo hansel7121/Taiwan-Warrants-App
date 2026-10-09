@@ -189,6 +189,7 @@ function _saRender(d) {
 
 // 8. Pair scanner: POST /statarb_scan, then filter client-side by the P(loss) slider.
 let _saScan = null;
+let _saShown = [];
 const SA_SCEN = [["zero", "P zero drift"], ["drift", "P drift"], ["stress", "P vol ×1.2"], ["stress_drift", "P vol ×1.2 + drift"]];
 
 async function statarbScan() {
@@ -238,14 +239,15 @@ function _saScanRender() {
     `whole board lots of warrants, before fees and tax. ${_saScan.n_sims.toLocaleString()} paths per set.`;
 
   const shown = showAll ? rows : pass;
+  _saShown = shown;
   const head = ["Status", "Warrant", "Name", "Option", "Type", "K warrant", "K option", "W DTE", "O DTE", "Trading days",
                 "Lots", "Fillable", "Credit (TWD)", "Max loss (TWD)", "Loss region", "Dist. to loss",
                 ...SA_SCEN.map(s => s[1]), "Worst"];
   const region = r => r.loss_region.map(([a, b]) => `${fmtN(a)}–${b === null ? "∞" : fmtN(b)}`).join(", ") || "none";
-  const body = shown.map(r => {
+  const body = shown.map((r, i) => {
     const worst = _saWorst(r, measure), ok = passes(r);
     const p = r[measure] || {};
-    return `<tr><td class="${ok ? "sa-pass" : "sa-fail"}">${r.pure ? "PURE" : ok ? "PASS" : r.testable ? "fail" : "untestable"}</td>` +
+    return `<tr onclick="_saOpenPair(${i})" title="Click for the trade legs and payoff at expiry"><td class="${ok ? "sa-pass" : "sa-fail"}">${r.pure ? "PURE" : ok ? "PASS" : r.testable ? "fail" : "untestable"}</td>` +
       `<td>${escHtml(r.warrant_code)}</td><td>${escHtml(r.warrant_name)}</td><td>${escHtml(r.option_contract)}</td>` +
       `<td>${r.type}</td><td>${r.warrant_strike.toLocaleString()}</td><td>${r.opt_strike.toLocaleString()}</td>` +
       `<td>${r.warrant_dte}</td><td>${r.opt_dte}</td><td>${r.trading_days}</td><td>${r.lots}</td>` +
@@ -257,4 +259,22 @@ function _saScanRender() {
   document.getElementById("sa-scan-table").innerHTML = shown.length
     ? `<table><thead><tr>${head.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table>`
     : `<div class="sa-scan-summary" style="padding:12px">No pair passes at this threshold. Raise the slider or tick "show failing pairs too".</div>`;
+}
+
+// Open the Direct Match trade modal (legs, depth, payoff at expiry) for scanner row i.
+function _saOpenPair(i) {
+  const r = _saShown[i], cs = r.opt_contract_size;
+  _pcpChartMode = "whole";             // the scanner sizes the warrant leg in whole board lots
+  openDirectModal({
+    warrant_code: r.warrant_code, warrant_name: r.warrant_name, type: r.type, option_contract: r.option_contract,
+    underlying_price: _saScan.spot, warrant_dte: r.warrant_dte, opt_dte: r.opt_dte,
+    dte_diff: Math.abs(r.warrant_dte - r.opt_dte), warrant_strike: r.warrant_strike, opt_strike: r.opt_strike,
+    strike_diff_pct: Math.abs(r.opt_strike - r.warrant_strike) / r.warrant_strike * 100,
+    warrants_needed: Math.round(cs / r.exercise_ratio), opt_contract_size: cs,
+    warrant_depth_lots: r.warrant_depth_lots, fillable: r.fillable,
+    warrant_ask: r.warrant_ask, warrant_bid: r.warrant_bid, opt_bid: r.opt_bid, opt_ask: r.opt_ask,
+    warrant_per_share: r.warrant_ask / r.exercise_ratio, opt_per_share: r.opt_bid,
+    price_diff: r.price_diff, price_diff_pct: r.price_diff / r.opt_bid * 100,
+    warrant_iv: null, opt_iv: null,
+  });
 }
