@@ -703,3 +703,13 @@ tbody tr.row-pinned td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .sa-plot.sa-tall { height: 380px; }
 .sa-row, .sa-grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
 @media (max-width: 1000px) { .sa-row, .sa-grid2 { grid-template-columns: 1fr; } }
+.sa-ctrl { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+.sa-ctrl select { margin-left: 6px; }
+.sa-slider { display: flex; align-items: center; gap: 8px; min-width: 260px; }
+.sa-slider input[type=range] { flex: 1; }
+.sa-slider b { color: var(--text); min-width: 52px; }
+.sa-scan-summary { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.sa-scan-summary b { color: var(--text); }
+.sa-scan-table { max-height: 520px; overflow: auto; border: 1px solid var(--border); }
+.sa-scan-table td.sa-pass { color: var(--put); font-weight: 600; }
+.sa-scan-table td.sa-fail { color: var(--call); }

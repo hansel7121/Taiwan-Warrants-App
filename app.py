@@ -1481,6 +1481,17 @@ def statarb_update():
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
 
 
+@app.route("/statarb_scan", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def statarb_scan():
+    """Score every 2330 long-warrant / short-option pair against the cached simulated paths."""
+    try:
+        return jsonify(statarb_logic.scan())
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
+
+
 @app.route("/match_static_arb", methods=["POST"])
 @require_auth
 @require_role(ADMIN)

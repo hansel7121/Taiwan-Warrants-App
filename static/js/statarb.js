@@ -1,4 +1,4 @@
-// Arb Finder → StatArb sub-tab: draws the six TSMC simulation charts from /statarb_state (logic/statarb_logic.py).
+// Arb Finder → StatArb sub-tab: draws the seven TSMC simulation charts from /statarb_state (logic/statarb_logic.py).
 // The Update button POSTs /statarb_update, which refetches 2330 closes and rebuilds everything server-side.
 
 let _saLoaded = false;
@@ -55,6 +55,29 @@ function _saPlot(id, traces, layout) {
 
 function _saPct(v, d) { return v === null || v === undefined ? "—" : (v * 100).toFixed(d === undefined ? 1 : d) + "%"; }
 
+// Two fan charts side by side on one shared price axis; specs are [id, fan, title, optional reference median].
+function _saFanPair(d, specs) {
+  const lo = Math.min(...specs.map(s => Math.min(...s[1].bands.p1)));
+  const hi = Math.max(...specs.map(s => Math.max(...s[1].bands.p99)));
+  specs.forEach(([id, m, title, refMedian]) => {
+    const x = d.fan.days, b = m.bands;
+    const band = (lo, hi, op, name) => [
+      { x, y: b[lo], mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
+      { x, y: b[hi], mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: `rgba(76,155,232,${op})`, name, hoverinfo: "skip" },
+    ];
+    const ref = refMedian ? [{ x, y: refMedian, mode: "lines", name: "zero-drift median", line: { color: SA_RED, dash: "dash", width: 1.5 },
+                               hovertemplate: "day %{x}<br>zero-drift median %{y:,.0f}<extra></extra>" }] : [];
+    _saPlot(id, [
+      ...band("p1", "p99", 0.15, "1-99%"), ...band("p5", "p95", 0.25, "5-95%"), ...band("p25", "p75", 0.4, "25-75%"),
+      ...m.samples.map(p => ({ x, y: p, mode: "lines", line: { color: SA_GREY, width: 0.6 }, showlegend: false, hoverinfo: "skip" })),
+      { x, y: b.p50, mode: "lines", name: "median", line: { color: SA_BLUE, width: 2 }, hovertemplate: "day %{x}<br>median %{y:,.0f}<extra></extra>" },
+      ...ref,
+      { x: [x[0], x[x.length - 1]], y: [d.s0, d.s0], mode: "lines", line: { color: "#e6e6e6", dash: "dot", width: 1 }, showlegend: false, hoverinfo: "skip" },
+    ], { title: { text: title, font: { size: 12 } }, xaxis: { title: "trading days ahead" },
+         yaxis: { title: "TWD", range: [lo * 0.97, hi * 1.03] }, legend: { x: 0.01, y: 1 } });
+  });
+}
+
 function _saRender(d) {
   const k = d.kpis;
   document.getElementById("sa-status").textContent =
@@ -67,7 +90,7 @@ function _saRender(d) {
     kpi("Half-life", `${k.half_life} days`, `persistence φ = ${k.phi}`),
     kpi("Shock kurtosis", k.z_kurt.toFixed(2), `normal = 3 · skew ${k.z_skew.toFixed(2)}`),
     kpi("|z| > 3 days", `${k.z_tail_days}`, `vs ${k.z_tail_normal} under normal`),
-    kpi("Drift removed", _saPct(k.drift_ann), "per year, before simulating"),
+    kpi("Historical drift", _saPct(k.drift_ann), "per year; removed from shocks, added back in chart 6"),
   ].join("");
 
   // 1. EWMA vol vs |daily return|
@@ -126,27 +149,19 @@ function _saRender(d) {
   ], { title: { text: "Average vol over the holding period (annualised)", font: { size: 12 } }, showlegend: false,
        xaxis: { title: "holding horizon N (days)" }, yaxis: { tickformat: ".1%" } });
 
-  // 5. fan charts
+  // 5. fan charts: bootstrap vs GBM (zero drift)
+  const paths = `${d.params.n_sims.toLocaleString()} paths each`;
   document.getElementById("sa-fan-h").textContent =
-    `5. Simulated ${d.ticker.replace(".TW", "")} price paths from S0 = ${Math.round(d.s0).toLocaleString()} (${d.params.n_sims.toLocaleString()} paths each)`;
-  const lo = Math.min(d.fan.boot.bands.p1.reduce((a, b) => Math.min(a, b)), d.fan.gbm.bands.p1.reduce((a, b) => Math.min(a, b)));
-  const hi = Math.max(d.fan.boot.bands.p99.reduce((a, b) => Math.max(a, b)), d.fan.gbm.bands.p99.reduce((a, b) => Math.max(a, b)));
-  [["sa-fan-boot", d.fan.boot, "Filtered block bootstrap"], ["sa-fan-gbm", d.fan.gbm, "GBM fed the vol path"]].forEach(([id, m, title]) => {
-    const x = d.fan.days, b = m.bands;
-    const band = (lo, hi, op, name) => [
-      { x, y: b[lo], mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
-      { x, y: b[hi], mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: `rgba(76,155,232,${op})`, name, hoverinfo: "skip" },
-    ];
-    _saPlot(id, [
-      ...band("p1", "p99", 0.15, "1-99%"), ...band("p5", "p95", 0.25, "5-95%"), ...band("p25", "p75", 0.4, "25-75%"),
-      ...m.samples.map(p => ({ x, y: p, mode: "lines", line: { color: SA_GREY, width: 0.6 }, showlegend: false, hoverinfo: "skip" })),
-      { x, y: b.p50, mode: "lines", name: "median", line: { color: SA_BLUE, width: 2 }, hovertemplate: "day %{x}<br>median %{y:,.0f}<extra></extra>" },
-      { x: [x[0], x[x.length - 1]], y: [d.s0, d.s0], mode: "lines", line: { color: "#e6e6e6", dash: "dot", width: 1 }, showlegend: false, hoverinfo: "skip" },
-    ], { title: { text: title, font: { size: 12 } }, xaxis: { title: "trading days ahead" },
-         yaxis: { title: "TWD", range: [lo * 0.97, hi * 1.03] }, legend: { x: 0.01, y: 1 } });
-  });
+    `5. Simulated ${d.ticker.replace(".TW", "")} price paths from S0 = ${Math.round(d.s0).toLocaleString()} (${paths})`;
+  _saFanPair(d, [["sa-fan-boot", d.fan.boot, "Filtered block bootstrap"], ["sa-fan-gbm", d.fan.gbm, "GBM fed the vol path"]]);
 
-  // 6. two-sample t-test overlays, one per horizon
+  // 6. fan charts: bootstrap with zero drift vs historical drift
+  document.getElementById("sa-drift-h").textContent =
+    `6. Bootstrap paths: zero drift vs historical drift (${_saPct(k.drift_ann)}/yr, ${d.params.lookback_years}y average) · ${paths}`;
+  _saFanPair(d, [["sa-fan-zero", d.fan.boot, "Zero drift"],
+                 ["sa-fan-drift", d.fan.boot_drift, `Historical drift (${_saPct(k.drift_ann)}/yr)`, d.fan.boot.bands.p50]]);
+
+  // 7. two-sample t-test overlays, one per horizon
   const box = document.getElementById("sa-ttest");
   box.innerHTML = d.ttest.map(t => `<div id="sa-tt-${t.h}" class="sa-plot sa-tall"></div>`).join("");
   d.ttest.forEach(t => {
@@ -170,4 +185,76 @@ function _saRender(d) {
                          text: note, showarrow: false, font: { size: 10, color: "#c9d1d9" },
                          bgcolor: "rgba(13,16,19,0.85)", bordercolor: "#222a31", borderpad: 5 }] });
   });
+}
+
+// 8. Pair scanner: POST /statarb_scan, then filter client-side by the P(loss) slider.
+let _saScan = null;
+const SA_SCEN = [["zero", "P zero drift"], ["drift", "P drift"], ["stress", "P vol ×1.2"], ["stress_drift", "P vol ×1.2 + drift"]];
+
+async function statarbScan() {
+  const status = document.getElementById("sa-scan-status"), btn = document.getElementById("sa-scan-btn");
+  status.textContent = "Fetching 2330 warrants and options and scoring every pair…";
+  btn.disabled = true;
+  try {
+    _saScan = await apiJson("/statarb_scan", { method: "POST" });
+    status.textContent = `scanned ${_saScan.scanned_at.replace("T", " ").slice(0, 16)} TPE · quotes as of ` +
+      `${(_saScan.quotes_as_of || "?").replace("T", " ").slice(0, 16)} UTC · paths as of ${_saScan.sim_asof}`;
+    _saScanRender();
+  } catch (e) {
+    status.textContent = "failed: " + (e.message || e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Worst P(loss) across the four path sets for the chosen measure; null when the pair can't be tested.
+function _saWorst(r, measure) {
+  if (r.pure) return 0;
+  const p = r[measure];
+  return p ? Math.max(...Object.values(p)) : null;
+}
+
+function _saScanRender() {
+  const thrRaw = +document.getElementById("sa-scan-thr").value;
+  const thr = thrRaw / 10000;                       // slider unit = 0.01%
+  document.getElementById("sa-scan-thr-v").textContent = (thrRaw / 100).toFixed(2) + "%";
+  if (!_saScan) return;
+  const measure = document.getElementById("sa-scan-measure").value;
+  const showAll = document.getElementById("sa-scan-all").checked;
+  const rows = _saScan.rows;
+  const passes = r => { const w = _saWorst(r, measure); return w !== null && w <= thr; };
+  const pure = rows.filter(r => r.pure), pass = rows.filter(passes);
+  const untestable = rows.filter(r => !r.pure && !r.testable);
+  const fmtP = p => p === null || p === undefined ? "—" : (p * 100).toFixed(2) + "%";
+  const fmtN = v => Math.round(v).toLocaleString();
+
+  document.getElementById("sa-scan-summary").innerHTML =
+    `Spot <b>${fmtN(_saScan.spot)}</b> · ${_saScan.n_warrants} warrants, ${_saScan.n_options_live_bid} options with a live bid · ` +
+    `<b>${rows.length}</b> pairs with a net credit · pure arb <b>${pure.length}</b> · ` +
+    `pass at max P(loss) ${(thrRaw / 100).toFixed(2)}% on all four path sets <b>${pass.length}</b> ` +
+    `(fillable at ask depth <b>${pass.filter(r => r.fillable).length}</b>)` +
+    (untestable.length ? ` · ${untestable.length} expire beyond ${_saScan.n_max} trading days, not testable` : "") +
+    `<br>PnL is measured at the option's expiry with the warrant valued at intrinsic only, one option contract against ` +
+    `whole board lots of warrants, before fees and tax. ${_saScan.n_sims.toLocaleString()} paths per set.`;
+
+  const shown = showAll ? rows : pass;
+  const head = ["Status", "Warrant", "Name", "Option", "Type", "K warrant", "K option", "W DTE", "O DTE", "Trading days",
+                "Lots", "Fillable", "Credit (TWD)", "Max loss (TWD)", "Loss region", "Dist. to loss",
+                ...SA_SCEN.map(s => s[1]), "Worst"];
+  const region = r => r.loss_region.map(([a, b]) => `${fmtN(a)}–${b === null ? "∞" : fmtN(b)}`).join(", ") || "none";
+  const body = shown.map(r => {
+    const worst = _saWorst(r, measure), ok = passes(r);
+    const p = r[measure] || {};
+    return `<tr><td class="${ok ? "sa-pass" : "sa-fail"}">${r.pure ? "PURE" : ok ? "PASS" : r.testable ? "fail" : "untestable"}</td>` +
+      `<td>${escHtml(r.warrant_code)}</td><td>${escHtml(r.warrant_name)}</td><td>${escHtml(r.option_contract)}</td>` +
+      `<td>${r.type}</td><td>${r.warrant_strike.toLocaleString()}</td><td>${r.opt_strike.toLocaleString()}</td>` +
+      `<td>${r.warrant_dte}</td><td>${r.opt_dte}</td><td>${r.trading_days}</td><td>${r.lots}</td>` +
+      `<td>${r.fillable ? "yes" : "no"}</td><td>${fmtN(r.credit)}</td><td>${fmtN(r.max_loss)}</td>` +
+      `<td>${region(r)}</td><td>${r.dist_to_loss_pct === null ? "—" : r.dist_to_loss_pct.toFixed(1) + "%"}</td>` +
+      SA_SCEN.map(([k]) => `<td>${r.pure ? "0.00%" : fmtP(p[k])}</td>`).join("") +
+      `<td>${fmtP(worst)}</td></tr>`;
+  }).join("");
+  document.getElementById("sa-scan-table").innerHTML = shown.length
+    ? `<table><thead><tr>${head.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table>`
+    : `<div class="sa-scan-summary" style="padding:12px">No pair passes at this threshold. Raise the slider or tick "show failing pairs too".</div>`;
 }
