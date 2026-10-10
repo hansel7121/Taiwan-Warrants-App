@@ -1497,6 +1497,24 @@ def statarb_scan():
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
 
 
+@app.route("/statarb_lp_scan", methods=["POST"])
+@require_auth
+@require_role(ADMIN)
+def statarb_lp_scan():
+    """Run the StatArb whole-lot MILP at every 2330 option expiry against the cached simulated paths."""
+    try:
+        body = request.get_json(silent=True) or {}
+        return jsonify(statarb_logic.scan_lp(
+            cap=float(body.get("cap", 0.05)), max_loss=float(body.get("max_loss", 1_000_000)),
+            objective=str(body.get("objective", "credit")),
+            vol_stress=float(body.get("vol_stress", statarb_logic.VOL_STRESS)),
+            min_credit=float(body.get("min_credit", 1000))))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
+
+
 @app.route("/match_static_arb", methods=["POST"])
 @require_auth
 @require_role(ADMIN)

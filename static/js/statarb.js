@@ -282,3 +282,58 @@ function _saOpenPair(i) {
     warrant_iv: null, opt_iv: null,
   });
 }
+
+// 9. Structure finder: POST /statarb_lp_scan, one whole-lot MILP structure per option expiry.
+let _saLp = null;
+
+async function statarbLpScan() {
+  const status = document.getElementById("sa-lp-status"), btn = document.getElementById("sa-lp-btn");
+  const num = id => parseFloat(document.getElementById(id).value);
+  status.textContent = "Fetching the 2330 chain and solving each expiry (~10 s each)…";
+  btn.disabled = true;
+  try {
+    _saLp = await apiJson("/statarb_lp_scan", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cap: num("sa-lp-cap") / 100, max_loss: num("sa-lp-maxloss"), min_credit: num("sa-lp-mincredit"),
+                             vol_stress: num("sa-lp-stress") || 1.2, objective: document.getElementById("sa-lp-objective").value }) });
+    status.textContent = `solved ${_saLp.scanned_at.replace("T", " ").slice(0, 16)} TPE in ${_saLp.runtime_s}s · quotes as of ` +
+      `${(_saLp.quotes_as_of || "?").replace("T", " ").slice(0, 16)} UTC · paths as of ${_saLp.sim_asof}`;
+    _saLpRender();
+  } catch (e) {
+    status.textContent = "failed: " + (e.message || e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function _saLpRender() {
+  const d = _saLp, fmtN = v => v === null || v === undefined ? "—" : Math.round(v).toLocaleString();
+  const fmtP = p => p === null || p === undefined ? "—" : (p * 100).toFixed(2) + "%";
+  const found = d.rows.filter(r => r.legs), pass = found.filter(r => r.status === "pass" || r.status === "pure");
+  const sets = found.length ? Object.keys(found[0].p_expiry) : [];
+  const setName = { zero: "zero drift", drift: "drift", stress: `vol ×${d.vol_stress}`, stress_drift: `vol ×${d.vol_stress} + drift` };
+  document.getElementById("sa-lp-summary").innerHTML =
+    `Spot <b>${fmtN(d.spot)}</b> · ${d.n_warrants} warrants, ${d.n_options} live options · ${d.rows.length} expiries · ` +
+    `structure found <b>${found.length}</b> · pass out of sample at P(loss) ≤ ${(d.cap * 100).toFixed(2)}% <b>${pass.length}</b>` +
+    `<br>Each expiry: long warrants/options and short options in whole 張/口, P&amp;L ≥ 0 on a spot band holding ≥ ${((1 - d.cap) * 100).toFixed(1)}% ` +
+    `of every path set (so P(loss) ≤ cap), worst loss ≤ ${fmtN(d.max_loss)} TWD, credit ≥ ${fmtN(d.min_credit)} TWD, maximising ` +
+    `${d.objective === "credit" ? "entry credit" : "expected P&amp;L"}. Bands are fitted on half of the ${d.n_sims.toLocaleString()} paths per set; ` +
+    `P(loss) below is measured on the other half. Longs that outlive the expiry are valued at intrinsic. Before fees and tax.`;
+  const leg = l => `${l.side === "long" ? "+" : "−"}${l.lots}${l.lot_label} ${escHtml(l.code)} ${l.type[0]}${l.strike.toLocaleString()} @${l.quote}`;
+  const head = ["Status", "Expiry DTE", "Trading days", "Legs", "Credit (TWD)", "Max loss (TWD)", "Worst spot", "E[P&L] zero drift",
+                "Band", ...sets.map(k => "P " + (setName[k] || k)), "Worst"];
+  const body = d.rows.map(r => {
+    if (!r.legs) {
+      const why = r.status === "untestable" ? "expires beyond the simulated horizon" : "no structure meets the limits";
+      return `<tr><td class="sa-fail">${r.status === "untestable" ? "untestable" : "none"}</td><td>${r.horizon_dte}</td>` +
+        `<td>${r.trading_days}</td><td colspan="${head.length - 3}">${why}</td></tr>`;
+    }
+    const worst = Math.max(...Object.values(r.p_expiry)), ok = r.status === "pass" || r.status === "pure";
+    return `<tr><td class="${ok ? "sa-pass" : "sa-fail"}">${r.status.toUpperCase()}</td><td>${r.horizon_dte}</td><td>${r.trading_days}</td>` +
+      `<td style="white-space:normal;min-width:320px">${r.legs.map(leg).join("<br>")}</td>` +
+      `<td>${fmtN(r.net_credit)}</td><td>${fmtN(r.max_loss)}</td><td>${fmtN(r.worst_spot)}</td><td>${fmtN(r.expected_pnl)}</td>` +
+      `<td>${fmtN(r.band[0])}–${r.band[1] === null ? "∞" : fmtN(r.band[1])}</td>` +
+      sets.map(k => `<td>${fmtP(r.p_expiry[k])}</td>`).join("") + `<td>${fmtP(worst)}</td></tr>`;
+  }).join("");
+  document.getElementById("sa-lp-table").innerHTML =
+    `<table><thead><tr>${head.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table>`;
+}
