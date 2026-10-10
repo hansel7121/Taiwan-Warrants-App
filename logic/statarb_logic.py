@@ -6,7 +6,8 @@ vol path, the bootstrap again with the historical drift added back, plus a two-s
 `state()` serves the cached result; `update()` refetches and rebuilds. `scan()` prices every long-warrant / short-option
 pair on 2330 against the cached bootstrap paths (`scan_pairs` is the pure core), with the warrant leg rounded down and up
 to whole board lots as two separate trades: pure arbs, and for the rest the share of paths that reach the loss region
-under zero drift, historical drift, and both again with vol × VOL_STRESS.
+under zero drift, historical drift, and both again with vol × VOL_STRESS. `scan_lp()` runs logic/statarb_lp.py's
+whole-lot MILP per option expiry over the whole chain against the same path sets (#9).
 """
 import threading
 from datetime import datetime
@@ -306,3 +307,67 @@ def scan(vol_stress=VOL_STRESS, now=None):
             "scanned_at": now.isoformat(timespec="seconds"), "vol_stress": vol_stress, "n_sims": int(_sim["boot"].shape[0]),
             "n_max": int(_sim["boot"].shape[1]), "n_warrants": int(len(w)), "n_options_live_bid": int(o["bid_live"].sum()),
             "rows": rows}
+
+
+def _end_spot_sets(sim, spot, n, vol_stress):
+    """({set: horizon spots} fit half, check half) after `n` trading days; stressed sets dropped when vol_stress is 1."""
+    sets = scenarios(sim, vol_stress)
+    if vol_stress == 1.0:
+        sets = {k: v for k, v in sets.items() if k in ("zero", "drift")}
+    half = sim["boot"].shape[0] // 2
+    ends = {k: spot * np.exp(v[:, n - 1]) for k, v in sets.items()}
+    return {k: v[:half] for k, v in ends.items()}, {k: v[half:] for k, v in ends.items()}
+
+
+def scan_lp_chain(warrant_df, opt_df, contract_size, sim, spot, today, cap, max_loss, objective="credit",
+                  vol_stress=VOL_STRESS, min_credit=0.0, r=0.0):
+    """One statarb_lp structure per option expiry (pure core of scan_lp)."""
+    from logic import static_arb, statarb_lp
+    first_day = np.datetime64(sim["asof"]) + np.timedelta64(1, "D")
+    n_max = sim["boot"].shape[1]
+    rows = []
+    for T in sorted(set(int(d) for d in opt_df["days_to_expiry"].unique())):
+        expiry = np.datetime64(today) + np.timedelta64(T, "D")
+        n = int(np.busday_count(first_day, expiry + np.timedelta64(1, "D")))
+        base = {"horizon_dte": T, "trading_days": n}
+        if not 1 <= n <= n_max:
+            rows.append({**base, "status": "untestable"})
+            continue
+        longs, shorts, _ = static_arb._build_legs(warrant_df, opt_df, T, contract_size, r)
+        fit, check = _end_spot_sets(sim, spot, n, vol_stress)
+        row = statarb_lp.solve_horizon(longs, shorts, fit, check, cap, max_loss, objective, min_credit)
+        if row is None:
+            rows.append({**base, "status": "none", "n_long_legs": len(longs), "n_short_legs": len(shorts)})
+            continue
+        status = "pure" if row["pure"] else "pass" if row["passes"] else "fail"
+        rows.append({**base, **row, "status": status, "n_long_legs": len(longs), "n_short_legs": len(shorts)})
+    return rows
+
+
+def scan_lp(cap=0.05, max_loss=1_000_000, objective="credit", vol_stress=VOL_STRESS, min_credit=1000.0, now=None):
+    """Fetch the 2330 chain and run the StatArb MILP at every option expiry against the cached simulation."""
+    from logic import options_logic, statarb_lp, warrant_logic
+    if not 0 < cap <= 0.5:
+        raise ValueError(f"cap must be in (0, 0.5], got {cap}")
+    if not 1.0 <= vol_stress <= 3.0:
+        raise ValueError(f"vol_stress must be between 1.0 and 3.0, got {vol_stress}")
+    if max_loss <= 0:
+        raise ValueError("max_loss must be positive")
+    if objective not in statarb_lp.OBJECTIVES:
+        raise ValueError(f"objective must be one of {statarb_lp.OBJECTIVES}")
+    state()
+    now = now or datetime.now(TW_TZ)
+    w, w_err, w_meta = warrant_logic.read_warrant([STOCK_CODE], "All", 0, 365, 0, 1e9, 0, compute_iv=False)
+    o, o_err, _ = options_logic.read_tw_option([STOCK_CODE], "All", min_days=1, compute_iv=False)
+    if w.empty or o.empty:
+        raise RuntimeError(f"no data: warrants {w_err or len(w)}, options {o_err or len(o)}")
+    o = o[o["ask_live"] | o["bid_live"]]
+    spot = float(w["underlying_price"].iloc[0])
+    contract_size = options_logic._commodity_map()[STOCK_CODE]["exercise_ratio"]
+    t0 = datetime.now(TW_TZ)
+    rows = scan_lp_chain(w, o, contract_size, _sim, spot, now.date(), cap, max_loss, objective, vol_stress,
+                         min_credit, options_logic.R)
+    return {"spot": spot, "sim_asof": str(_sim["asof"]), "quotes_as_of": (w_meta or {}).get("as_of"),
+            "scanned_at": now.isoformat(timespec="seconds"), "runtime_s": round((datetime.now(TW_TZ) - t0).total_seconds(), 1),
+            "cap": cap, "max_loss": max_loss, "objective": objective, "vol_stress": vol_stress, "min_credit": min_credit,
+            "n_sims": int(_sim["boot"].shape[0]), "n_warrants": int(len(w)), "n_options": int(len(o)), "rows": rows}
