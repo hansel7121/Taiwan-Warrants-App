@@ -385,7 +385,7 @@ def prepare_tick_recording():
 
 
 def ensure_tick_recording():
-    """Intraday: (re)start the recorder; on (re)start, write every current book so the replay has full state."""
+    """(Re)start the recorder — scheduler and Record button alike; on (re)start, write every current book so the replay has full state."""
     u = live_tick_log.UNDERLYING
     if not live_options.snapshot_for_underlying(u)[1]:
         # Options' tracked list is in-memory only, so a mid-day restart loses it.
@@ -393,8 +393,12 @@ def ensure_tick_recording():
         live_options.load_chain(u)
     if live_tick_log.start():
         rows = live_warrant.tick_rows_for_underlying() + live_options.tick_rows_for_underlying()
-        live_tick_log.record_many(rows)
+        # One timestamp for the whole snapshot, so the replay folds it as one group and scans full state once.
+        ts = datetime.now(live_tick_log.TW_TZ).isoformat(timespec="milliseconds")
+        live_tick_log.record_many([{**r, "ts": ts} for r in rows])
         print(f"SCHED: tick recorder started, snapshot rows={len(rows)}", flush=True)
+        return True
+    return False
 
 
 def stop_tick_recording():

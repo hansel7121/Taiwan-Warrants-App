@@ -832,8 +832,9 @@ def live_tick_log_status():
 @require_role(ADMIN)
 def start_live_tick_log():
     """Begin (or resume) appending every TSMC warrant/option tick to today's
-    CSV, shared by both Live Arb subtabs — see services/live_tick_log.py."""
-    live_tick_log.start()
+    CSV, shared by both Live Arb subtabs — see services/live_tick_log.py.
+    Goes through the scheduler's starter so every start snapshots all books first."""
+    scheduler.ensure_tick_recording()
     return jsonify({"ok": True, **live_tick_log.status()})
 
 

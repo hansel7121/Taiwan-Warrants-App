@@ -67,3 +67,19 @@ def test_drop_stale_quote_blanks_previous_day_books():
     assert tl.drop_stale_quote(row, None) == row
     stale = tl.drop_stale_quote(row, now - timedelta(days=3))
     assert stale["bid"] is None and stale["ask"] is None and stale["code"] == "A"
+
+
+def test_record_start_snapshots_every_book_under_one_timestamp(rec, monkeypatch):
+    """Record button and scheduler share one starter: every tracked book lands first, stamped alike."""
+    from services import scheduler
+    monkeypatch.setattr(scheduler.live_options, "snapshot_for_underlying", lambda u: (None, ["C1"]))
+    monkeypatch.setattr(scheduler.live_warrant, "tick_rows_for_underlying",
+                        lambda: [{**_row("W1", 1.0), "ts": "t1", "kind": "warrant", "src": "snapshot"}])
+    monkeypatch.setattr(scheduler.live_options, "tick_rows_for_underlying",
+                        lambda: [{**_row("C1", 2.0), "ts": "t2", "src": "snapshot"}])
+    assert scheduler.ensure_tick_recording() is True
+    assert scheduler.ensure_tick_recording() is False   # already running: no second snapshot
+    with open(rec.current_path(), newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert [r["code"] for r in rows] == ["W1", "C1"]
+    assert rows[0]["ts"] == rows[1]["ts"] and rows[0]["ts"] not in ("t1", "t2")
