@@ -396,6 +396,8 @@ def ensure_tick_recording():
         # One timestamp for the whole snapshot, so the replay folds it as one group and scans full state once.
         ts = datetime.now(live_tick_log.TW_TZ).isoformat(timespec="milliseconds")
         live_tick_log.record_many([{**r, "ts": ts} for r in rows])
+        for r in live_warrant.spot_rows_for_underlying():
+            live_tick_log.record_spot({**r, "ts": ts})
         print(f"SCHED: tick recorder started, snapshot rows={len(rows)}", flush=True)
         return True
     return False

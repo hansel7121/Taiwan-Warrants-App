@@ -2,6 +2,8 @@
 resume into the same day's file, gzip after the EOD replay, and retention."""
 import csv
 import gzip
+import json
+import os
 from datetime import date
 
 import pytest
@@ -83,3 +85,33 @@ def test_record_start_snapshots_every_book_under_one_timestamp(rec, monkeypatch)
         rows = list(csv.DictReader(fh))
     assert [r["code"] for r in rows] == ["W1", "C1"]
     assert rows[0]["ts"] == rows[1]["ts"] and rows[0]["ts"] not in ("t1", "t2")
+
+
+def test_spot_ticks_go_to_their_own_file_and_follow_the_tick_file(rec):
+    """2330 spot rows land in tsmc_spot_*.csv; compress and reset treat both files alike."""
+    from datetime import datetime
+    from services import live_warrant as lw
+    lw._underlying_codes.add(rec.UNDERLYING)
+    try:
+        lw._handle_message({}, json.dumps({"event": "data", "channel": lw.BOOKS_CHANNEL, "data": {
+            "symbol": rec.UNDERLYING, "bids": [{"price": 2450.0, "size": 10}], "asks": [{"price": 2455.0, "size": 8}]}}))
+        rec.start()
+        lw._handle_message({}, json.dumps({"event": "data", "channel": lw.BOOKS_CHANNEL, "data": {
+            "symbol": rec.UNDERLYING, "bids": [{"price": 2450.0, "size": 10}], "asks": [{"price": 2455.0, "size": 8}]}}))
+        assert lw.spot_rows_for_underlying()[0]["src"] == "snapshot"
+    finally:
+        lw._underlying_codes.discard(rec.UNDERLYING)
+        lw._underlying_books.pop(rec.UNDERLYING, None)
+    rec.record(_row("A", 1.0))
+    with open(rec.current_path(spot=True), newline="") as fh:
+        spot = list(csv.DictReader(fh))
+    assert [(r["code"], r["bid"], r["ask"], r["mid"], r["src"]) for r in spot] == [("2330", "2450.0", "2455.0", "2452.5", "ws")]
+    assert rec.status()["spot_rows_logged"] == 1
+    rec.stop()
+    today = datetime.now(rec.TW_TZ).date()
+    rec.compress(today)
+    assert rec.existing_path_for(today, spot=True).endswith("tsmc_spot_" + today.strftime("%Y%m%d") + ".csv.gz")
+    assert rec.existing_path_for(today).endswith(".csv.gz")
+    rec.start()
+    rec.reset()
+    assert not os.path.exists(rec.spot_path_for(today)) and not os.path.exists(rec.path_for(today))

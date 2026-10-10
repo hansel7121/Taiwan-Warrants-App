@@ -1,7 +1,7 @@
 // Live Arb → EOD Replay sub-tab: browses the end-of-day replay results
 // (scripts/eod_arb_replay.py → eod_arb_* tables) day by day via
 // /eod_arb_dates and /eod_arb_episodes, re-runs a day via /eod_arb_run, and
-// downloads a day's tick file via /eod_tick_csv. Static data — no live poll,
+// downloads a day's tick or spot file via /eod_tick_csv. Static data — no live poll,
 // except while a replay is running.
 
 let _eodLoaded = false;
@@ -178,18 +178,18 @@ async function _eodRerun() {
   }
 }
 
-async function _eodDownloadTicks() {
+async function _eodDownloadTicks(kind = "ticks") {
   const day = document.getElementById("eod-date").value;
   const status = document.getElementById("eod-status");
   if (!day) return;
   try {
-    const res = await api(`/eod_tick_csv?date=${encodeURIComponent(day)}`);
-    if (!res.ok) { status.textContent = "no tick file on disk for " + day + " (pruned or never recorded)"; return; }
+    const res = await api(`/eod_tick_csv?date=${encodeURIComponent(day)}&kind=${kind}`);
+    if (!res.ok) { status.textContent = `no ${kind === "spot" ? "spot" : "tick"} file on disk for ${day} (pruned or never recorded)`; return; }
     const name = (res.headers.get("Content-Disposition") || "").match(/filename="?([^";]+)/);
     const blob = await res.blob();
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = name ? name[1] : `tsmc_ticks_${day}.csv`;
+    a.download = name ? name[1] : `tsmc_${kind}_${day}.csv`;
     a.click();
   } catch (e) {
     status.textContent = "download failed: " + (e.message || e);

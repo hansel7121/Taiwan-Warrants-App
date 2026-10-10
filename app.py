@@ -861,7 +861,7 @@ def reset_live_tick_log():
 @require_auth
 @require_role(ADMIN)
 def live_tick_log_csv():
-    path = live_tick_log.current_path()
+    path = live_tick_log.current_path(spot=request.args.get("kind") == "spot")
     if not path or not os.path.exists(path):
         return jsonify({"error": "no ticks recorded yet"}), 404
     return send_file(path, as_attachment=True, download_name=os.path.basename(path), mimetype="text/csv")
@@ -912,9 +912,10 @@ def eod_arb_run():
 @require_role(ADMIN)
 def eod_tick_csv():
     trade_date = date.fromisoformat(request.args["date"])
-    path = live_tick_log.existing_path_for(trade_date)
+    spot = request.args.get("kind") == "spot"
+    path = live_tick_log.existing_path_for(trade_date, spot=spot)
     if path is None:
-        return jsonify({"error": f"no tick file on disk for {trade_date}"}), 404
+        return jsonify({"error": f"no {'spot' if spot else 'tick'} file on disk for {trade_date}"}), 404
     mimetype = "application/gzip" if path.endswith(".gz") else "text/csv"
     return send_file(path, as_attachment=True, download_name=os.path.basename(path), mimetype=mimetype)
 

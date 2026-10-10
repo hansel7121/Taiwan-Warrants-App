@@ -445,6 +445,10 @@ def _handle_message(conn, raw):
     with _lock:
         if code in _underlying_codes:
             _fold_underlying_tick_locked(code, new_bids, new_asks)
+            if live_tick_log.is_active():
+                row = _spot_row_locked(code, "ws")
+                if row is not None:
+                    live_tick_log.record_spot(row)
             return
         old_book = _books.get(code)
         dirty = live_warrant_logic.best_level_changed(old_book, new_bids, new_asks)
@@ -510,6 +514,31 @@ def tick_rows_for_underlying(src="snapshot"):
     with _lock:
         rows = [(c, _tick_row_locked(c, src)) for c in _tracked]
         return [live_tick_log.drop_stale_quote(r, (_books.get(c) or {}).get("ts")) for c, r in rows if r is not None]
+
+
+def _spot_row_locked(code, src):
+    """One live_tick_log spot row for TSMC's current book, or None. Caller holds `_lock`."""
+    info = _underlying_books.get(code)
+    if code != live_tick_log.UNDERLYING or not info:
+        return None
+    best = info["best"]
+    return {
+        "ts": datetime.now(live_tick_log.TW_TZ).isoformat(timespec="milliseconds"),
+        "code": code, "bid": best.get("bid"), "ask": best.get("ask"),
+        "bid_size": best.get("bid_size"), "ask_size": best.get("ask_size"),
+        "mid": info["price"], "src": src,
+    }
+
+
+def spot_rows_for_underlying(src="snapshot"):
+    """TSMC's current spot book as a live_tick_log spot row (0 or 1) — written when recording starts."""
+    with _lock:
+        row = _spot_row_locked(live_tick_log.UNDERLYING, src)
+        ts = (_underlying_books.get(live_tick_log.UNDERLYING) or {}).get("ts")
+    if row is None:
+        return []
+    row = live_tick_log.drop_stale_quote(row, ts)
+    return [row if row["bid"] is not None or row["ask"] is not None else {**row, "mid": None}]
 
 
 def _fold_underlying_tick_locked(code, bids, asks):
