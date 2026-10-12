@@ -1,7 +1,8 @@
-"""CRUD for the end-of-day arb replay tables (supabase/migrations/027): one
-eod_arb_runs row per trading day plus its Direct Match and LP episodes.
+"""CRUD for the end-of-day arb replay tables (supabase/migrations/027, 028): one
+eod_arb_runs row per trading day plus its Direct Match and LP episodes and its
+StatArb top-N required-vol pairs.
 Written by scripts/eod_arb_replay.py, read by app.py's /eod_arb_* routes for
-the Live Arb tab's EOD Replay subtab.
+the EOD Replay tab.
 """
 from datetime import datetime, timezone
 
@@ -32,6 +33,21 @@ def replace_episodes(trade_date, direct_rows, lp_rows):
         for i in range(0, len(rows), _BATCH):
             chunk = rows[i:i + _BATCH]
             db.run(lambda c, t=table, ch=chunk: c.table(t).insert(ch).execute())
+
+
+def replace_statarb(trade_date, rows):
+    """Replace the day's StatArb top-N rows."""
+    d = trade_date.isoformat()
+    db.run(lambda c: c.table("eod_arb_statarb_top").delete().eq("trade_date", d).execute())
+    if rows:
+        db.run(lambda c: c.table("eod_arb_statarb_top").insert(rows).execute())
+
+
+def list_statarb(trade_date):
+    """The day's StatArb top-N rows, rank order."""
+    r = db.run(lambda c: c.table("eod_arb_statarb_top").select("*")
+               .eq("trade_date", trade_date.isoformat()).order("rank").execute())
+    return r.data or []
 
 
 def list_runs(limit=120):

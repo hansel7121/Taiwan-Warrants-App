@@ -12,24 +12,19 @@ from services import db
 from services import db_products
 from services import db_suggestions
 from services import db_user
-from services import roles
 from services import store
 from services import live_warrant
 from services import live_options
-from services import live_arb, db_live_arb, db_live_arb_lp
 from services import live_tick_log
 from services import db_eod_arb
 from logic import arb_logic
 from logic import live_warrant_logic
-from logic import static_arb
 from logic import statarb_logic
 # Aliased: the route functions below are named iv_surface / close_quote.
 from logic import iv_surface as iv_surface_logic
 from logic import iv_engine
 from logic import close_quote as close_quote_logic
-from logic import user_marks
 from services.auth import require_auth
-from services.roles import require_role, ADMIN
 import os
 import io
 import json
@@ -82,8 +77,6 @@ _ROUTE_LABELS = {
     "/match_tw_us_option_csv": "tw/us match csv",
     "/match_warrant_tw_option": "arb scan",
     "/match_warrant_tw_option_csv": "arb scan csv",
-    "/match_static_arb": "static arb lp",
-    "/match_static_arb_csv": "static arb lp csv",
 }
 
 
@@ -206,9 +199,7 @@ def _json_error(exc):
 
 @app.route("/")
 def index():
-    # roles.template_flags() decides which tabs and script tags the page even
-    # contains — user mode never receives the arb/portfolio markup or JS.
-    return render_template("index.html", **auth.public_config(), **roles.template_flags())
+    return render_template("index.html", **auth.public_config())
 
 
 @app.route("/login")
@@ -228,14 +219,12 @@ def check_email():
 
 @app.route("/get_portfolio")
 @require_auth
-@require_role(ADMIN)
 def get_portfolio():
     return jsonify(store.get_portfolio(g.user["id"]))
 
 
 @app.route("/save_portfolio", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def save_portfolio():
     store.save_portfolio(g.user["id"], request.json or [])
     return jsonify({"ok": True})
@@ -243,7 +232,6 @@ def save_portfolio():
 
 @app.route("/close_quote", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def close_quote():
     """Current market inputs used to book a trade's realized P&L at close.
 
@@ -275,7 +263,6 @@ def list_warrant_stocks():
 
 @app.route("/add_warrant_stock", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def add_warrant_stock():
     data = request.json or {}
     code = (data.get("code") or "").strip()
@@ -287,7 +274,6 @@ def add_warrant_stock():
 
 @app.route("/remove_warrant_stock", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def remove_warrant_stock():
     data = request.json or {}
     code = (data.get("code") or "").strip()
@@ -299,7 +285,6 @@ def remove_warrant_stock():
 
 @app.route("/lookup_warrant_stock")
 @require_auth
-@require_role(ADMIN)
 def lookup_warrant_stock():
     code = (request.args.get("code") or "").strip()
     info = warrant_logic._universe().get(code)
@@ -310,11 +295,6 @@ def lookup_warrant_stock():
 # Every route below scopes to g.user["id"]; user_id never comes from the request body.
 
 _WATCH_KINDS = {"warrant", "tw_option"}
-_LEG_KINDS = {"warrant", "tw_option", "underlying"}
-_ALERT_METRICS = {"bid", "ask", "iv", "underlying"}
-_LEG_FIELDS = ("kind", "code", "label", "direction", "quantity", "entry_price",
-               "option_type", "strike", "days_to_expiry", "exercise_ratio",
-               "contract_size", "iv")
 
 
 @app.route("/list_watchlist")
@@ -347,141 +327,14 @@ def remove_watchlist():
     return jsonify({"ok": True})
 
 
-@app.route("/list_alerts")
-@require_auth
-def list_alerts():
-    return jsonify(db_user.list_alerts(g.user["id"]))
-
-
-@app.route("/add_alert", methods=["POST"])
-@require_auth
-def add_alert():
-    d = request.json or {}
-    kind, code = d.get("kind"), (d.get("code") or "").strip()
-    metric, direction = d.get("metric"), d.get("direction")
-    if kind not in _WATCH_KINDS or not code:
-        return jsonify({"error": "kind and code required"}), 400
-    if metric not in _ALERT_METRICS or direction not in ("above", "below"):
-        return jsonify({"error": "bad metric/direction"}), 400
-    try:
-        threshold = float(d.get("threshold"))
-    except (TypeError, ValueError):
-        return jsonify({"error": "threshold must be a number"}), 400
-    row = db_user.add_alert(g.user["id"], kind, code, metric, direction, threshold,
-                            underlying_code=d.get("underlying_code"), note=d.get("note"))
-    return jsonify({"ok": True, "alert": row})
-
-
-@app.route("/remove_alert", methods=["POST"])
-@require_auth
-def remove_alert():
-    alert_id = (request.json or {}).get("id")
-    if not alert_id:
-        return jsonify({"error": "id required"}), 400
-    db_user.remove_alert(g.user["id"], alert_id)
-    return jsonify({"ok": True})
-
-
-@app.route("/record_alert_trigger", methods=["POST"])
-@require_auth
-def record_alert_trigger():
-    """Persist a browser-side alert fire so it survives a reload."""
-    d = request.json or {}
-    alert_id = d.get("id")
-    if not alert_id:
-        return jsonify({"error": "id required"}), 400
-    fired_at = datetime.now(timezone.utc).isoformat()
-    db_user.record_trigger(g.user["id"], alert_id, d.get("value"), fired_at)
-    return jsonify({"ok": True, "last_triggered_at": fired_at})
-
-
-@app.route("/list_positions")
-@require_auth
-def list_positions():
-    return jsonify(db_user.list_positions(g.user["id"]))
-
-
-@app.route("/add_position", methods=["POST"])
-@require_auth
-def add_position():
-    """Create a multi-leg position. At least one leg; no cap on leg count."""
-    d = request.json or {}
-    raw_legs = d.get("legs") or []
-    if not isinstance(raw_legs, list) or not raw_legs:
-        return jsonify({"error": "at least one leg required"}), 400
-    legs = []
-    for raw in raw_legs:
-        kind = raw.get("kind")
-        code = (raw.get("code") or "").strip()
-        if kind not in _LEG_KINDS or not code:
-            return jsonify({"error": f"bad leg: {raw}"}), 400
-        try:
-            quantity = float(raw.get("quantity"))
-            entry_price = float(raw.get("entry_price"))
-            direction = int(raw.get("direction", 1))
-        except (TypeError, ValueError):
-            return jsonify({"error": f"leg needs numeric quantity/entry_price: {code}"}), 400
-        if direction not in (-1, 1) or quantity <= 0:
-            return jsonify({"error": f"leg direction must be ±1 and quantity > 0: {code}"}), 400
-        # Warrants are long-only; a short warrant leg can't actually be held.
-        if kind == "warrant" and direction != 1:
-            return jsonify({"error": f"warrants are long-only, cannot short {code}"}), 400
-        leg = {k: raw.get(k) for k in _LEG_FIELDS}
-        leg.update({"kind": kind, "code": code, "quantity": quantity,
-                    "entry_price": entry_price, "direction": direction})
-        if leg.get("option_type") not in ("Call", "Put"):
-            leg["option_type"] = None
-        legs.append(leg)
-    position = db_user.add_position(
-        g.user["id"], legs, name=d.get("name"),
-        underlying_code=d.get("underlying_code"), note=d.get("note"))
-    return jsonify({"ok": True, "position": position})
-
-
-@app.route("/remove_position", methods=["POST"])
-@require_auth
-def remove_position():
-    position_id = (request.json or {}).get("id")
-    if not position_id:
-        return jsonify({"error": "id required"}), 400
-    db_user.remove_position(g.user["id"], position_id)
-    return jsonify({"ok": True})
-
-
-@app.route("/close_position", methods=["POST"])
-@require_auth
-def close_position():
-    position_id = (request.json or {}).get("id")
-    if not position_id:
-        return jsonify({"error": "id required"}), 400
-    now = datetime.now(timezone.utc).isoformat()
-    db_user.close_position(g.user["id"], position_id, now)
-    return jsonify({"ok": True, "closed_at": now})
-
-
-@app.route("/user_quotes", methods=["POST"])
-@require_auth
-def user_quotes():
-    """Current bid/ask/IV/spot for the caller's watchlist + position legs."""
-    instruments = (request.json or {}).get("instruments") or []
-    try:
-        marks = user_marks.quotes(instruments)
-    except Exception as e:
-        applog.log("USER", f"user_quotes failed: {e}\n{traceback.format_exc()}", level="ERROR")
-        return jsonify({"quotes": {}, "error": str(e)})
-    return jsonify({"quotes": marks})
-
-
 @app.route("/list_suggestions")
 @require_auth
-@require_role(ADMIN)
 def list_suggestions():
     return jsonify(db_suggestions.list_active_suggestions())
 
 
 @app.route("/remove_suggestion", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def remove_suggestion():
     data = request.json or {}
     sug_id = (data.get("id") or "").strip()
@@ -493,7 +346,6 @@ def remove_suggestion():
 
 @app.route("/clear_suggestions", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def clear_suggestions():
     db_suggestions.clear_active_suggestions()
     return jsonify({"ok": True})
@@ -507,7 +359,6 @@ def list_tw_option_products():
 
 @app.route("/add_tw_option_product", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def add_tw_option_product():
     data = request.json or {}
     code = (data.get("code") or "").strip()
@@ -525,7 +376,6 @@ def add_tw_option_product():
 
 @app.route("/remove_tw_option_product", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def remove_tw_option_product():
     data = request.json or {}
     code = (data.get("code") or "").strip()
@@ -538,14 +388,12 @@ def remove_tw_option_product():
 
 @app.route("/list_us_option_products")
 @require_auth
-@require_role(ADMIN)
 def list_us_option_products():
     return jsonify(db_products.list_us_option_products())
 
 
 @app.route("/add_us_option_product", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def add_us_option_product():
     data = request.json or {}
     code = (data.get("code") or "").strip()
@@ -561,7 +409,6 @@ def add_us_option_product():
 
 @app.route("/remove_us_option_product", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def remove_us_option_product():
     data = request.json or {}
     code = (data.get("code") or "").strip()
@@ -574,14 +421,12 @@ def remove_us_option_product():
 
 @app.route("/live_warrant_data")
 @require_auth
-@require_role(ADMIN)
 def live_warrant_data():
     return jsonify(live_warrant.get_data())
 
 
 @app.route("/live_warrant_log")
 @require_auth
-@require_role(ADMIN)
 def live_warrant_log():
     """Book-change console log entries newer than `since`, for the Live
     Warrant tab's collapsible log panel."""
@@ -591,7 +436,6 @@ def live_warrant_log():
 
 @app.route("/add_live_warrant", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def add_live_warrant():
     data = request.json or {}
     code = (data.get("code") or "").strip()
@@ -608,7 +452,6 @@ def add_live_warrant():
 
 @app.route("/remove_live_warrant", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def remove_live_warrant():
     data = request.json or {}
     code = (data.get("code") or "").strip()
@@ -620,7 +463,6 @@ def remove_live_warrant():
 
 @app.route("/remove_live_warrant_underlying", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def remove_live_warrant_underlying():
     data = request.json or {}
     underlying = (data.get("underlying") or "").strip()
@@ -632,7 +474,6 @@ def remove_live_warrant_underlying():
 
 @app.route("/scan_live_warrant", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def scan_live_warrant():
     data = request.json or {}
     underlying = (data.get("underlying") or "").strip()
@@ -658,7 +499,6 @@ def scan_live_warrant():
 
 @app.route("/retry_live_warrant", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def retry_live_warrant():
     """Re-attempt every tracked code that isn't streaming yet, on demand.
 
@@ -670,7 +510,6 @@ def retry_live_warrant():
 
 @app.route("/reconnect_live_warrant", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def reconnect_live_warrant():
     live_warrant.reconnect()
     return jsonify({"ok": True})
@@ -678,7 +517,6 @@ def reconnect_live_warrant():
 
 @app.route("/connect_live_warrant", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def connect_live_warrant():
     live_warrant.connect_session()
     return jsonify({"ok": True})
@@ -686,7 +524,6 @@ def connect_live_warrant():
 
 @app.route("/disconnect_live_warrant", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def disconnect_live_warrant():
     live_warrant.stop_session()
     return jsonify({"ok": True})
@@ -694,14 +531,12 @@ def disconnect_live_warrant():
 
 @app.route("/live_options_data")
 @require_auth
-@require_role(ADMIN)
 def live_options_data():
     return jsonify(live_options.get_data())
 
 
 @app.route("/load_live_options_chain", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def load_live_options_chain():
     """Discover and subscribe every currently-listed TSMC option contract in
     one shot. Safe to re-run: add-only, never removes a tracked contract."""
@@ -716,7 +551,6 @@ def load_live_options_chain():
 
 @app.route("/remove_live_option", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def remove_live_option():
     data = request.json or {}
     code = (data.get("code") or "").strip()
@@ -728,14 +562,12 @@ def remove_live_option():
 
 @app.route("/retry_live_options", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def retry_live_options():
     return jsonify({"ok": True, **live_options.retry_pending()})
 
 
 @app.route("/reconnect_live_options", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def reconnect_live_options():
     live_options.reconnect()
     return jsonify({"ok": True})
@@ -743,7 +575,6 @@ def reconnect_live_options():
 
 @app.route("/connect_live_options", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def connect_live_options():
     live_options.connect_session()
     return jsonify({"ok": True})
@@ -751,125 +582,13 @@ def connect_live_options():
 
 @app.route("/disconnect_live_options", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def disconnect_live_options():
     live_options.stop_session()
     return jsonify({"ok": True})
 
 
-@app.route("/live_arb_data")
-@require_auth
-@require_role(ADMIN)
-def live_arb_data():
-    return jsonify(live_arb.get_data())
-
-
-@app.route("/start_live_arb", methods=["POST"])
-@require_auth
-@require_role(ADMIN)
-def start_live_arb():
-    """The Live Arb kill switch's "on". Does not touch the Live Warrant /
-    Live Options sessions — it only reads whatever they already have
-    tracked (manual pre-load, by design)."""
-    live_arb.start_scan()
-    return jsonify({"ok": True})
-
-
-@app.route("/stop_live_arb", methods=["POST"])
-@require_auth
-@require_role(ADMIN)
-def stop_live_arb():
-    """The Live Arb kill switch's "off"."""
-    live_arb.stop_scan()
-    return jsonify({"ok": True})
-
-
-@app.route("/live_arb_trades")
-@require_auth
-@require_role(ADMIN)
-def live_arb_trades():
-    date_str = request.args.get("date")
-    trade_date = date.fromisoformat(date_str) if date_str else datetime.now(live_arb.TW_TZ).date()
-    return jsonify({"trades": db_live_arb.list_trades_for_date(trade_date)})
-
-
-@app.route("/live_arb_lp_data")
-@require_auth
-@require_role(ADMIN)
-def live_arb_lp_data():
-    return jsonify(live_arb.get_lp_data())
-
-
-@app.route("/start_live_arb_lp", methods=["POST"])
-@require_auth
-@require_role(ADMIN)
-def start_live_arb_lp():
-    """The Live Arb LP subtab's own kill switch, independent of Direct
-    Match's. Requires the Rust engine (no Python fallback) — surfaces a
-    session_error via /live_arb_lp_data if it's unavailable."""
-    live_arb.start_lp_scan()
-    return jsonify({"ok": True})
-
-
-@app.route("/stop_live_arb_lp", methods=["POST"])
-@require_auth
-@require_role(ADMIN)
-def stop_live_arb_lp():
-    """The Live Arb LP subtab's kill switch's "off"."""
-    live_arb.stop_lp_scan()
-    return jsonify({"ok": True})
-
-
-@app.route("/live_tick_log_status")
-@require_auth
-@require_role(ADMIN)
-def live_tick_log_status():
-    return jsonify(live_tick_log.status())
-
-
-@app.route("/start_live_tick_log", methods=["POST"])
-@require_auth
-@require_role(ADMIN)
-def start_live_tick_log():
-    """Begin (or resume) appending every TSMC warrant/option tick to today's
-    CSV, shared by both Live Arb subtabs — see services/live_tick_log.py.
-    Goes through the scheduler's starter so every start snapshots all books first."""
-    scheduler.ensure_tick_recording()
-    return jsonify({"ok": True, **live_tick_log.status()})
-
-
-@app.route("/stop_live_tick_log", methods=["POST"])
-@require_auth
-@require_role(ADMIN)
-def stop_live_tick_log():
-    live_tick_log.stop()
-    return jsonify({"ok": True, **live_tick_log.status()})
-
-
-@app.route("/reset_live_tick_log", methods=["POST"])
-@require_auth
-@require_role(ADMIN)
-def reset_live_tick_log():
-    """Delete today's recording entirely and stop; the button's own confirm()
-    dialog is the only guard against an accidental click, so nothing here
-    keeps a backup."""
-    live_tick_log.reset()
-    return jsonify({"ok": True, **live_tick_log.status()})
-
-
-@app.route("/live_tick_log_csv")
-@require_auth
-@require_role(ADMIN)
-def live_tick_log_csv():
-    path = live_tick_log.current_path(spot=request.args.get("kind") == "spot")
-    if not path or not os.path.exists(path):
-        return jsonify({"error": "no ticks recorded yet"}), 404
-    return send_file(path, as_attachment=True, download_name=os.path.basename(path), mimetype="text/csv")
-
-
 @app.route("/eod_arb_dates")
 @require_auth
-@require_role(ADMIN)
 def eod_arb_dates():
     """Every replayed day (newest first) plus which tick files are still on disk."""
     files = {f["date"]: f for f in live_tick_log.available_dates()}
@@ -883,20 +602,23 @@ def eod_arb_dates():
 
 @app.route("/eod_arb_episodes")
 @require_auth
-@require_role(ADMIN)
 def eod_arb_episodes():
     trade_date = date.fromisoformat(request.args["date"])
+    try:
+        statarb, statarb_error = db_eod_arb.list_statarb(trade_date), None
+    except Exception as e:   # table missing until migration 028 is applied
+        statarb, statarb_error = [], f"{type(e).__name__}: {e}"
     return jsonify({
         "run": db_eod_arb.get_run(trade_date),
         "direct": db_eod_arb.list_episodes("eod_arb_direct_episodes", trade_date),
         "lp": db_eod_arb.list_episodes("eod_arb_lp_episodes", trade_date),
+        "statarb": statarb, "statarb_error": statarb_error,
         "replay_running": scheduler.eod_replay_running(),
     })
 
 
 @app.route("/eod_arb_run", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def eod_arb_run():
     """Re-run the EOD replay for a day (runs in a subprocess; poll /eod_arb_episodes)."""
     date_str = (request.json or {}).get("date") or request.args.get("date")
@@ -909,7 +631,6 @@ def eod_arb_run():
 
 @app.route("/eod_tick_csv")
 @require_auth
-@require_role(ADMIN)
 def eod_tick_csv():
     trade_date = date.fromisoformat(request.args["date"])
     spot = request.args.get("kind") == "spot"
@@ -918,15 +639,6 @@ def eod_tick_csv():
         return jsonify({"error": f"no {'spot' if spot else 'tick'} file on disk for {trade_date}"}), 404
     mimetype = "application/gzip" if path.endswith(".gz") else "text/csv"
     return send_file(path, as_attachment=True, download_name=os.path.basename(path), mimetype=mimetype)
-
-
-@app.route("/live_arb_lp_trades")
-@require_auth
-@require_role(ADMIN)
-def live_arb_lp_trades():
-    date_str = request.args.get("date")
-    trade_date = date.fromisoformat(date_str) if date_str else datetime.now(live_arb.TW_TZ).date()
-    return jsonify({"trades": db_live_arb_lp.list_trades_for_date(trade_date)})
 
 
 @app.route("/read_warrant", methods=["POST"])
@@ -1026,7 +738,6 @@ def read_tw_option():
 
 @app.route("/read_us_option", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def read_us_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
@@ -1049,7 +760,6 @@ def read_us_option():
 
 @app.route("/read_us_option_csv", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def read_us_option_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
@@ -1233,7 +943,6 @@ def universe_status():
 
 @app.route("/adr_premium", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def adr_premium():
     data = request.json
     stock_code = data.get("stock_code")
@@ -1247,7 +956,6 @@ def adr_premium():
 
 @app.route("/adr_premium_scenario", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def adr_premium_scenario():
     data = request.json
     stock_code = data.get("stock_code")
@@ -1262,7 +970,6 @@ def adr_premium_scenario():
 
 @app.route("/match_warrant_us_option", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def match_warrant_us_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
@@ -1289,7 +996,6 @@ def match_warrant_us_option():
 
 @app.route("/match_warrant_us_option_csv", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def match_warrant_us_option_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
@@ -1320,7 +1026,6 @@ def match_warrant_us_option_csv():
 
 @app.route("/match_tw_us_option", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def match_tw_us_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
@@ -1346,7 +1051,6 @@ def match_tw_us_option():
 
 @app.route("/match_tw_us_option_csv", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def match_tw_us_option_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2303"])
@@ -1376,7 +1080,6 @@ def match_tw_us_option_csv():
 
 @app.route("/match_warrant_tw_option", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def match_warrant_tw_option():
     data = request.json
     stock_codes = data.get("stock_codes", ["2330"])
@@ -1415,7 +1118,6 @@ def match_warrant_tw_option():
 
 @app.route("/match_warrant_tw_option_csv", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def match_warrant_tw_option_csv():
     data = request.json
     stock_codes = data.get("stock_codes", ["2330"])
@@ -1444,26 +1146,8 @@ def match_warrant_tw_option_csv():
     )
 
 
-def _static_arb_params(data):
-    return dict(
-        stock_codes=data.get("stock_codes", ["2330"]),
-        min_volume=int(data.get("min_volume", 0) or 0),
-        min_edge=float(data.get("min_edge", 0) or 0),
-        max_horizon_dte=int(data.get("max_horizon_dte") or 0) or None,
-    )
-
-
-def _static_arb_as_of(stock_codes):
-    return min(
-        (t for t in (warrant_logic.cache_as_of(stock_codes),
-                     options_logic.data_as_of(stock_codes)) if t),
-        default=None,
-    )
-
-
 @app.route("/statarb_state")
 @require_auth
-@require_role(ADMIN)
 def statarb_state():
     """Arb Finder → StatArb: cached TSMC vol model + simulated paths (built on first call)."""
     try:
@@ -1474,7 +1158,6 @@ def statarb_state():
 
 @app.route("/statarb_update", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def statarb_update():
     """Refetch 2330 prices and rebuild every StatArb chart."""
     try:
@@ -1485,7 +1168,6 @@ def statarb_update():
 
 @app.route("/statarb_scan", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def statarb_scan():
     """Score every 2330 long-warrant / short-option pair against the cached simulated paths."""
     try:
@@ -1499,7 +1181,6 @@ def statarb_scan():
 
 @app.route("/statarb_lp_scan", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def statarb_lp_scan():
     """Run the StatArb whole-lot MILP at every 2330 option expiry against the cached simulated paths."""
     try:
@@ -1513,66 +1194,6 @@ def statarb_lp_scan():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
-
-
-@app.route("/match_static_arb", methods=["POST"])
-@require_auth
-@require_role(ADMIN)
-def match_static_arb():
-    data = request.json
-    params = _static_arb_params(data)
-    stock_codes = params["stock_codes"]
-    try:
-        df = static_arb.match_static_arb(**params)
-        # to_json would stringify the nested per-leg dicts; to_dict keeps them.
-        rows = df.to_dict(orient="records") if not df.empty else []
-        applog.set_rows(len(rows))
-        as_of = _static_arb_as_of(stock_codes)
-        return jsonify({
-            "rows": rows, "count": len(rows),
-            "dropped_no_depth": int(df.attrs.get("dropped_no_depth", 0)),
-            "as_of": datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None,
-        })
-    except arb_logic.NoMatchesError as e:
-        # Clean scan that found nothing. The message carries why (including any
-        # legs dropped for missing resting size), which is the whole difference
-        # between "chain is arb-free" and "TAIFEX MIS was down".
-        applog.set_rows(0)
-        as_of = _static_arb_as_of(stock_codes)
-        return jsonify({
-            "rows": [], "count": 0, "note": str(e),
-            "as_of": datetime.fromtimestamp(as_of, tz=timezone.utc).isoformat() if as_of else None,
-        })
-    except Exception as e:
-        applog.log("ARB", f"match_static_arb failed: {e}\n{traceback.format_exc()}",
-                   level="ERROR")
-        return jsonify({"rows": [], "count": 0, "error": str(e)})
-
-
-@app.route("/match_static_arb_csv", methods=["POST"])
-@require_auth
-@require_role(ADMIN)
-def match_static_arb_csv():
-    """One CSV row per LEG, keyed by structure_id — a structure has a variable
-    number of legs, so it cannot be flattened into fixed columns."""
-    try:
-        df = static_arb.match_static_arb(**_static_arb_params(request.json))
-    except Exception:
-        df = pd.DataFrame()
-    flat = []
-    for i, r in enumerate(df.to_dict(orient="records") if not df.empty else []):
-        head = {k: v for k, v in r.items() if k != "legs"}
-        for leg in r["legs"]:
-            flat.append({"structure_id": i, **head,
-                         **{f"leg_{k}": v for k, v in leg.items()}})
-    output = io.StringIO()
-    pd.DataFrame(flat).to_csv(output, index=False)
-    output.seek(0)
-    return Response(
-        output.getvalue(),
-        mimetype="text/csv",
-        headers={"Content-Disposition": "attachment; filename=static_arb.csv"},
-    )
 
 
 # SOURCE_COMMIT is Coolify's build-time equivalent of Render's RENDER_GIT_COMMIT;
@@ -1645,7 +1266,6 @@ def sync_us_option():
 
 @app.route("/sync_universe", methods=["POST"])
 @require_auth
-@require_role(ADMIN)
 def sync_universe():
     return jsonify(scheduler.force_refresh("universe"))
 

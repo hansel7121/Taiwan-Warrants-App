@@ -1,9 +1,8 @@
 <!doctype html>
 <!--
-  Single-page shell for the app's four tabs (Warrant Scanner, IV Surface,
-  Options Scanner, Arb Finder) plus the user Dashboard and admin Portfolio tabs.
-  Server-side Jinja (roles.template_flags/auth.public_config) decides which
-  markup and script tags actually render for the current mode.
+  Single-page shell for the app's tabs (Options Scanner, Warrant Scanner,
+  IV Surface, Arb Finder, Portfolio, Live Warrant, Live Options, EOD Replay).
+  Server-side Jinja only injects auth config (auth.public_config).
 -->
 <html lang="en">
   <head>
@@ -15,12 +14,6 @@
   </head>
   <body>
     <button id="logoutBtn" onclick="_logout()" style="display:none;position:fixed;top:8px;right:12px;z-index:9999;padding:5px 10px;font-size:11px;font-family:inherit;background:var(--surface,#1b2127);color:var(--muted,#7b8794);border:1px solid var(--border,#222a31);border-radius:0;cursor:pointer">Logout</button>
-    <!-- Dev-only mode switch: writes the app_mode cookie and reloads, so the
-         SERVER re-renders without the admin markup/scripts. Not a security
-         gate — see services/roles.py. -->
-    <button id="modeBtn" onclick="toggleMode()"
-            title="Switch between admin (all features) and user (scanner product) mode"
-            style="position:fixed;top:36px;right:12px;z-index:9999;padding:5px 10px;font-size:11px;font-family:inherit;background:var(--surface,#1b2127);color:{% if show_admin %}var(--accent){% else %}var(--muted){% endif %};border:1px solid var(--border,#222a31);border-radius:0;cursor:pointer">{% if show_admin %}Admin mode{% else %}User mode{% endif %}</button>
     <header>
       <!-- Wordmark matches the marketing site: second half carries the accent. -->
       <h1>Wither<span>mount</span></h1>
@@ -28,156 +21,31 @@
     </header>
 
 
-    <!-- Home is the landing tab in admin mode; user mode starts on Options. -->
     <div class="tab-bar">
-      {% if show_admin %}
-      <button class="active" onclick="switchTab('home', this); loadHomeOnce()">Home</button>
-      {% endif %}
-      {% if not show_admin %}
-      <button class="active" onclick="switchTab('dashboard', this); loadDashboardOnce()">Dashboard</button>
-      {% endif %}
-      <button onclick="switchTab('options', this)">Options Scanner</button>
+      <button class="active" onclick="switchTab('options', this)">Options Scanner</button>
       <button onclick="switchTab('scanner', this)">Warrant Scanner</button>
       <button onclick="switchTab('ivsurface', this)">IV Surface</button>
-      {% if show_admin %}
       <button onclick="switchTab('arb', this)">Arb Finder</button>
       <button onclick="switchTab('portfolio', this); loadPortfolioOnce()">Portfolio</button>
       <button onclick="switchTab('live', this); loadLiveWarrantOnce()">Live Warrant</button>
       <button onclick="switchTab('live-options', this); loadLiveOptionsOnce()">Live Options</button>
-      <button onclick="switchTab('live-arb', this); loadLiveArbOnce()">Live Arb</button>
-      {% endif %}
+      <button onclick="switchTab('eod', this); loadEodReplayOnce()">EOD Replay</button>
     </div>
 
-    {% if show_admin %}
-    <!-- HOME TAB -->
-    <div id="tab-home" class="tab-content active">
-      <div class="home-dash">
-        <div id="home-scan" class="home-scanline"></div>
-
-        <div id="home-kpis" class="home-kpis"></div>
-
-        <div class="home-grid">
-          <div class="home-col-main">
-            <section class="home-sec">
-              <div class="home-shead">
-                <h2>Open positions</h2><span class="home-sub">— by expiry, soonest first</span>
-                <div class="home-sp"></div>
-                <span class="home-link" onclick="goTab('portfolio')">Portfolio →</span>
-              </div>
-              <div class="home-card home-card-flush"><div id="home-positions"></div></div>
-            </section>
-
-            <section class="home-sec">
-              <div class="home-shead"><h2>Realized P&amp;L</h2><span class="home-sub">— cumulative</span></div>
-              <div class="home-card">
-                <div id="home-pnlChart" style="width:100%;height:210px"></div>
-                <div id="home-pnlEmpty" class="home-empty" style="display:none">No realized trades yet.</div>
-                <div id="home-pnl-foot" class="home-cfoot"></div>
-              </div>
-            </section>
-          </div>
-
-          <div class="home-col-side">
-            <section class="home-sec">
-              <div class="home-shead">
-                <h2>Live arb suggestions</h2>
-                <div class="home-sp"></div>
-                <span class="home-link" onclick="goSuggestions()">All →</span>
-              </div>
-              <div id="home-suggestions" class="home-sugg"></div>
-            </section>
-
-            <section class="home-sec">
-              <div class="home-shead"><h2>Needs attention</h2></div>
-              <div id="home-attention" class="home-att"></div>
-            </section>
-          </div>
-        </div>
-
-        <section class="home-sec home-sec-wide">
-          <div class="home-shead">
-            <h2>Direct Match</h2><span class="home-sub">— scan warrants vs same-underlying options, run right here</span>
-            <div class="home-sp"></div>
-            <span id="home-arb-status" class="home-sub"></span>
-          </div>
-          <div class="home-card">
-            <div class="home-dm-controls">
-              <div id="home-stocks" class="home-stocks">
-                <span class="home-schip on" data-code="2330" onclick="toggleHomeStock(this)">2330 台積電</span>
-                <span class="home-schip on" data-code="2317" onclick="toggleHomeStock(this)">2317 鴻海</span>
-                <span class="home-schip on" data-code="2454" onclick="toggleHomeStock(this)">2454 聯發科</span>
-                <span class="home-schip on" data-code="3231" onclick="toggleHomeStock(this)">3231 緯創</span>
-                <span class="home-schip" data-code="2303" onclick="toggleHomeStock(this)">2303 聯電</span>
-                <span class="home-schip" data-code="2603" onclick="toggleHomeStock(this)">2603 長榮</span>
-                <span class="home-schip" data-code="2881" onclick="toggleHomeStock(this)">2881 富邦金</span>
-                <span class="home-schip" data-code="2882" onclick="toggleHomeStock(this)">2882 國泰金</span>
-              </div>
-              <div class="home-dm-thresh">
-                <label>Max strike gap <input id="home-arb-strike" type="number" value="3" step="0.5" min="0" /> %</label>
-                <label>Max DTE gap <input id="home-arb-dte" type="number" value="5" min="0" /> d</label>
-                <button id="home-scan-btn" class="home-btn" onclick="runHomeScan()">Scan now</button>
-              </div>
-            </div>
-            <div id="home-arb-results" class="home-arb-results"><p class="home-empty">Pick stocks and hit Scan to find direct-match arbs — results appear here.</p></div>
-          </div>
-        </section>
-      </div>
-    </div>
-    {% endif %}
-
-    {% if not show_admin %}
-    <!-- DASHBOARD TAB (user mode only; admin's landing screen is Home) -->
-    <div id="tab-dashboard" class="tab-content active">
-      <main>
-        <div class="dash-head">
-          <span class="dash-title">Dashboard</span>
-          <button class="primary" onclick="openNewPosition()">+ New Position</button>
-          <button class="sm" onclick="loadDashboard()">Refresh</button>
-          <span id="dash-status" class="dash-status"></span>
-        </div>
-
-        <div id="dash-kpis" class="dash-kpis"></div>
-
-        <div class="dash-grid">
-          <div class="dash-col-main">
-            <section class="dash-sec">
-              <h3>Open positions</h3>
-              <p class="dash-hint">Click a row for the payoff curve at different expiries.</p>
-              <div id="dash-positions"></div>
-            </section>
-          </div>
-          <div class="dash-col-side">
-            <section class="dash-sec">
-              <h3>Watchlist</h3>
-              <div id="dash-watchlist"></div>
-            </section>
-            <section class="dash-sec">
-              <h3>Alerts</h3>
-              <div id="dash-alerts"></div>
-            </section>
-          </div>
-        </div>
-      </main>
-    </div>
-    {% endif %}
 
     <!-- OPTIONS TAB -->
-    <div id="tab-options" class="tab-content">
+    <div id="tab-options" class="tab-content active">
       <main>
-        <!-- US ADR chain is admin-only; user mode is Taiwan instruments only. -->
-        {% if show_admin %}
         <div style="display:flex;gap:6px;border-bottom:1px solid var(--border);margin-bottom:14px">
           <button id="optmkt-btn-tw" class="pfsub-btn active" onclick="setOptMarket('tw', this)">Taiwan options</button>
           <button id="optmkt-btn-us" class="pfsub-btn" onclick="setOptMarket('us', this)">American options (US ADR)</button>
         </div>
-        {% endif %}
         <div class="filters">
           <div class="stock-select">
             <span>Product</span>
             <!-- Taiwan-listed TAIFEX options -->
             <select id="optionStockSelect" multiple size="6">
             </select>
-            {% if show_admin %}
             <div class="btn-row" id="twProductBtnRow">
               <button class="sm" onclick="toggleAddProduct('tw_option')">+ Add Product</button>
               <button class="sm" onclick="removeSelectedProduct('tw_option')">Remove Selected</button>
@@ -190,8 +58,6 @@
               <input type="text" id="newTwName" placeholder="Name (optional)" />
               <button class="sm" onclick="addTwOptionProduct()">Confirm</button>
             </div>
-            {% endif %}
-            {% if show_admin %}
             <!-- US ADR (American) options — hidden until toggled -->
             <select id="optionUsSelect" multiple size="6" style="display:none">
             </select>
@@ -207,7 +73,6 @@
               <input type="text" id="newUsName" placeholder="Name (optional)" />
               <button class="sm" onclick="addUsOptionProduct()">Confirm</button>
             </div>
-            {% endif %}
           </div>
           <label>Option Type
             <select id="optionsType">
@@ -249,18 +114,14 @@
             </select>
             <div class="btn-row">
               <button class="sm" onclick="toggleSelectAll()">Select All</button>
-              {% if show_admin %}
               <button class="sm" onclick="toggleAddProduct('warrant')">+ Add Stock</button>
               <button class="sm" onclick="removeSelectedProduct('warrant')">Remove Selected</button>
-              {% endif %}
             </div>
-            {% if show_admin %}
             <div id="addForm_warrant" class="add-product-form" style="display:none">
               <input type="text" id="newWarrantCode" placeholder="Code e.g. 2412" oninput="lookupWarrantName()" />
               <span id="warrantLookupResult" style="font-size:12px;color:var(--muted)"></span>
               <button class="sm" onclick="addWarrantStock()">Confirm</button>
             </div>
-            {% endif %}
           </div>
 
           <label>Option Type
@@ -278,7 +139,7 @@
           <div class="action-group compact">
             <button class="primary" id="readWarrantBtn" onclick="readWarrant()">Read Warrants</button>
             <button class="sm" id="refreshWarrantsBtn" onclick="syncWarrant()">Sync now</button>
-            {% if show_admin %}<button class="sm" id="syncUniverseBtn" onclick="syncUniverse()" title="Re-scrape all TWSE/TPEx listed securities (~3-5 min) — updates which warrants exist and their listing dates. Separate from the price sync above.">Sync Universe</button>{% endif %}
+            <button class="sm" id="syncUniverseBtn" onclick="syncUniverse()" title="Re-scrape all TWSE/TPEx listed securities (~3-5 min) — updates which warrants exist and their listing dates. Separate from the price sync above.">Sync Universe</button>
             <button class="success" id="downloadBtn" onclick="downloadCSV()" style="display:none">
               Download CSV
             </button>
@@ -362,7 +223,6 @@
       </main>
     </div>
 
-    {% if show_admin %}
     <!-- ARB FINDER TAB -->
     <div id="tab-arb" class="tab-content">
       <main>
@@ -371,7 +231,6 @@
           <button id="arb-mode-direct" class="pfsub-btn active" onclick="setArbMode('direct')">Direct Match</button>
           <button id="arb-mode-us" class="pfsub-btn" onclick="setArbMode('us')">US Option Match</button>
           <button id="arb-mode-twus" class="pfsub-btn" onclick="setArbMode('twus')">TW Opt / US Opt</button>
-          <button id="arb-mode-experiment" class="pfsub-btn" onclick="setArbMode('experiment')">Experiment</button>
           <button id="arb-mode-statarb" class="pfsub-btn" onclick="setArbMode('statarb')">StatArb</button>
         </div>
 
@@ -548,55 +407,6 @@
 
           <div id="twus-status"></div>
           <div id="twus-tableContainer"></div>
-        </div>
-
-        <!-- ── Experiment sub-tab: static-arbitrage LP ── -->
-        <div id="arb-sub-experiment" style="display:none">
-          <div class="filters" style="flex-direction:column;gap:14px;align-items:flex-start">
-            <div style="display:flex;align-items:center;gap:10px">
-              <span style="font-size:14px;font-weight:600;color:var(--text)">Experiment — static-arbitrage LP over the whole TW chain</span>
-              <button onclick="openStaticArbInfo('experiment')" title="How does the static-arbitrage LP work?" style="background:none;border:1.5px solid var(--border);border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;font-weight:700;color:var(--muted);font-family:inherit;padding:0;flex-shrink:0">ⓘ</button>
-            </div>
-            <div style="font-size:11px;color:var(--call);line-height:1.5;max-width:760px">
-              ⚠ No dividend model anywhere in this app. A cash dividend between the horizon and a long leg's expiry lowers that leg's floor,
-              so a structure spanning an ex-div date can be certified as riskless when it is not. Taiwan's ex-div season runs Jun–Sep — treat rows crossing one as unverified.
-            </div>
-
-            <div style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
-              <div class="stock-select">
-                <span>Stock (multi-select)</span>
-                <select id="expStockSelect" multiple size="6">
-                </select>
-              </div>
-              <label>Min Option Volume
-                <input type="number" id="expMinVolume" value="0" min="0" title="Drop options with volume below this before the LP sees them"/>
-              </label>
-              <label>Min Edge (NT$)
-                <input type="number" id="expMinEdge" value="0" min="0" step="100" title="Only emit structures whose guaranteed profit exceeds this. Fees and tax are NOT modelled — raise this to cover them."/>
-              </label>
-              <label>Max Horizon DTE
-                <input type="number" id="expMaxHorizon" value="0" min="0" title="0 = every option expiry is tried as a horizon. Set a cap to skip far-dated horizons."/>
-              </label>
-              <label>Max Legs
-                <input type="number" id="expMaxLegs" value="0" min="0" title="0 = no filter. Hides structures with more legs than this (display filter only — the LP is unrestricted)."/>
-              </label>
-              <div class="action-group compact">
-                <button class="primary" id="expFindBtn" onclick="runStaticArb('experiment')">Run LP</button>
-                <button class="success" id="expDownloadBtn" onclick="downloadStaticArbCSV('experiment')" style="display:none">Download CSV</button>
-              </div>
-            </div>
-          </div>
-
-          <div id="arb-sort-experiment" class="sort-btns">
-            <button onclick="sortStaticArbBy('experiment', 'guaranteed_profit', false)">Guaranteed ↓</button>
-            <button onclick="sortStaticArbBy('experiment', 'return_pct', false)">Return % ↓</button>
-            <button onclick="sortStaticArbBy('experiment', 'net_credit', false)">Net Credit ↓</button>
-            <button onclick="sortStaticArbBy('experiment', 'n_legs', true)">Legs ↑</button>
-            <button onclick="sortStaticArbBy('experiment', 'horizon_dte', true)">Horizon ↑</button>
-          </div>
-
-          <div id="exp-status"></div>
-          <div id="exp-tableContainer"></div>
         </div>
 
         <!-- ── StatArb sub-tab (logic/statarb_logic.py, static/js/statarb.js) ── -->
@@ -817,184 +627,16 @@
       </main>
     </div>
 
-    <!-- LIVE ARB TAB -->
-    <div id="tab-live-arb" class="tab-content">
+    <!-- EOD REPLAY TAB -->
+    <div id="tab-eod" class="tab-content">
       <main>
-        <!-- Sub-tabs: Direct Match | LP -->
-        <div style="display:flex;gap:6px;border-bottom:1px solid var(--border);margin-bottom:16px">
-          <button id="lasub-btn-direct" class="lasub-btn active" onclick="switchLaSub('direct', this)">Direct Match</button>
-          <button id="lasub-btn-lp"     class="lasub-btn"        onclick="switchLaSub('lp', this)">LP</button>
-          <button id="lasub-btn-eod"    class="lasub-btn"        onclick="switchLaSub('eod', this)">EOD Replay</button>
-        </div>
-
-        <div id="lasub-direct" class="lasub-content" style="display:block">
-          <p style="font-size:12px;color:var(--muted);margin:0 0 14px">
-            TSMC (2330) Direct Match — buy warrant / sell option — rerun against live websocket quotes from the Live Warrant and Live Options tabs.
-            Load TSMC on both of those tabs first; this tab only reads what they already have tracked, it never starts a connection itself.
-          </p>
-
-          <div style="display:flex;align-items:center;gap:10px;margin:0 0 14px">
-            <button class="sm" id="la-start-btn" onclick="startLiveArb()"
-                    title="Start scanning. Reads the Live Warrant / Live Options tabs' current tracked lists on every changed tick.">
-              Start
-            </button>
-            <button class="sm" id="la-stop-btn" onclick="stopLiveArb()"
-                    title="Kill switch: stop scanning immediately. Does not touch the Live Warrant or Live Options sessions.">
-              Stop
-            </button>
-            <div id="la-status" style="font-size:12px;color:var(--muted)"></div>
-          </div>
-
-          <div style="display:flex;align-items:center;gap:10px;margin:0 0 14px">
-            <button class="sm" id="la-record-btn" onclick="_laToggleRecord()"
-                    title="Record every TSMC warrant/option tick to a local CSV. Shared with the LP subtab below — one recording either way.">
-              Record
-            </button>
-            <button class="sm" onclick="_laDownloadRecordCSV()"
-                    title="Download whatever has been recorded so far today.">
-              Download CSV
-            </button>
-            <button class="sm" id="la-record-reset-btn" onclick="_laResetRecordCSV()"
-                    title="Delete today's recorded ticks entirely and start over. Cannot be undone — this is also the file the 13:40 EOD Replay runs on.">
-              Reset CSV
-            </button>
-            <div id="la-record-status" style="font-size:12px;color:var(--muted)">not recording</div>
-          </div>
-
-          <div style="display:flex;align-items:center;gap:24px;margin:0 0 14px">
-            <div><span style="font-size:12px;color:var(--muted)">Active arbs</span>
-              <div id="la-active-count" style="font-size:22px;font-weight:600">0</div></div>
-            <div><span style="font-size:12px;color:var(--muted)">Logged today</span>
-              <div id="la-logged-count" style="font-size:22px;font-weight:600">0</div></div>
-          </div>
-
-          <div id="la-last-tick" style="font-size:12px;color:var(--muted);margin:0 0 14px"
-               title="The most recent live websocket tick from the Live Warrant/Live Options tabs' tracked TSMC codes, and whether this scan's results already reflect it — see logic/live_arb_logic.py's latest_tick().">
-          </div>
-
-          <div id="la-active-view">
-            <table>
-              <thead>
-                <tr>
-                  <th>Warrant</th><th>Type</th><th>Option</th>
-                  <th title="Warrant strike vs option strike">Strikes (W / O)</th>
-                  <th title="Days to expiry, warrant / option">DTE (W / O)</th>
-                  <th>Warrant Ask</th><th>Option Bid</th>
-                  <th>Price Diff</th><th>Price Diff %</th>
-                  <th title="True (riskless) arb: the vertical pays &ge; 0 at every spot">Riskless</th>
-                </tr>
-              </thead>
-              <tbody id="la-active-tbody"></tbody>
-            </table>
-          </div>
-          <p id="la-active-empty" style="display:none;padding:16px;color:var(--muted)">
-            No active arb right now.
-          </p>
-
-          <h3 style="font-size:13px;font-weight:600;margin:26px 0 10px">Logged Trades — today</h3>
-          <div id="la-log-view">
-            <table>
-              <thead>
-                <tr>
-                  <th>Time</th><th>Warrant</th><th>Option</th>
-                  <th>Warrant Ask</th><th>Option Bid</th>
-                  <th>Price Diff</th><th>Price Diff %</th>
-                </tr>
-              </thead>
-              <tbody id="la-log-tbody"></tbody>
-            </table>
-          </div>
-          <p id="la-log-empty" style="display:none;padding:16px;color:var(--muted)">
-            Nothing logged yet today.
-          </p>
-        </div>
-
-        <div id="lasub-lp" class="lasub-content" style="display:none">
-          <p style="font-size:12px;color:var(--muted);margin:0 0 14px">
-            TSMC (2330) static-arb LP — a multi-leg structure per option expiry (horizon), solved against the same live quotes as Direct Match.
-            A full scan (~90ms measured) can't keep pace with individual ticks the way Direct Match's ~8ms scan does, so this subtab updates on its
-            own self-paced loop rather than every tick. Requires the Rust engine — there is no Python fallback for this kernel (see CLAUDE.md).
-          </p>
-
-          <div style="display:flex;align-items:center;gap:10px;margin:0 0 14px">
-            <button class="sm" id="lalp-start-btn" onclick="startLiveArbLp()"
-                    title="Start scanning. Independent of Direct Match's own Start/Stop and of the Live Warrant/Live Options sessions.">
-              Start
-            </button>
-            <button class="sm" id="lalp-stop-btn" onclick="stopLiveArbLp()"
-                    title="Kill switch: stop scanning immediately, independent of Direct Match.">
-              Stop
-            </button>
-            <div id="lalp-status" style="font-size:12px;color:var(--muted)"></div>
-          </div>
-
-          <div style="display:flex;align-items:center;gap:10px;margin:0 0 14px">
-            <button class="sm" id="lalp-record-btn" onclick="_lalpToggleRecord()"
-                    title="Record every TSMC warrant/option tick to a local CSV. Shared with Direct Match above — one recording either way.">
-              Record
-            </button>
-            <button class="sm" onclick="_lalpDownloadRecordCSV()"
-                    title="Download whatever has been recorded so far today.">
-              Download CSV
-            </button>
-            <button class="sm" id="lalp-record-reset-btn" onclick="_lalpResetRecordCSV()"
-                    title="Delete today's recorded ticks entirely and start over. Cannot be undone — this is also the file the 13:40 EOD Replay runs on.">
-              Reset CSV
-            </button>
-            <div id="lalp-record-status" style="font-size:12px;color:var(--muted)">not recording</div>
-          </div>
-
-          <div style="display:flex;align-items:center;gap:24px;margin:0 0 14px">
-            <div><span style="font-size:12px;color:var(--muted)">Active structures</span>
-              <div id="lalp-active-count" style="font-size:22px;font-weight:600">0</div></div>
-            <div><span style="font-size:12px;color:var(--muted)">Logged today</span>
-              <div id="lalp-logged-count" style="font-size:22px;font-weight:600">0</div></div>
-          </div>
-
-          <div id="lalp-last-tick" style="font-size:12px;color:var(--muted);margin:0 0 14px"
-               title="The most recent live websocket tick from the Live Warrant/Live Options tabs' tracked TSMC codes, and whether this scan's results already reflect it — see logic/live_arb_logic.py's latest_tick().">
-          </div>
-
-          <div id="lalp-active-view">
-            <table>
-              <thead>
-                <tr>
-                  <th>Horizon</th><th>Structure</th>
-                  <th style="text-align:right">Net credit</th><th style="text-align:right">Guaranteed</th>
-                  <th style="text-align:right">Return</th>
-                </tr>
-              </thead>
-              <tbody id="lalp-active-tbody"></tbody>
-            </table>
-          </div>
-          <p id="lalp-active-empty" style="display:none;padding:16px;color:var(--muted)">
-            No active structure right now.
-          </p>
-
-          <h3 style="font-size:13px;font-weight:600;margin:26px 0 10px">Logged Trades — today</h3>
-          <div id="lalp-log-view">
-            <table>
-              <thead>
-                <tr>
-                  <th>Time</th><th>Horizon</th><th>Structure</th>
-                  <th style="text-align:right">Net credit</th><th style="text-align:right">Guaranteed</th>
-                  <th style="text-align:right">Return</th>
-                </tr>
-              </thead>
-              <tbody id="lalp-log-tbody"></tbody>
-            </table>
-          </div>
-          <p id="lalp-log-empty" style="display:none;padding:16px;color:var(--muted)">
-            Nothing logged yet today.
-          </p>
-        </div>
-
-        <div id="lasub-eod" class="lasub-content" style="display:none">
+        <div id="eod-content">
           <p style="font-size:12px;color:var(--muted);margin:0 0 14px">
             Every trading day the server records every TSMC (2330) warrant and option tick from 09:00 to 13:30, then at 13:40 replays the day
             through Direct Match and the LP arb finder (Python implementations) on every change. Each arb is logged as an episode: when it
             appeared, when it disappeared, how long it lasted, and its edge at open and at peak. An LP episode means "some riskless structure
-            existed at this expiry"; the legs shown are the structure at open (click a row for the peak structure).
+            existed at this expiry"; the legs shown are the structure at open (click a row for the peak structure). The StatArb table ranks
+            long-warrant / short-option pairs by the daily vol 2330 would need to end in the pair's loss region at the option's expiry.
           </p>
 
           <div style="display:flex;align-items:center;gap:10px;margin:0 0 14px;flex-wrap:wrap">
@@ -1020,6 +662,8 @@
               <div id="eod-direct-count" style="font-size:22px;font-weight:600">—</div></div>
             <div><span style="font-size:12px;color:var(--muted)">LP episodes</span>
               <div id="eod-lp-count" style="font-size:22px;font-weight:600">—</div></div>
+            <div><span style="font-size:12px;color:var(--muted)">StatArb pairs</span>
+              <div id="eod-statarb-count" style="font-size:22px;font-weight:600">—</div></div>
             <div><span style="font-size:12px;color:var(--muted)">Ticks replayed</span>
               <div id="eod-tick-count" style="font-size:22px;font-weight:600">—</div></div>
           </div>
@@ -1057,6 +701,33 @@
             </table>
           </div>
           <p id="eod-lp-empty" style="display:none;padding:16px;color:var(--muted)">No LP arb this day.</p>
+
+          <h3 style="font-size:13px;font-weight:600;margin:26px 0 4px">StatArb — top 10 by required daily vol</h3>
+          <p style="font-size:12px;color:var(--muted);margin:0 0 10px">
+            Every changed pair is rescored against the latest 2330 spot with the StatArb pair scanner's rules (net credit, whole-lot warrant leg,
+            warrant held at intrinsic at option expiry). Required vol = |ln(nearest loss edge / spot)| / √(trading days to option expiry):
+            the daily vol at which ending in the loss region is a one-sigma move. Each pair shows its peak of the day. Riskless pairs (no loss
+            region) are left out — they are arbs, not vol bets.
+          </p>
+          <div style="overflow-x:auto">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th><th>Peak at</th><th>Warrant</th><th>Option</th><th>Type</th>
+                  <th title="Warrant strike vs option strike">Strikes (W / O)</th>
+                  <th title="Calendar days to expiry, warrant / option; trading days to option expiry">DTE (W / O / td)</th>
+                  <th style="text-align:right">W Ask (size)</th><th style="text-align:right">O Bid (size)</th>
+                  <th style="text-align:right" title="Warrant board lots (張) per option contract, rounded down or up">Lots</th>
+                  <th style="text-align:right">Credit</th><th style="text-align:right">Spot</th>
+                  <th title="Spot ranges where the at-expiry PnL is negative">Loss region</th>
+                  <th style="text-align:right" title="Spot move to the nearest loss-region edge">Move to loss</th>
+                  <th style="text-align:right" title="Daily vol making that move a one-sigma move by option expiry">Req. daily vol</th>
+                </tr>
+              </thead>
+              <tbody id="eod-statarb-tbody"></tbody>
+            </table>
+          </div>
+          <p id="eod-statarb-empty" style="display:none;padding:16px;color:var(--muted)">No StatArb pairs this day.</p>
         </div>
       </main>
     </div>
@@ -1340,101 +1011,28 @@
         <div id="static-arb-modal-body"></div>
       </div>
     </div>
-    {% endif %}
-
-    <!-- New Position modal — any number of legs (warrant / TW option / shares) -->
-    <div id="newPositionModal" onclick="if(event.target===this)closeNewPosition()" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
-      <div style="max-width:960px;margin:40px auto;background:var(--panel);border:1px solid var(--border);border-radius:0;padding:26px;position:relative">
-        <button onclick="closeNewPosition()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:0;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
-        <h2 style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px">New position</h2>
-        <p class="dash-hint">Quantity is board lots (張) for warrants, contracts for options, shares for the underlying. Entry price is per warrant unit / per option point / per share. Warrants are long-only.</p>
-        <div class="np-meta">
-          <label>Name <input id="np-name" type="text" placeholder="optional" /></label>
-          <label>Underlying <input id="np-underlying" type="text" placeholder="e.g. 2330" /></label>
-        </div>
-        <div id="np-legs" class="np-legs"></div>
-        <div class="np-actions">
-          <button class="sm" onclick="addLegRow()">+ Add leg</button>
-          <button class="primary" onclick="submitPosition()">Save position</button>
-          <span id="np-error" class="np-error"></span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Alert threshold modal -->
-    <div id="alertModal" onclick="if(event.target===this)closeAlertForm()" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
-      <div style="max-width:460px;margin:80px auto;background:var(--panel);border:1px solid var(--border);border-radius:0;padding:26px;position:relative">
-        <button onclick="closeAlertForm()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:0;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
-        <h2 style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px">New alert</h2>
-        <p class="dash-hint">Alerts are checked when the dashboard loads. IV is entered in percent.</p>
-        <input type="hidden" id="alert-kind" /><input type="hidden" id="alert-code" /><input type="hidden" id="alert-underlying" />
-        <div class="np-meta">
-          <label>Instrument <b id="alert-target" style="color:var(--text)"></b></label>
-          <label>Metric
-            <select id="alert-metric">
-              <option value="bid">bid</option>
-              <option value="ask">ask</option>
-              <option value="iv">IV</option>
-              <option value="underlying">underlying price</option>
-            </select>
-          </label>
-          <label>Direction
-            <select id="alert-direction">
-              <option value="above">at or above</option>
-              <option value="below">at or below</option>
-            </select>
-          </label>
-          <label>Threshold <input id="alert-threshold" type="number" step="any" /></label>
-        </div>
-        <div class="np-actions">
-          <button class="primary" onclick="submitAlert()">Save alert</button>
-          <span id="alert-error" class="np-error"></span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Position payoff modal -->
-    <div id="payoffModal" onclick="if(event.target===this)closePayoffModal()" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:1000;overflow-y:auto">
-      <div style="max-width:900px;margin:40px auto;background:var(--panel);border:1px solid var(--border);border-radius:0;padding:26px;position:relative">
-        <button onclick="closePayoffModal()" style="position:absolute;top:16px;right:16px;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:0;padding:4px 10px;font-size:18px;cursor:pointer;font-family:inherit">✕</button>
-        <h2 id="payoff-title" style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px"></h2>
-        <div class="dash-slider">
-          <label>Evaluate at <b id="payoff-dte-label"></b></label>
-          <input id="payoff-dte" type="range" min="0" max="365" value="0" oninput="onPayoffSlider()" />
-        </div>
-        <div id="payoff-chart" style="width:100%;height:380px"></div>
-        <div id="payoff-legs"></div>
-      </div>
-    </div>
 
     <!-- Server-injected config (Jinja); the static JS reads these off window. -->
     <script>
       window.SUPABASE_URL = "{{ supabase_url }}";
       window.SUPABASE_ANON_KEY = "{{ supabase_anon_key }}";
       window.LOCAL_MODE = {{ 'true' if local_mode else 'false' }};
-      window.APP_MODE = "{{ app_mode }}";
     </script>
-    <!-- Load order matters: features -> bs -> common -> scanners -> dashboard,
-         then the admin-only bundle (quant -> arb -> portfolio -> home). _boot()
+    <!-- Load order matters: bs -> common -> scanners -> watchlist, then the
+         rest (quant -> arb -> portfolio -> live tabs). _boot()
          lives at the end of common.js and runs on DOMContentLoaded, after every
          file has parsed. -->
-    <script src="{{ url_for('static', filename='js/features.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/bs.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/common.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/scanners.js', v=ASSET_VERSION) }}"></script>
-    <script src="{{ url_for('static', filename='js/dashboard.js', v=ASSET_VERSION) }}"></script>
-    {% if show_admin %}
+    <script src="{{ url_for('static', filename='js/watchlist.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/quant.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/arb.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/static_arb.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/statarb.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/portfolio.js', v=ASSET_VERSION) }}"></script>
-    <script src="{{ url_for('static', filename='js/home.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/live_warrant.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/live_options.js', v=ASSET_VERSION) }}"></script>
-    <script src="{{ url_for('static', filename='js/live_arb.js', v=ASSET_VERSION) }}"></script>
-    <script src="{{ url_for('static', filename='js/live_arb_lp.js', v=ASSET_VERSION) }}"></script>
     <script src="{{ url_for('static', filename='js/live_arb_eod.js', v=ASSET_VERSION) }}"></script>
-    {% endif %}
   </body>
 </html>

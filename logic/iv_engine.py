@@ -209,7 +209,7 @@ else:  # pragma: no cover - exercised under RUST_ENGINE=python
     direct_pairs = arb_kernels_py.direct_pairs
 
 
-# ── Live Arb LP subtab kernel ───────────────────────────────────────────────
+# ── Static-arb LP horizon kernel (logic/live_arb_lp_logic.py) ──────────────
 # Deliberately NO Python fallback (contrast with every other name in this
 # module) — see rust/warrants_core/src/static_arb.rs's module docstring.
 # logic/static_arb.py's scipy/HiGHS path is ~20-60x too slow to serve a live

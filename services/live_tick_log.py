@@ -1,9 +1,8 @@
-"""Tick-by-tick CSV recorder for TSMC's Live Arb universe: appends one row per
+"""Tick-by-tick CSV recorder for TSMC's warrant/option universe: appends one row per
 websocket book tick (plus REST-seed and session-snapshot rows) from
 services/live_warrant.py and services/live_options.py to a daily CSV, and every
 2330 spot book tick to a separate daily spot CSV. Started
-and stopped automatically each trading day by services/scheduler.py (and still
-by the Live Arb tab's Record/Stop buttons); the finished tick file is replayed at
+and stopped automatically each trading day by services/scheduler.py; the finished tick file is replayed at
 end of day by scripts/eod_arb_replay.py, then gzipped and kept until prune().
 Recording adds no work per tick beyond an `is_active()` check until turned on.
 """

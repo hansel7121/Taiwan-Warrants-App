@@ -1,14 +1,12 @@
-"""Pure decision logic for the Live Arb LP subtab: static-arb LP against live
-TSMC websocket quotes. Mirrors logic/static_arb.py's leg-building and
-per-horizon scan shape, but reads the live snapshot's plain dicts (from
-live_warrant.snapshot_for_underlying / live_options.snapshot_for_underlying,
-already shared with the Direct Match subtab) instead of pandas DataFrames,
-and calls the Rust-only rust/warrants_core::solve_static_arb_horizon kernel
-directly rather than scipy/HiGHS.
+"""Static-arb LP over live-book TSMC snapshot rows, used by the EOD replay
+(logic/eod_arb_replay.py) on recorded ticks. Mirrors logic/static_arb.py's
+leg-building and per-horizon scan shape, but reads plain snapshot dicts
+instead of pandas DataFrames; `scan_horizon` solves with the Rust
+solve_static_arb_horizon kernel or (engine="python", what the replay uses)
+logic/static_arb.py's scipy solver.
 
 No Flask, no Supabase, no Fubon SDK, no datetime.now() -- "today" is always
-passed in by the caller (services/live_arb.py), same convention as
-logic/live_arb_logic.py.
+passed in by the caller, same convention as logic/live_arb_logic.py.
 """
 import math
 
@@ -46,10 +44,8 @@ def _build_legs(warrant_rows, option_rows, horizon, today, m=OPT_CONTRACT_SIZE, 
     NOTE on depth units: `best["ask_size"]`/`best["bid_size"]` come straight
     from the Fubon websocket book. Whether that figure is in board lots (張)
     -- what logic/static_arb.py's own `ask_qty`/`bid_size` columns are -- or
-    raw units is unverified for this live path, same open caveat already
-    flagged for the Direct Match subtab (services/live_arb.py's sibling
-    module). Treated as lots here for consistency with the rest of the app
-    until confirmed live.
+    raw units is unverified for this live path. Treated as lots here for
+    consistency with the rest of the app until confirmed live.
     """
     longs, shorts = [], []
 
@@ -177,29 +173,3 @@ def scan_horizon(warrant_rows, option_rows, horizon, today, min_edge=0.0, engine
         return None
     solve = _solve_python if engine == "python" else _solve_rust
     return solve(longs, shorts, horizon, today, min_edge)
-
-
-def scan(warrant_rows, option_rows, today, min_edge=0.0, engine="rust"):
-    """Run the LP for every horizon in the live TSMC option book.
-
-    `engine="rust"` (the live subtab) raises RuntimeError if the Rust engine
-    isn't available; `engine="python"` (the EOD replay) uses
-    logic/static_arb.py's scipy solver and needs no Rust.
-    """
-    if engine != "python" and not iv_engine.RUST_AVAILABLE:
-        raise RuntimeError("Live Arb LP requires the Rust engine, which is not available in this process")
-
-    rows = []
-    for horizon in horizons(option_rows):
-        row = scan_horizon(warrant_rows, option_rows, horizon, today, min_edge, engine)
-        if row is not None:
-            rows.append(row)
-    return rows
-
-
-def dedup_key(row, trade_date):
-    """Deterministic id for a (horizon, leg-set, day) -- logging the same
-    structure again the same day is a no-op. Generalizes
-    logic/live_arb_logic.py's pair-key to a multi-leg tuple."""
-    codes = sorted(l["code"] for l in row["legs"])
-    return f"{row['horizon_dte']}:{'|'.join(codes)}:{trade_date.isoformat()}"

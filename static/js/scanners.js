@@ -267,13 +267,12 @@ function renderTable(rows) {
   const isHit = r => !!query && String(r.warrant_code || "").toUpperCase().includes(query);
   const ordered = query ? [...rows.filter(isHit), ...rows.filter(r => !isHit(r))] : rows;
   const cols = Object.keys(rows[0]);
-  const star = can("watchlist");
   let html = "";
   if (query && !ordered.some(isHit)) {
     html += `<p style="padding:10px 16px;color:var(--muted)">No warrant code matching "${escHtml(query)}" in the current results.</p>`;
   }
   html += "<table><thead><tr>";
-  if (star) html += `<th title="Watchlist">☆</th>`;
+  html += `<th title="Watchlist">☆</th>`;
   cols.forEach((c, i) => {
     const arrow = sortCol === i ? (sortAsc ? " ▲" : " ▼") : "";
     html += `<th onclick="sortBy(${i})">${WARRANT_COL_LABELS[c] || c}${arrow}</th>`;
@@ -282,7 +281,7 @@ function renderTable(rows) {
   ordered.forEach(row => {
     const cls = row.type === "Call" ? "call" : "put";
     html += `<tr${isHit(row) ? ' class="row-pinned"' : ""}>`;
-    if (star) html += starCell("warrant", row.warrant_code, row.underlying_code,
+    html += starCell("warrant", row.warrant_code, row.underlying_code,
       row.warrant_name || row.warrant_code,
       { type: row.type, strike: row.strike, days_to_expiry: row.days_to_expiry,
         exercise_ratio: row.exercise_ratio });
@@ -681,7 +680,7 @@ function renderOptionsTable(rows) {
   }
   const cols = Object.keys(rows[0]);
   // Only Taiwan options are starrable — the US chain is admin-only.
-  const star = can("watchlist") && _optMarket === "tw";
+  const star = _optMarket === "tw";
   let html = "<table><thead><tr>";
   if (star) html += `<th title="Watchlist">☆</th>`;
   cols.forEach((c, i) => {

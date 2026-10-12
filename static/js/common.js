@@ -160,26 +160,20 @@ function switchTab(tab, btn) {
 // different view was active. Runs after auth in _boot.
 
 function restoreView() {
-  // Home is the landing tab in admin mode (rendered active in the HTML); user
-  // mode lands on Options. Only act when a different tab was saved before the
-  // last reload — and only if that tab exists in this mode, so a saved arb tab
-  // doesn't strand a user-mode page on nothing.
+  // Options is the landing tab (rendered active in the HTML). Only act when a
+  // different tab that still exists was saved before the last reload.
   const tab = _readView("ws_activeTab");
-  if (tab && tab !== "home") {
+  if (tab) {
     const btn = document.querySelector(`.tab-bar button[onclick*="switchTab('${tab}'"]`);
     if (btn && document.getElementById("tab-" + tab)) {
       switchTab(tab, btn);
-      if (tab === "portfolio" && typeof loadPortfolioOnce === "function") loadPortfolioOnce();
-      if (tab === "live" && typeof loadLiveWarrantOnce === "function") loadLiveWarrantOnce();
-      if (tab === "dashboard") loadDashboardOnce();
+      if (tab === "portfolio") loadPortfolioOnce();
+      if (tab === "live") loadLiveWarrantOnce();
+      if (tab === "live-options") loadLiveOptionsOnce();
+      if (tab === "eod") loadEodReplayOnce();
     }
   }
-  // Whatever landed active: if it's Home or Dashboard, populate it now.
-  if (document.getElementById("tab-home")?.classList.contains("active")
-      && typeof loadHomeOnce === "function") loadHomeOnce();
-  if (document.getElementById("tab-dashboard")?.classList.contains("active")) loadDashboardOnce();
-  // No Dashboard tab in admin mode — still need watchSet for the scanner stars.
-  if (!document.getElementById("tab-dashboard") && can("watchlist")) loadWatchSetOnce();
+  loadWatchSetOnce();   // the scanners draw watchlist stars from it
   if (_readView("ws_optMarket") === "us") {
     const b = document.getElementById("optmkt-btn-us");
     if (b) setOptMarket("us", b);
@@ -324,12 +318,10 @@ function selectedCodes(el) {
 // derived selects (the two-list intersections) stay correct. Each select's
 // selection is preserved across a refresh.
 async function initProductSelects() {
-  // The US ADR chain is admin-only; user mode is Taiwan instruments only, so
-  // don't even ask for the list.
   const [warrants, twOpts, usOpts] = await Promise.all([
     fetchProductList("/list_warrant_stocks"),
     fetchProductList("/list_tw_option_products"),
-    can("usoptions") ? fetchProductList("/list_us_option_products") : Promise.resolve([]),
+    fetchProductList("/list_us_option_products"),
   ]);
   // Exposed for the add/remove UI to reuse without re-fetching.
   window._productLists = { warrants, twOpts, usOpts };
@@ -357,9 +349,6 @@ async function initProductSelects() {
     { selectedCodes: sel("ivOptProduct", []), selectFirst: true });
   populateProductSelect(document.getElementById("arbStockSelect"), warrantXTw,
     { selectedCodes: sel("arbStockSelect", ["2330"]) });
-  // The static-arb LP scans the warrant∩TW-option overlap.
-  populateProductSelect(document.getElementById("expStockSelect"), warrantXTw,
-    { selectedCodes: sel("expStockSelect", ["2330"]) });
   populateProductSelect(document.getElementById("usStockSelect"), warrantXUs,
     { selectedCodes: sel("usStockSelect", ["2303"]) });
   populateProductSelect(document.getElementById("twusStockSelect"), twXUs,
@@ -502,10 +491,8 @@ function bfBounds(hostId) {
 }
 
 // ── Boot ─────────────────────────────────────────────────────────────
-// Auth gate + first render. Lives here, not in portfolio.js, because user mode
-// never loads portfolio.js and would otherwise boot without a session check.
-// Deferred to DOMContentLoaded so the admin-only scripts loaded after this file
-// have defined loadPortfolioOnce/loadHomeOnce by the time restoreView runs.
+// Auth gate + first render. Deferred to DOMContentLoaded so the scripts loaded
+// after this file have defined loadPortfolioOnce etc. by the time restoreView runs.
 
 async function _boot() {
   if (!LOCAL_MODE && SUPABASE_URL && !_sb) {
