@@ -2,18 +2,22 @@
 CSV): folds every tick into per-code books, re-runs Direct Match and the
 static-arb LP on the Python implementations after each change, and turns the
 arb sets over time into episodes (when an arb appeared, when it ended, how
-long it lasted, its peak edge). Driven by scripts/eod_arb_replay.py, which the
-scheduler launches after the close; pure — no Supabase, no Flask, no clock.
+long it lasted, its peak edge). With the day's spot CSV it also scores every
+changed long-warrant / short-option pair by the daily vol needed to expire in
+its loss region (statarb_logic.required_vol_pairs) and keeps the day's top N.
+Driven by scripts/eod_arb_replay.py, which the scheduler launches after the
+close; pure — no Supabase, no Flask, no clock.
 """
 import csv
 import gzip
 import time
 from datetime import date, datetime, time as dtime
 
-from logic import arb_kernels_py, live_arb_logic, live_arb_lp_logic, lp_screen
+from logic import arb_kernels_py, live_arb_logic, live_arb_lp_logic, lp_screen, statarb_logic
 
 SESSION_OPEN = dtime(9, 0)
 SESSION_CLOSE = dtime(13, 30)
+STATARB_TOP_N = 10
 
 _NUM = ("strike", "exercise_ratio", "dte", "bid", "ask", "bid_size", "ask_size")
 
@@ -59,6 +63,24 @@ def iter_ticks(path):
             tick = parse_row(raw)
             if tick is not None:
                 yield tick
+
+
+def iter_spot(path):
+    """(ts, spot) per usable row of a .csv or .csv.gz spot log (mid, else the one-sided quote), sorted by ts."""
+    opener = gzip.open if str(path).endswith(".gz") else open
+    out = []
+    with opener(path, "rt", newline="", encoding="utf-8") as fh:
+        for raw in csv.DictReader(fh):
+            try:
+                ts = datetime.fromisoformat(raw["ts"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            bid, ask, mid = _num(raw.get("bid")), _num(raw.get("ask")), _num(raw.get("mid"))
+            spot = mid or ((bid + ask) / 2 if bid and ask else bid or ask)
+            if spot and spot > 0:
+                out.append((ts, spot))
+    out.sort(key=lambda s: s[0])
+    return out
 
 
 def _book_row(tick):
@@ -193,9 +215,9 @@ def _groups_by_ts(ticks, stats):
 
 
 def replay(ticks, trade_date, run_lp=True, lp_min_edge=0.0, progress=None, progress_every=5000,
-           use_screen=True):
+           use_screen=True, spot_ticks=None, statarb_top_n=STATARB_TOP_N):
     """Replay `ticks` (iter_ticks output) for `trade_date`; returns
-    {"direct": [episode], "lp": [episode], "stats": {...}}.
+    {"direct": [episode], "lp": [episode], "statarb": [top pair], "stats": {...}}.
 
     Direct Match is rescanned incrementally — a tick on one warrant re-pairs
     only that warrant against every option (and vice versa) — which is exactly
@@ -206,6 +228,9 @@ def replay(ticks, trade_date, run_lp=True, lp_min_edge=0.0, progress=None, progr
     (`use_screen=False` solves fully every time — same answer, for tests).
     Ticks sharing a timestamp are folded together and scanned once. Ticks
     outside 09:00–13:30 update the books but are not scanned.
+    StatArb pairs are rescored the same incremental way against the latest
+    `spot_ticks` (iter_spot output) at or before each scan; without spot
+    ticks nothing is scored. Each pair keeps its peak required vol.
     """
     t0 = time.perf_counter()
     books = {"warrant": {}, "option": {}}
@@ -215,12 +240,26 @@ def replay(ticks, trade_date, run_lp=True, lp_min_edge=0.0, progress=None, progr
     direct_tracker = EpisodeTracker("price_diff")
     lp_tracker = EpisodeTracker("guaranteed_profit", codes_fn=lp_codes)
     stats = {"n_ticks": 0, "n_changes": 0, "n_scans": 0, "n_ws": 0, "n_lp_skips": 0, "n_lp_screens": 0, "n_lp_solves": 0,
-             "first_ts": None, "last_ts": None}
+             "n_statarb_scores": 0, "first_ts": None, "last_ts": None}
     last_ts = None
     primed = False   # full scan done for the current session stretch
+    spot_seq, spot_i, spot = spot_ticks or [], 0, None
+    statarb_best = {}     # (warrant_code, option_code) -> {"row", "first_at", "peak_at"}
+    statarb_primed = False
 
     def scan_direct(w_rows, o_rows):
         return live_arb_logic.scan(w_rows, o_rows, trade_date, pairs_fn=arb_kernels_py.direct_pairs)
+
+    def score_statarb(ts, w_rows, o_rows):
+        w, o = live_arb_logic.build_direct_arrays(w_rows, o_rows, trade_date)
+        for r in statarb_logic.required_vol_pairs(w, o, spot, trade_date, live_arb_logic.OPT_CONTRACT_SIZE):
+            stats["n_statarb_scores"] += 1
+            key = (r["warrant_code"], r["option_code"])
+            cur = statarb_best.get(key)
+            if cur is None:
+                statarb_best[key] = {"row": r, "first_at": ts, "peak_at": ts}
+            elif r["req_daily_vol"] > cur["row"]["req_daily_vol"]:
+                cur["row"], cur["peak_at"] = r, ts
 
     def build_screen(hz):
         longs, shorts = live_arb_lp_logic._build_legs(
@@ -291,6 +330,19 @@ def replay(ticks, trade_date, run_lp=True, lp_min_edge=0.0, progress=None, progr
             continue   # books still fold; anything open at the bell closes in finish()
 
         stats["n_scans"] += 1
+        while spot_i < len(spot_seq) and spot_seq[spot_i][0] <= ts:
+            spot = spot_seq[spot_i][1]
+            spot_i += 1
+        if spot is not None:
+            if not statarb_primed:
+                score_statarb(ts, list(books["warrant"].values()), list(books["option"].values()))
+                statarb_primed = True
+            else:
+                for kind, code, _, new in changed:
+                    if kind == "warrant":
+                        score_statarb(ts, [new], list(books["option"].values()))
+                    else:
+                        score_statarb(ts, list(books["warrant"].values()), [new])
         if not primed:
             full_rescan()
             primed = True
@@ -332,11 +384,12 @@ def replay(ticks, trade_date, run_lp=True, lp_min_edge=0.0, progress=None, progr
     stats["last_ts"] = end_ts
     stats["runtime_s"] = round(time.perf_counter() - t0, 2)
     if end_ts is None:
-        return {"direct": [], "lp": [], "stats": stats}
+        return {"direct": [], "lp": [], "statarb": [], "stats": stats}
     close_ts = min(end_ts, datetime.combine(end_ts.date(), SESSION_CLOSE, end_ts.tzinfo))
     return {
         "direct": direct_tracker.finish(close_ts),
         "lp": lp_tracker.finish(close_ts),
+        "statarb": sorted(statarb_best.values(), key=lambda e: -e["row"]["req_daily_vol"])[:statarb_top_n],
         "stats": stats,
     }
 
@@ -397,3 +450,10 @@ def lp_records(episodes, trade_date):
             "peak_at": _iso(ep["peak_at"]),
         })
     return out
+
+
+def statarb_records(top, trade_date):
+    """Top StatArb pairs flattened for eod_arb_statarb_top, rank 1 = highest required vol."""
+    return [{"id": f"{trade_date.isoformat()}:{rank}", "trade_date": trade_date.isoformat(), "rank": rank,
+             **e["row"], "first_at": _iso(e["first_at"]), "peak_at": _iso(e["peak_at"])}
+            for rank, e in enumerate(top, 1)]

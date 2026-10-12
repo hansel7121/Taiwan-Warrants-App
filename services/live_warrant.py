@@ -1640,14 +1640,7 @@ def get_data():
 
 
 def snapshot_for_underlying(underlying):
-    """Read-only cross-module accessor for Live Arb (services/live_arb.py):
-    static terms + best bid/ask/size for every tracked warrant on
-    `underlying`, plus a tick-seq sum that only changes when one of those
-    warrants' best level actually moves — the dirty-gate signal live_arb.py
-    polls on a fast timer instead of diffing raw books itself, reusing the
-    same `_book_seq` this module already maintains for its own tick-driven
-    recompute (see `_handle_message`/`best_level_changed`).
-    """
+    """(rows, tick-seq sum) for every tracked warrant on `underlying`: static terms + best bid/ask/size."""
     with _lock:
         codes = [c for c in _tracked if _underlying_of.get(c) == underlying]
         seq = sum(_book_seq.get(c, 0) for c in codes)
@@ -1665,9 +1658,7 @@ def snapshot_for_underlying(underlying):
                 "exercise_ratio": terms.get("exercise_ratio"),
                 "maturity": terms.get("maturity"),
                 "best": best,
-                # Raw book metadata, unrelated to the arb-matching fields
-                # above — feeds live_arb_logic.latest_tick()'s "Last
-                # received tick" debug line, not the matcher itself.
+                # Raw book metadata (tick time + source), not matcher inputs.
                 "ts": book["ts"] if book else None,
                 "src": book.get("src") if book else None,
             })

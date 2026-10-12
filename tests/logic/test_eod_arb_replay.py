@@ -168,3 +168,27 @@ def test_holiday_file_with_only_snapshot_rows_logs_nothing(tmp_path):
     spec.loader.exec_module(cli)
     res = cli.run(csv_path=str(snap), dry_run=True)
     assert res["status"] == "no_ticks" and res["direct"] == [] and res["lp"] == []
+
+
+def test_statarb_top_is_ranked_peaks_and_needs_spot(tmp_path):
+    path = tmp_path / "arb.csv"
+    gen.generate(path, True, every_s=30.0)
+    spot = [(_t("09:00:00"), gen.S0), (_t("11:00:00"), gen.S0 * 1.01)]
+    res = eod.replay(eod.iter_ticks(path), DAY, run_lp=False, spot_ticks=spot)
+    top = res["statarb"]
+    assert 0 < len(top) <= eod.STATARB_TOP_N
+    vols = [e["row"]["req_daily_vol"] for e in top]
+    assert vols == sorted(vols, reverse=True)
+    assert all(e["first_at"] <= e["peak_at"] for e in top)
+    recs = eod.statarb_records(top, DAY)
+    assert [r["rank"] for r in recs] == list(range(1, len(top) + 1))
+    assert eod.replay(eod.iter_ticks(path), DAY, run_lp=False)["statarb"] == []
+
+
+def test_iter_spot_uses_mid_then_one_sided_quote(tmp_path):
+    p = tmp_path / "spot.csv"
+    p.write_text("ts,code,bid,ask,bid_size,ask_size,mid,src\n"
+                 "2026-10-07T09:00:01+08:00,2330,999,1001,1,1,1000,ws\n"
+                 "2026-10-07T09:00:00+08:00,2330,,1002,,1,,ws\n"
+                 "bad,2330,1,1,1,1,1,ws\n")
+    assert [s for _, s in eod.iter_spot(p)] == [1002.0, 1000.0]

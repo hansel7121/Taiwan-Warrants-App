@@ -1,12 +1,10 @@
-"""Pure decision logic for the Live Arb tab: TSMC-only Direct Match against
-live websocket quotes (services/live_warrant.py + services/live_options.py's
-in-memory books) instead of the batch CMoney/TAIFEX snapshot arb_logic.py
-normally matches against.
+"""TSMC-only Direct Match over live-book snapshot rows (the shape
+services/live_warrant.py / services/live_options.py's snapshot_for_underlying
+return, and the shape logic/eod_arb_replay.py folds recorded ticks into)
+instead of the batch CMoney/TAIFEX snapshot arb_logic.py matches against.
 
 No Flask context, no Supabase, no Fubon SDK, no `datetime.now()` — "today"
 is always passed in by the caller so this stays deterministic and testable.
-services/live_arb.py is the impure glue that reads the two live caches, calls
-`scan()` on a background timer, and persists logged hits.
 
 Reuses the same Rust-accelerated `direct_pairs` kernel arb_logic.py's Direct
 Match uses (see logic/iv_engine.py) directly, skipping the IV-batch solve and
@@ -150,49 +148,3 @@ def scan(warrant_rows, option_rows, today, max_dte_diff=DEFAULT_MAX_DTE_DIFF, pa
             "riskless": bool(favorable),
         })
     return rows
-
-
-def best_per_warrant(rows):
-    """Reduce active hits to the single best (max price_diff) option leg per
-    warrant — the "pick the best one" rule for what actually gets logged."""
-    best = {}
-    for r in rows:
-        code = r["warrant_code"]
-        if code not in best or r["price_diff"] > best[code]["price_diff"]:
-            best[code] = r
-    return list(best.values())
-
-
-def dedup_key(row, trade_date):
-    """Deterministic id for a (warrant, option, day) — logging this pair
-    again the same day is a no-op, mirroring arb_suggestions' id scheme."""
-    return f"{row['warrant_code']}:{row['option_code']}:{trade_date.isoformat()}"
-
-
-def latest_tick(warrant_rows, option_rows):
-    """The single most recently ticked row across both live snapshots, by
-    `ts` — feeds the "Last received tick" debug line in services/live_arb.py's
-    get_data()/get_lp_data(). None when neither side has ticked yet.
-
-    Only `src == "ws"` rows count: a REST-seeded book (see
-    services/live_warrant.py::_seed_from_rest and the mirrored
-    services/live_options.py version) fills a cell before any tick arrives,
-    but it isn't a tick the exchange pushed, and it never bumps the
-    tick-seq counters `_combined_seq()` sums — so filtering to "ws" here
-    keeps this signal in lockstep with what that counter actually measures.
-
-    Every tracked row is a candidate, not just the ones with fully resolved
-    terms `build_direct_arrays` keeps — this is a raw liveness signal, not
-    an arb-matching input, and deliberately shows tick flow even when
-    nothing is currently matchable.
-    """
-    candidates = [("warrant", r) for r in warrant_rows if r.get("src") == "ws" and r.get("ts") is not None]
-    candidates += [("option", r) for r in option_rows if r.get("src") == "ws" and r.get("ts") is not None]
-    if not candidates:
-        return None
-    kind, row = max(candidates, key=lambda kr: kr[1]["ts"])
-    best = row.get("best") or {}
-    return {
-        "kind": kind, "code": row["code"], "name": row.get("name"),
-        "bid": best.get("bid"), "ask": best.get("ask"), "ts": row["ts"],
-    }

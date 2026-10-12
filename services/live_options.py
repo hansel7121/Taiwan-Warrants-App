@@ -23,9 +23,8 @@ option-specific wrinkle: futopt's quote() carries no bids/asks ladder at all
 a 2330 chain by scripts/fubon_quote_viewer.py's own `_seed_from_rest`, which
 this mirrors. A REST-seeded book is marked `src: "rest"` so the UI can show
 it as a snapshot (age included) until the first live tick overwrites it with
-`src: "ws"`. This is also what makes Live Arb (services/live_arb.py), which
-just reads this module's tracked books, see a contract's price the instant
-it's tracked rather than only after its first requote.
+`src: "ws"`. This is also what gives the tick recorder a contract's price the
+instant it's tracked rather than only after its first requote.
 
 TSMC (2330) only for now — SUPPORTED_UNDERLYING mirrors the exact framing of
 live_warrant.py's UNDERLYING_LIVE_PRICE_ALLOWLIST.
@@ -105,12 +104,8 @@ _track_errors = {}  # code -> last subscribe/seed error, cleared on success
 _session_error = None  # set when the session can't even start (e.g. no credentials)
 _stopped_by_user = False  # set by stop_session(); blocks scheduler/load_chain from silently reopening it
 _diagnostic_logged = False  # one-shot: log the first raw tickers() row so the field-shape guess can be checked
-# Bumped on every books tick. Nothing in this module needs per-code dirty
-# tracking (see the module docstring — no derived columns here), but Live
-# Arb (services/live_arb.py) needs SOME cheap "has anything changed since I
-# last scanned" signal, mirroring live_warrant.py's per-code `_book_seq`
-# without needing the per-code granularity that module's tick-driven
-# recompute actually requires.
+# Bumped on every books tick: a cheap "has anything changed" signal returned
+# by snapshot_for_underlying, mirroring live_warrant.py's per-code `_book_seq`.
 _tick_seq = 0
 
 
@@ -804,11 +799,7 @@ def get_data():
 
 
 def snapshot_for_underlying(underlying=SUPPORTED_UNDERLYING):
-    """Read-only cross-module accessor for Live Arb (services/live_arb.py) —
-    see live_warrant.py's identical-purpose function. `underlying` is
-    accepted for symmetry only: every tracked contract here already belongs
-    to SUPPORTED_UNDERLYING (this module supports exactly one underlying
-    today, see the module docstring)."""
+    """(rows, tick-seq) for every tracked contract; `underlying` is accepted for symmetry with live_warrant only."""
     with _lock:
         seq = _tick_seq
         rows = []
@@ -824,9 +815,7 @@ def snapshot_for_underlying(underlying=SUPPORTED_UNDERLYING):
                 "strike": contract.get("strike"),
                 "expiry": contract.get("expiry"),
                 "best": best,
-                # Raw book metadata, unrelated to the arb-matching fields
-                # above — feeds live_arb_logic.latest_tick()'s "Last
-                # received tick" debug line, not the matcher itself.
+                # Raw book metadata (tick time + source), not matcher inputs.
                 "ts": book["ts"] if book else None,
                 "src": book.get("src") if book else None,
             })

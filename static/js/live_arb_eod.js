@@ -1,5 +1,6 @@
-// Live Arb → EOD Replay sub-tab: browses the end-of-day replay results
-// (scripts/eod_arb_replay.py → eod_arb_* tables) day by day via
+// EOD Replay tab: browses the end-of-day replay results (Direct Match and LP
+// episodes, StatArb top-10 by required vol; scripts/eod_arb_replay.py →
+// eod_arb_* tables) day by day via
 // /eod_arb_dates and /eod_arb_episodes, re-runs a day via /eod_arb_run, and
 // downloads a day's tick or spot file via /eod_tick_csv. Static data — no live poll,
 // except while a replay is running.
@@ -87,9 +88,11 @@ async function _eodLoadDay() {
       + ` · ${_eodNum(run.n_lp_solves)} full LP solves`;
     document.getElementById("eod-direct-count").textContent = d.direct.length;
     document.getElementById("eod-lp-count").textContent = d.lp.length;
+    document.getElementById("eod-statarb-count").textContent = (d.statarb || []).length;
     document.getElementById("eod-tick-count").textContent = run ? _eodNum(run.n_ticks) : "—";
     _eodRenderDirect(d.direct);
     _eodRenderLp(d.lp);
+    _eodRenderStatArb(d.statarb || [], d.statarb_error);
     _eodWatchRun(d.replay_running || (run && run.status === "running"));
   } catch (e) {
     status.textContent = "load failed: " + (e.message || e);
@@ -129,6 +132,40 @@ function _eodRenderLp(rows) {
       <td style="text-align:right"><span class="put" style="font-weight:700">${_eodNum(r.guaranteed_profit)}</span></td>
       <td style="text-align:right">${r.return_pct === null || r.return_pct === undefined ? "—" : r.return_pct + "%"}</td>
       <td style="text-align:right" title="at ${_eodTime(r.peak_at)}">${_eodNum(r.peak_guaranteed_profit)}</td>
+    </tr>`).join("");
+}
+
+function _eodPct(v, digits) {
+  return v === null || v === undefined ? "—" : `${Number(v).toFixed(digits)}%`;
+}
+
+function _eodLossRegion(ivs) {
+  return (ivs || []).map(([lo, hi]) => `${_eodNum(lo, 0)}–${hi === null ? "∞" : _eodNum(hi, 0)}`).join(", ") || "—";
+}
+
+function _eodRenderStatArb(rows, error) {
+  const tbody = document.getElementById("eod-statarb-tbody");
+  const empty = document.getElementById("eod-statarb-empty");
+  empty.textContent = error ? "StatArb table unavailable — apply supabase/migrations/028_eod_arb_statarb_top.sql."
+    : "No StatArb pairs this day (none scored, or no spot file recorded).";
+  empty.style.display = rows.length ? "none" : "";
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td>${r.rank}</td>
+      <td title="first scored ${_eodTime(r.first_at)}">${_eodTime(r.peak_at)}</td>
+      <td>${_eodEsc(r.warrant_code)}<div style="font-size:11px;color:var(--muted)">${_eodEsc(r.warrant_name)}</div></td>
+      <td>${_eodEsc(r.option_code)}</td>
+      <td class="${r.type === "Call" ? "call" : "put"}">${_eodEsc(r.type)}</td>
+      <td>${_eodNum(r.warrant_strike, 0)} / ${_eodNum(r.opt_strike, 0)}</td>
+      <td>${_eodNum(r.warrant_dte)} / ${_eodNum(r.opt_dte)} / ${_eodNum(r.trading_days)}</td>
+      <td style="text-align:right">${_eodNum(r.warrant_ask, 2)} (${_eodNum(r.warrant_ask_size)})</td>
+      <td style="text-align:right">${_eodNum(r.opt_bid, 2)} (${_eodNum(r.opt_bid_size)})</td>
+      <td style="text-align:right">${_eodNum(r.lots)} <span style="color:var(--muted)">${_eodEsc(r.rounding)}</span></td>
+      <td style="text-align:right">${_eodNum(r.credit)}</td>
+      <td style="text-align:right">${_eodNum(r.spot, 1)}</td>
+      <td style="font-size:12px">${_eodLossRegion(r.loss_region)}</td>
+      <td style="text-align:right">${r.edge_move_pct > 0 ? "+" : ""}${_eodPct(r.edge_move_pct, 2)} <span style="color:var(--muted)">→ ${_eodNum(r.loss_edge, 1)}</span></td>
+      <td style="text-align:right"><b>${_eodPct(r.req_daily_vol * 100, 2)}</b></td>
     </tr>`).join("");
 }
 

@@ -26,7 +26,7 @@ A local Flask web app for scanning Taiwan stock warrants and equity options, com
 3. **Options Scanner** — live TAIFEX equity option data (and US ADR options); IV/delta/leverage per contract; flags whether each quote is a live bid/ask or a settlement-price fallback (`is_live`).
 4. **Arb Finder** — cross-market mispricing between warrants and options. Modes: **Direct Match** (same-type call/put monotonicity: buy warrant / sell option), **PCP Match** (put-call parity via synthetic replication), **Butterfly** (convexity across three strikes), plus **Warrant vs US Option** and **TW Option vs US Option** cross-market matches. Clicking a row opens a trade-breakdown modal with per-leg cash flows and a P&L chart (intrinsic-at-expiry + mark-to-market at a slider DTE).
 
-There is also a **Portfolio** tab (persisted per-user to Supabase) with a **Suggestions** sub-tab fed by an automated scanner (see below).
+There is also a **Portfolio** tab (persisted per-user to Supabase) with a **Suggestions** sub-tab fed by an automated scanner (see below), **Live Warrant** / **Live Options** tabs (Fubon websocket books), and an **EOD Replay** tab (see the tick-recording section). The Arb Finder also has a **StatArb** sub-tab (`logic/statarb_logic.py`). There is one mode (no admin/user split); Options Scanner is the landing tab.
 
 Supported underlyings and their option IDs are managed as data in Supabase product tables (`warrant_stocks`, `tw_option_products`, `us_option_products`) — e.g. 2330 (TSMC), 2303 (UMC), 2603, 2881, 2882, plus TXO. Add/remove via the product routes; nothing is hard-coded.
 
@@ -95,7 +95,7 @@ services/              side-effecting infrastructure
   applog.py memlog.py    request logging + memory/timing measurement
 templates/index.html   single-page frontend shell (Jinja + Plotly)
 static/css/app.css     extracted stylesheet
-static/js/*.js         extracted JS (common, quant, scanners, arb, portfolio)
+static/js/*.js         extracted JS (common, quant, scanners, watchlist, arb, statarb, portfolio, live tabs, EOD replay)
 rust/warrants_core/    Rust extension: src/bs.rs (IV/delta), arb.rs (matchers), frame.rs (warrant frame)
 tests/fixtures/arb/    recorded matcher output — pins current behaviour; see its README before touching
 supabase/              schema.sql (current end state) + migrations/ (incremental)
@@ -122,23 +122,24 @@ scripts/               one-off maintenance/seeding scripts
 
 **Routes worth knowing** (all in `app.py`, all `require_auth` except `/`, `/login`, `/healthz`):
 - Data: `/read_warrant`, `/read_tw_option`, `/read_us_option` (+ `_csv` variants), `/iv_surface`, `/iv_surface_options`, `/adr_premium[_scenario]`.
-- Arb: `/match_warrant_tw_option`, `/match_warrant_us_option`, `/match_tw_us_option`, `/match_static_arb` (+ `_csv`).
+- Arb: `/match_warrant_tw_option`, `/match_warrant_us_option`, `/match_tw_us_option` (+ `_csv`), `/statarb_*`.
+- Watchlist stars: `/list_watchlist`, `/add_watchlist`, `/remove_watchlist`.
 - Portfolio: `/get_portfolio`, `/save_portfolio`, `/close_quote`.
 - Suggestions: `/list_suggestions`, `/remove_suggestion` (hard delete).
 - Products: `/list|add|remove_warrant_stock`, `/lookup_warrant_stock`, `/list|add|remove_tw_option_product`, `/list|add|remove_us_option_product`.
-- EOD replay: `/eod_arb_dates`, `/eod_arb_episodes?date=`, `/eod_arb_run` (POST, re-runs a day), `/eod_tick_csv?date=`.
+- EOD replay: `/eod_arb_dates`, `/eod_arb_episodes?date=` (Direct, LP, StatArb top 10), `/eod_arb_run` (POST, re-runs a day), `/eod_tick_csv?date=[&kind=spot]`.
 - Manual refresh: `/sync_warrant`, `/sync_tw_option`, `/sync_us_option`, `/sync_universe` (debounced, run the scheduler's core writers synchronously).
 
 **Scheduler (`services/scheduler.py`):** one `BackgroundScheduler` with a single-worker executor, started once from `wsgi.py` (prod) or `app.py __main__` (dev). Jobs: `cmkey` (interval, ungated), `universe` (daily 07:00 TPE cron), and three intraday data syncs (`warrants`/`tw_options`/`us_options`) on a wall-clock 15-min grid, each `_gated` to its market's hours. The **suggest job** (`sync_suggestions`) runs a few minutes after the grid, gated on `tw_equity` hours: it scans the Direct tab's two strategies (`same_type`, `pcp`) via `arb_logic.match_warrant_tw_option` over the warrant∩tw-option universe, drops non-executable (short-warrant) PCP rows, and upserts profitable rows into `arb_suggestions` (stale rows flipped, not deleted). The Portfolio → Suggestions sub-tab reads them via `/list_suggestions`.
 
-**Daily TSMC tick recording + EOD arb replay (Live Arb → EOD Replay subtab):** scheduler jobs, Mon–Fri Taipei time, on unless `ENABLE_TICK_RECORDING=0`. 08:40 `tick_prepare` connects both Fubon sessions and subscribes TSMC's whole warrant chain (`scan_underlying("2330", 0)`) and option chain (`load_chain`). Every 5 min during `tw_equity` hours, `tick_record` (re)starts `services/live_tick_log.py` and writes a snapshot row for every tracked book, so a mid-session redeploy resumes into the same file with full state. 13:31 `tick_stop`; 13:40 `eod_replay` launches `scripts/eod_arb_replay.py` as a **subprocess** (CPU-heavy, kept off the web process), then gzips the CSV and prunes old ones (`TICK_LOG_KEEP_DAYS`, default 90, and `TICK_LOG_MAX_GB`, default 20). `logic/eod_arb_replay.py` folds ticks into books and re-runs Direct Match (`arb_kernels_py.direct_pairs`, incremental per changed code) and the static-arb LP (`static_arb._solve_horizon`, Python) after every change, turning the arb sets into **episodes**: Direct is keyed by warrant:option pair, LP by horizon. `logic/lp_screen.py` keeps a warm-started HiGHS model of each horizon's LP relaxation. It skips the full solve when the answer is provably unchanged (same result as always solving, see `test_lp_screen_gives_the_same_episodes_as_always_solving`). The tick CSV lives in `LIVE_TICK_LOG_DIR`, which must be a persistent volume in production. Test with fake days via `scripts/gen_fake_ticks.py`.
+**Daily TSMC tick recording + EOD arb replay (EOD Replay tab):** scheduler jobs, Mon–Fri Taipei time, on unless `ENABLE_TICK_RECORDING=0`. 08:40 `tick_prepare` connects both Fubon sessions and subscribes TSMC's whole warrant chain (`scan_underlying("2330", 0)`) and option chain (`load_chain`). Every 5 min during `tw_equity` hours, `tick_record` (re)starts `services/live_tick_log.py` and writes a snapshot row for every tracked book, so a mid-session redeploy resumes into the same file with full state. 13:31 `tick_stop`; 13:40 `eod_replay` launches `scripts/eod_arb_replay.py` as a **subprocess** (CPU-heavy, kept off the web process), then gzips the CSV and prunes old ones (`TICK_LOG_KEEP_DAYS`, default 90, and `TICK_LOG_MAX_GB`, default 20). `logic/eod_arb_replay.py` folds ticks into books and re-runs Direct Match (`arb_kernels_py.direct_pairs`, incremental per changed code) and the static-arb LP (`static_arb._solve_horizon`, Python) after every change, turning the arb sets into **episodes**: Direct is keyed by warrant:option pair, LP by horizon. With the day's 2330 spot CSV it also rescores every changed long-warrant / short-option pair with `statarb_logic.required_vol_pairs` (StatArb scanner sizing; analytic at-expiry loss region; required daily vol = |ln(nearest loss edge / spot)| / √(trading days to option expiry)) and stores each pair's daily peak, top 10, in `eod_arb_statarb_top`. `logic/lp_screen.py` keeps a warm-started HiGHS model of each horizon's LP relaxation. It skips the full solve when the answer is provably unchanged (same result as always solving, see `test_lp_screen_gives_the_same_episodes_as_always_solving`). The tick CSV lives in `LIVE_TICK_LOG_DIR`, which must be a persistent volume in production. Test with fake days via `scripts/gen_fake_ticks.py`.
 
 **Supabase schema (`supabase/schema.sql`, migrations in `supabase/migrations/`):**
 - `allowed_users` — email allowlist for auth.
 - `portfolio` — per-user positions, RLS "own rows"; `deleted_at` tombstone + `updated_at` sync cursor for two-way Render/local sync.
 - `md_*` + `md_batches` + `cmoney_key` — server-only market-data snapshots (service-role key, RLS enabled with **no policy** — never add one). Batch-pointer model: write a new batch, flip `md_batches`, delete the old batch (supabase-py has no transactions, so the pointer flip is the atomicity mechanism).
 - `warrant_stocks` / `tw_option_products` / `us_option_products` — shared tracked-product lists (server-only).
-- `eod_arb_runs` / `eod_arb_direct_episodes` / `eod_arb_lp_episodes` — end-of-day replay results (one run row per day + episodes); a re-run deletes and re-inserts that day; server-only.
+- `eod_arb_runs` / `eod_arb_direct_episodes` / `eod_arb_lp_episodes` / `eod_arb_statarb_top` — end-of-day replay results (one run row per day + episodes + StatArb top 10); a re-run deletes and re-inserts that day; server-only.
 - `arb_suggestions` — automated Direct-Arb output; deterministic `id` = `{arb_type}:{warrant_code}:{option_contract}` so re-finding upserts the same row; server-only.
 
 **Notebooks:** `notebooks/` holds exploratory research. Commit **without outputs** (`jupyter nbconvert --clear-output --inplace notebooks/*.ipynb`) to keep diffs small.

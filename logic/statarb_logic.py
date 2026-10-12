@@ -7,8 +7,10 @@ vol path, the bootstrap again with the historical drift added back, plus a two-s
 pair on 2330 against the cached bootstrap paths (`scan_pairs` is the pure core), with the warrant leg rounded down and up
 to whole board lots as two separate trades: pure arbs, and for the rest the share of paths that reach the loss region
 under zero drift, historical drift, and both again with vol × VOL_STRESS. `scan_lp()` runs logic/statarb_lp.py's
-whole-lot MILP per option expiry over the whole chain against the same path sets (#9).
+whole-lot MILP per option expiry over the whole chain against the same path sets (#9). `required_vol_pairs()` scores
+the same pairs by the daily vol needed to reach their loss region by option expiry, for the EOD replay's StatArb ranking.
 """
+import math
 import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -285,6 +287,107 @@ def scan_pairs(warrant_df, opt_df, contract_size, sim, spot, today, vol_stress=V
                         row["p_touch"][k] = round(float(touch.mean()), 6)
                         row["p_expiry"][k] = round(float(at_end.mean()), 6)
                 rows.append(row)
+    return rows
+
+
+def pair_loss_intervals(call, credit, w_shares, kw, opt_shares, ko):
+    """Exact [(lo, hi)] spots where scan_pairs' expiry PnL is negative (piecewise linear, kinks at the strikes); hi is inf for an open top."""
+    if call:
+        def f(s):
+            return credit + w_shares * max(s - kw, 0.0) - opt_shares * max(s - ko, 0.0)
+        slope = w_shares - opt_shares
+    else:
+        def f(s):
+            return credit + w_shares * max(kw - s, 0.0) - opt_shares * max(ko - s, 0.0)
+        slope = 0.0
+    xs = sorted({0.0, float(kw), float(ko)})
+    pts = list(xs)
+    for a, b in zip(xs, xs[1:]):
+        fa, fb = f(a), f(b)
+        if fa * fb < 0:
+            pts.append(a + (b - a) * fa / (fa - fb))
+    f_last = f(xs[-1])
+    if f_last * slope < 0:
+        pts.append(xs[-1] - f_last / slope)
+    pts = sorted(set(pts)) + [np.inf]
+    out = []
+    for a, b in zip(pts, pts[1:]):
+        if f(a + 1.0 if b == np.inf else (a + b) / 2) < 0:
+            if out and out[-1][1] == a:
+                out[-1] = (out[-1][0], b)
+            else:
+                out.append((a, b))
+    return out
+
+
+def required_daily_vol(spot, intervals, n_days):
+    """(daily log-vol making the nearest loss edge a one-sigma move over n_days, that edge); 0 when spot is already in a loss region."""
+    best = None
+    for lo, hi in intervals:
+        if lo <= spot <= hi:
+            return 0.0, float(spot)
+        edge = hi if hi < spot else lo
+        d = abs(math.log(edge / spot))
+        if best is None or d < best[0]:
+            best = (d, edge)
+    return best[0] / math.sqrt(n_days), float(best[1])
+
+
+def required_vol_pairs(warrants, options, spot, today, contract_size=2000):
+    """scan_pairs' pairs (build_direct_arrays rows) scored by daily vol needed to expire in the loss region; best sizing kept, riskless pairs skipped."""
+    first_day = np.datetime64(today) + np.timedelta64(1, "D")
+    opts = [o for o in options
+            if o["bid_live"] and o["bid"] > 0 and not (o["ask"] > 0 and o["bid"] > o["ask"])]
+    trading_days = {}     # option dte -> trading days after today through expiry
+    rows = []
+    for w in warrants:
+        ratio, w_ask = w["ratio"], w["ask"]
+        if not (ratio > 0 and w_ask > 0):
+            continue
+        sizings = None
+        call = w["type"] == "Call"
+        for o in opts:
+            if o["type"] != w["type"] or o["dte"] > w["dte"]:
+                continue
+            diff_ps = round(o["bid"] - w_ask / ratio, 4)
+            if diff_ps <= 0:
+                continue
+            if sizings is None:
+                exact_lots = round(contract_size / ratio / 1000, 6)
+                lo_lots, hi_lots = math.floor(exact_lots), math.ceil(exact_lots)
+                sizings = [("exact", lo_lots)] if lo_lots == hi_lots else [("down", lo_lots), ("up", hi_lots)]
+            n = trading_days.get(o["dte"])
+            if n is None:
+                n = trading_days[o["dte"]] = int(np.busday_count(first_day, first_day + np.timedelta64(int(o["dte"]), "D")))
+            if n < 1:
+                continue
+            best, pure = None, False
+            for rounding, lots in sizings:
+                if lots < 1:
+                    continue
+                n_w = lots * 1000
+                credit = o["bid"] * contract_size - w_ask * n_w
+                if credit <= 0:
+                    continue
+                ivs = pair_loss_intervals(call, credit, n_w * ratio, w["strike"], contract_size, o["strike"])
+                if not ivs:
+                    pure = True
+                    break
+                vol, edge = required_daily_vol(spot, ivs, n)
+                if best is None or vol > best["req_daily_vol"]:
+                    best = {"rounding": rounding, "lots": lots, "credit": round(credit),
+                            "loss_region": [[round(a, 2), None if b == np.inf else round(b, 2)] for a, b in ivs],
+                            "loss_edge": round(edge, 2), "edge_move_pct": round(100 * (edge / spot - 1), 2),
+                            "req_daily_vol": round(vol, 6)}
+            if pure or best is None:
+                continue
+            rows.append({"warrant_code": w["code"], "warrant_name": w["name"],
+                         "option_code": o["code"], "option_name": o["name"], "type": w["type"],
+                         "warrant_strike": w["strike"], "opt_strike": round(float(o["strike"]), 2),
+                         "warrant_dte": w["dte"], "opt_dte": o["dte"], "trading_days": n,
+                         "exercise_ratio": ratio, "warrant_ask": w_ask, "warrant_ask_size": w["ask_size"],
+                         "opt_bid": o["bid"], "opt_bid_size": o["bid_size"], "price_diff": diff_ps,
+                         "spot": round(float(spot), 2), **best})
     return rows
 
 

@@ -141,3 +141,53 @@ def test_bigger_vol_buffer_widens_only_the_stressed_sets(sim):
 def test_scan_rejects_out_of_range_vol_buffer():
     with pytest.raises(ValueError):
         S.scan(vol_stress=5.0)
+
+
+@pytest.mark.parametrize("call,credit,w_shares,kw,opt_shares,ko", [
+    (True, 3000.0, 2000.0, 95.0, 2000.0, 100.0),     # bull spread: loss nowhere -> []
+    (True, 3000.0, 2000.0, 105.0, 2000.0, 100.0),    # bear-ish call vertical: loss above ~101.5
+    (True, 3000.0, 1000.0, 95.0, 2000.0, 100.0),     # under-hedged: open loss to the top
+    (True, -500.0, 3000.0, 100.0, 2000.0, 100.0),    # debit: loss at low spots
+    (False, 3000.0, 2000.0, 95.0, 2000.0, 100.0),    # put vertical: loss below ~98.5
+    (False, 2000.0, 1000.0, 90.0, 2000.0, 100.0),    # under-hedged put: loss band at low spots
+])
+def test_analytic_loss_region_matches_the_scanners_grid(call, credit, w_shares, kw, opt_shares, ko):
+    grid = np.linspace(300 / S.GRID_POINTS, 300, S.GRID_POINTS)
+    iw = np.maximum(grid - kw, 0) if call else np.maximum(kw - grid, 0)
+    io = np.maximum(grid - ko, 0) if call else np.maximum(ko - grid, 0)
+    want = S._loss_intervals(grid, credit + w_shares * iw - opt_shares * io)
+    got = S.pair_loss_intervals(call, credit, w_shares, kw, opt_shares, ko)
+    assert len(got) == len(want)
+    step = grid[1] - grid[0]
+    for (a, b), (wa, wb) in zip(got, want):
+        assert abs(a - wa) <= step
+        assert (b == np.inf) == (wb == np.inf) and (b == np.inf or abs(b - wb) <= step)
+
+
+def test_required_daily_vol_is_one_sigma_to_the_nearest_edge():
+    vol, edge = S.required_daily_vol(100.0, [(0.0, 90.0), (120.0, np.inf)], 25)
+    assert edge == 90.0 and vol == pytest.approx(abs(np.log(0.9)) / 5)
+    assert S.required_daily_vol(100.0, [(95.0, 105.0)], 25) == (0.0, 100.0)
+
+
+def _leg(code, typ, strike, dte, **kw):
+    return {"code": code, "name": code, "type": typ, "strike": strike, "dte": dte, "ask_size": 5, "bid_size": 5, **kw}
+
+
+def test_required_vol_pairs_keeps_vol_bets_and_skips_riskless_and_debits():
+    from datetime import date
+    today = date(2026, 10, 7)
+    warrants = [
+        _leg("W105", "Call", 105.0, 60, ratio=1.0, ask=1.0, bid=0.9),    # sells C100: loss above ~101.5
+        _leg("W95", "Call", 95.0, 60, ratio=1.0, ask=1.0, bid=0.9),      # bull spread vs C100: riskless
+        _leg("WRICH", "Call", 105.0, 60, ratio=1.0, ask=9.0, bid=8.9),   # costs more than the option pays
+    ]
+    options = [_leg("C100", "Call", 100.0, 30, bid=2.5, ask=2.6, bid_live=True, ask_live=True)]
+    rows = {r["warrant_code"]: r for r in S.required_vol_pairs(warrants, options, 98.0, today)}
+    assert set(rows) == {"W105"}
+    r = rows["W105"]
+    assert r["credit"] == 3000 and r["lots"] == 2 and r["rounding"] == "exact"
+    assert r["loss_region"] == [[101.5, None]]
+    n = int(np.busday_count(np.datetime64("2026-10-08"), np.datetime64("2026-11-07")))
+    assert r["trading_days"] == n
+    assert r["req_daily_vol"] == pytest.approx(np.log(101.5 / 98.0) / np.sqrt(n), abs=1e-6)
