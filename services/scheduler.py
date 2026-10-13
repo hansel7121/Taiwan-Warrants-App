@@ -370,9 +370,16 @@ _eod_proc = None
 
 
 def prepare_tick_recording():
-    """Pre-open: connect both Fubon sessions and subscribe TSMC's whole warrant + option chain."""
+    """Pre-open: connect both Fubon sessions and subscribe TSMC's whole warrant + option chain.
+
+    The warrant pool is torn down and logged in fresh rather than reused: the
+    boot job opens it whenever the process starts (e.g. a redeploy the night
+    before), and a socket left idle overnight can stay "open" with REST still
+    working while it never delivers another books frame — 2026-10-13 recorded
+    zero warrant ticks that way.
+    """
     u = live_tick_log.UNDERLYING
-    live_warrant.connect_session()
+    live_warrant.reconnect()
     try:
         res = live_warrant.scan_underlying(u, 0)
         print(f"SCHED: tick prep warrants chain={res['chain']} +{len(res['added'])} "
@@ -401,6 +408,31 @@ def ensure_tick_recording():
         print(f"SCHED: tick recorder started, snapshot rows={len(rows)}", flush=True)
         return True
     return False
+
+
+# A whole TSMC warrant chain never goes this long without one books frame mid-session.
+WARRANT_SILENCE_S = 300
+WARRANT_WATCHDOG_WINDOW = (dtime(9, 5), dtime(13, 20))  # skip the open and the closing auction
+WARRANT_WATCHDOG_MAX_PER_DAY = 3  # bounds login churn on a holiday the weekday gate lets through
+_watchdog_reconnects = {}  # Taipei date -> reconnects done
+
+
+def check_warrant_feed(now=None):
+    """Reconnect the warrant pool when it has been silent for WARRANT_SILENCE_S mid-session. Returns True if it did."""
+    t = _localize(now, _TZ_TAIPEI)
+    if not (WARRANT_WATCHDOG_WINDOW[0] <= t.time() <= WARRANT_WATCHDOG_WINDOW[1]):
+        return False
+    silent = live_warrant.seconds_since_last_tick()
+    if silent is None or silent < WARRANT_SILENCE_S:
+        return False
+    done = _watchdog_reconnects.get(t.date(), 0)
+    if done >= WARRANT_WATCHDOG_MAX_PER_DAY:
+        return False
+    _watchdog_reconnects[t.date()] = done + 1
+    print(f"SCHED: warrant feed silent {silent:.0f}s — reconnecting "
+          f"({done + 1}/{WARRANT_WATCHDOG_MAX_PER_DAY} today)", flush=True)
+    live_warrant.reconnect()
+    return True
 
 
 def stop_tick_recording():
@@ -547,6 +579,7 @@ def _run_tick_prepare():
 
 def _run_tick_record():
     _job("tick_record", ensure_tick_recording)
+    _job("warrant_watchdog", check_warrant_feed)
 
 
 def _run_tick_stop():

@@ -139,6 +139,7 @@ _seed_errors = {}  # code -> last REST seed/subscribe error, cleared once it suc
 _pending = set()  # tracked codes with no live subscription — retried by retry_pending()
 _session_error = None  # set when the session can't even start (e.g. no credentials)
 _stopped_by_user = False  # set by stop_session(); blocks scheduler/add_code from silently reopening it
+_last_ws_data = None  # time.monotonic() of the pool's last books frame (or of the last session start)
 
 # ── Live Warrant tab analytics: tick-driven dirty tracking ─────────────────
 # A warrant's derived columns are only ever recomputed when ITS OWN best bid/
@@ -440,6 +441,8 @@ def _handle_message(conn, raw):
     code = data.get("symbol")
     if not code:
         return
+    global _last_ws_data
+    _last_ws_data = time.monotonic()
 
     new_bids, new_asks = data.get("bids") or [], data.get("asks") or []
     with _lock:
@@ -1125,6 +1128,8 @@ def start_session():
                f"(seed budget {SEED_BUDGET_PER_SCAN})")
     failed = _track_many(codes, seed_budget=SEED_BUDGET_PER_SCAN)
     _log_debug(f"start_session: _track_many done, {len(codes) - len(failed)}/{len(codes)} subscribed")
+    global _last_ws_data
+    _last_ws_data = time.monotonic()  # silence is measured from here until the first frame
     _log_resource_snapshot("start_session end")
     if failed:
         _session_error = (f"{failed[0]}: subscribe failed"
@@ -1299,6 +1304,14 @@ def _teardown():
             conn["sdk"].logout()
         except Exception as e:
             print(f"LIVEWARRANT: teardown logout failed: {e}", flush=True)
+
+
+def seconds_since_last_tick():
+    """Seconds since the pool last delivered a books frame (or since the session started), None when no session is up."""
+    with _lock:
+        if not _connections:
+            return None
+    return None if _last_ws_data is None else time.monotonic() - _last_ws_data
 
 
 def reconnect():

@@ -115,3 +115,38 @@ def test_spot_ticks_go_to_their_own_file_and_follow_the_tick_file(rec):
     rec.start()
     rec.reset()
     assert not os.path.exists(rec.spot_path_for(today)) and not os.path.exists(rec.path_for(today))
+
+
+def test_warrant_watchdog_reconnects_a_silent_feed_mid_session_only(monkeypatch):
+    """A warrant pool that stops delivering frames is reconnected, but not at the open, the close, or forever."""
+    from datetime import datetime
+    from services import scheduler
+    calls = []
+    silence = {"s": 600.0}
+    monkeypatch.setattr(scheduler.live_warrant, "seconds_since_last_tick", lambda: silence["s"])
+    monkeypatch.setattr(scheduler.live_warrant, "reconnect", lambda: calls.append(1))
+    monkeypatch.setattr(scheduler, "_watchdog_reconnects", {})
+    day = datetime(2026, 10, 13)
+
+    assert scheduler.check_warrant_feed(day.replace(hour=9, minute=0)) is False    # before the window
+    assert scheduler.check_warrant_feed(day.replace(hour=13, minute=25)) is False  # closing auction
+    silence["s"] = 30.0
+    assert scheduler.check_warrant_feed(day.replace(hour=10)) is False             # ticking normally
+    silence["s"] = None
+    assert scheduler.check_warrant_feed(day.replace(hour=10)) is False             # no session up
+    silence["s"] = 600.0
+    results = [scheduler.check_warrant_feed(day.replace(hour=10, minute=m)) for m in (0, 5, 10, 15)]
+    assert results == [True, True, True, False]                                    # capped per day
+    assert len(calls) == 3
+
+
+def test_seconds_since_last_tick_tracks_books_frames(monkeypatch):
+    from services import live_warrant as lw
+    monkeypatch.setattr(lw, "_connections", [])
+    assert lw.seconds_since_last_tick() is None
+    monkeypatch.setattr(lw, "_connections", [{"codes": set()}])
+    monkeypatch.setattr(lw, "_last_ws_data", lw.time.monotonic() - 900)
+    assert lw.seconds_since_last_tick() > 800
+    lw._handle_message({}, json.dumps({"event": "data", "channel": lw.BOOKS_CHANNEL,
+                                       "data": {"symbol": "NOT_TRACKED", "bids": [], "asks": []}}))
+    assert lw.seconds_since_last_tick() < 5
