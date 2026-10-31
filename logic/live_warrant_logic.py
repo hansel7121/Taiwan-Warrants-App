@@ -20,6 +20,11 @@ LEVELS = 5
 # of the chain.
 MAX_SCAN_SHRINK = 0.20
 
+# Subscriptions a pre-open probe may find missing server-side before the pool
+# counts as broken: a few codes can be rejected (delisted, expired) on a healthy socket.
+PROBE_MISSING_MIN = 2
+PROBE_MISSING_FRAC = 0.02
+
 
 class CapacityExceededError(RuntimeError):
     """Raised when an add/scan would push total subscriptions past the account cap."""
@@ -59,6 +64,16 @@ def check_capacity(current_total, net_change, max_total=MAX_TOTAL_SUBS):
         raise CapacityExceededError(
             f"adding {net_change} subscription(s) would exceed the {max_total}-subscription "
             f"cap (currently {current_total})")
+
+
+def probe_healthy(res):
+    """Whether a `probe_subscriptions` result shows a live pool: every socket answered and (almost) every code is on the server."""
+    if res.get("unsupported"):
+        return True  # the SDK can't ask, so the probe can't fail the pool
+    if not res.get("connections") or res.get("replied") != res["connections"]:
+        return False
+    expected = res.get("expected") or 0
+    return res.get("missing", 0) <= max(PROBE_MISSING_MIN, expected * PROBE_MISSING_FRAC)
 
 
 def scan_codes(codes, volumes, top_n):

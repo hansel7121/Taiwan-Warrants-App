@@ -23,6 +23,7 @@ from services import live_warrant
 from services import live_options
 from services import live_tick_log
 from logic import arb_logic
+from logic import live_warrant_logic
 from logic import static_arb
 from logic import ttl_cache
 from logic import warrant_logic
@@ -370,13 +371,13 @@ _eod_proc = None
 
 
 def prepare_tick_recording():
-    """Pre-open: connect both Fubon sessions and subscribe TSMC's whole warrant + option chain.
+    """Pre-open: log both Fubon pools in fresh and subscribe TSMC's whole warrant + option chain.
 
-    The warrant pool is torn down and logged in fresh rather than reused: the
-    boot job opens it whenever the process starts (e.g. a redeploy the night
-    before), and a socket left idle overnight can stay "open" with REST still
-    working while it never delivers another books frame — 2026-10-13 recorded
-    zero warrant ticks that way.
+    Neither pool is reused: a socket left idle overnight can stay "open" with
+    REST still working while it never delivers another books frame —
+    2026-10-13 recorded zero warrant ticks that way, and from 2026-10-15 the
+    options pool (opened the morning before and kept by connect_session())
+    recorded none at all.
     """
     u = live_tick_log.UNDERLYING
     live_warrant.reconnect()
@@ -386,7 +387,8 @@ def prepare_tick_recording():
               f"-{len(res['removed'])} failed={len(res['failed'])} pending={res['pending']}", flush=True)
     except Exception as e:
         print(f"SCHED: tick prep warrant scan FAILED: {type(e).__name__}: {e}", flush=True)
-    live_options.connect_session()
+    live_options.prune_expired(datetime.now(_TZ_TAIPEI).date())
+    live_options.reconnect()
     live_options.load_chain(u)
     print(f"SCHED: tick prep options tracked={len(live_options.snapshot_for_underlying(u)[1])}", flush=True)
 
@@ -410,29 +412,79 @@ def ensure_tick_recording():
     return False
 
 
-# A whole TSMC warrant chain never goes this long without one books frame mid-session.
-WARRANT_SILENCE_S = 300
-WARRANT_WATCHDOG_WINDOW = (dtime(9, 5), dtime(13, 20))  # skip the open and the closing auction
-WARRANT_WATCHDOG_MAX_PER_DAY = 3  # bounds login churn on a holiday the weekday gate lets through
-_watchdog_reconnects = {}  # Taipei date -> reconnects done
+# Neither chain goes this long without one books frame mid-session (healthy
+# 2026-10-12: longest warrant gap 20s, longest option gap 138s).
+FEED_SILENCE_S = 300
+FEED_WATCHDOG_WINDOW = (dtime(9, 5), dtime(13, 20))  # skip the open and the closing auction
+FEED_RECONNECTS_MAX_PER_DAY = 3  # per pool; bounds login churn on a holiday the weekday gate lets through
+PREOPEN_PROBE_RETRIES = 2
+_feed_reconnects = {}  # (pool, Taipei date) -> reconnects done
+_feed_status = {}  # pool -> last pre-open probe {"at", "ok", "result"}
 
 
-def check_warrant_feed(now=None):
-    """Reconnect the warrant pool when it has been silent for WARRANT_SILENCE_S mid-session. Returns True if it did."""
-    t = _localize(now, _TZ_TAIPEI)
-    if not (WARRANT_WATCHDOG_WINDOW[0] <= t.time() <= WARRANT_WATCHDOG_WINDOW[1]):
+def _feed_module(pool):
+    return {"warrant": live_warrant, "option": live_options}[pool]
+
+
+def _restore_feed(pool):
+    """Log `pool` in fresh and resubscribe it; options also reload the chain when a restart lost it."""
+    _feed_module(pool).reconnect()
+    if pool == "option" and not live_options.snapshot_for_underlying()[1]:
+        live_options.load_chain(live_tick_log.UNDERLYING)
+
+
+def _reconnect_feed(pool, t, reason):
+    """Reconnect `pool` unless today's budget is spent. Returns True if it did."""
+    key = (pool, t.date())
+    done = _feed_reconnects.get(key, 0)
+    if done >= FEED_RECONNECTS_MAX_PER_DAY:
+        print(f"SCHED: {pool} feed {reason} — reconnect budget spent today, leaving it", flush=True)
         return False
-    silent = live_warrant.seconds_since_last_tick()
-    if silent is None or silent < WARRANT_SILENCE_S:
-        return False
-    done = _watchdog_reconnects.get(t.date(), 0)
-    if done >= WARRANT_WATCHDOG_MAX_PER_DAY:
-        return False
-    _watchdog_reconnects[t.date()] = done + 1
-    print(f"SCHED: warrant feed silent {silent:.0f}s — reconnecting "
-          f"({done + 1}/{WARRANT_WATCHDOG_MAX_PER_DAY} today)", flush=True)
-    live_warrant.reconnect()
+    _feed_reconnects[key] = done + 1
+    print(f"SCHED: {pool} feed {reason} — reconnecting ({done + 1}/{FEED_RECONNECTS_MAX_PER_DAY} today)", flush=True)
+    _restore_feed(pool)
     return True
+
+
+def check_feed(pool, now=None):
+    """Reconnect `pool` ("warrant"/"option") when it has been silent for FEED_SILENCE_S mid-session. Returns True if it did."""
+    t = _localize(now, _TZ_TAIPEI)
+    if not (FEED_WATCHDOG_WINDOW[0] <= t.time() <= FEED_WATCHDOG_WINDOW[1]):
+        return False
+    silent = _feed_module(pool).seconds_since_last_tick()
+    if silent is None or silent < FEED_SILENCE_S:
+        return False
+    return _reconnect_feed(pool, t, f"silent {silent:.0f}s")
+
+
+def verify_feeds(now=None):
+    """Pre-open: have the server confirm each pool's subscriptions, reconnecting a pool that fails. Returns {pool: ok}."""
+    t = _localize(now, _TZ_TAIPEI)
+    out = {}
+    for pool in ("warrant", "option"):
+        for attempt in range(PREOPEN_PROBE_RETRIES + 1):
+            res = _feed_module(pool).probe_subscriptions()
+            ok = live_warrant_logic.probe_healthy(res)
+            print(f"SCHED: pre-open {pool} probe {'ok' if ok else 'FAILED'} {res}", flush=True)
+            if ok or attempt == PREOPEN_PROBE_RETRIES or not _reconnect_feed(pool, t, "failed pre-open probe"):
+                break
+        _feed_status[pool] = {"at": t.isoformat(timespec="seconds"), "ok": ok, "result": res}
+        out[pool] = ok
+    return out
+
+
+def feed_status():
+    """Per pool: seconds since the last books frame, today's watchdog reconnects, and the last pre-open probe — for /healthz."""
+    today = datetime.now(_TZ_TAIPEI).date()
+    out = {}
+    for pool in ("warrant", "option"):
+        silent = _feed_module(pool).seconds_since_last_tick()
+        out[pool] = {
+            "silent_s": None if silent is None else round(silent, 1),
+            "reconnects_today": _feed_reconnects.get((pool, today), 0),
+            "preopen": _feed_status.get(pool),
+        }
+    return out
 
 
 def stop_tick_recording():
@@ -579,7 +631,12 @@ def _run_tick_prepare():
 
 def _run_tick_record():
     _job("tick_record", ensure_tick_recording)
-    _job("warrant_watchdog", check_warrant_feed)
+    _job("warrant_watchdog", lambda: check_feed("warrant"))
+    _job("option_watchdog", lambda: check_feed("option"))
+
+
+def _run_feed_verify():
+    _job("feed_verify", verify_feeds)
 
 
 def _run_tick_stop():
@@ -674,6 +731,9 @@ def start():
             weekdays = "mon-fri"
             sched.add_job(_run_tick_prepare,
                           CronTrigger(day_of_week=weekdays, hour=8, minute=40, timezone=_TZ_TAIPEI))
+            # Queues behind tick_prepare on the single worker, so it probes what prepare just built.
+            sched.add_job(_run_feed_verify,
+                          CronTrigger(day_of_week=weekdays, hour=8, minute=44, timezone=_TZ_TAIPEI))
             sched.add_job(_gated("tw_equity", _run_tick_record),
                           CronTrigger(minute="*/5", timezone=_TZ_TAIPEI),
                           next_run_time=now + timedelta(seconds=5))
