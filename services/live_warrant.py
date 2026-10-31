@@ -354,7 +354,8 @@ def _login_new_connection():
         sdk.init_realtime()
         _log_debug(f"login: init_realtime() returned in {time.perf_counter() - t0:.1f}s")
         ws = sdk.marketdata.websocket_client.stock
-        conn = {"sdk": sdk, "ws": ws, "codes": set(), "sub_ids": {}, "state": "connecting", "last_error": None}
+        conn = {"sdk": sdk, "ws": ws, "codes": set(), "sub_ids": {}, "state": "connecting", "last_error": None,
+                "server_subs": None, "probe_event": None}
         # Before connect(): the socket starts emitting as soon as it authenticates.
         ws.on("message", lambda raw: _handle_message(conn, raw))
         ws.on("connect", lambda *a, **k: _on_connect(conn))
@@ -578,6 +579,12 @@ def _handle_control(conn, event, message):
             conn["sub_ids"][data.get("symbol")] = data.get("id")
         elif event == "unsubscribed":
             conn["sub_ids"].pop(data.get("symbol"), None)
+        elif event == "subscriptions":
+            # The server's own list, in answer to probe_subscriptions().
+            rows = data if isinstance(data, list) else []
+            conn["server_subs"] = {r.get("symbol") for r in rows if isinstance(r, dict) and r.get("symbol")}
+            if conn.get("probe_event") is not None:
+                conn["probe_event"].set()
         elif event == "error":
             conn["last_error"] = f"{message.get('code', '?')}: {data.get('message', message)}"
             print(f"LIVEWARRANT: conn {conn.get('index', '?')} error {conn['last_error']}", flush=True)
@@ -1312,6 +1319,36 @@ def seconds_since_last_tick():
         if not _connections:
             return None
     return None if _last_ws_data is None else time.monotonic() - _last_ws_data
+
+
+def probe_subscriptions(timeout=10.0):
+    """Ask every connection for the server's own subscription list — a socket that has silently died never answers.
+
+    Works before the open, when no books frame can prove the feed is alive.
+    Returns {"connections", "replied", "expected", "missing", "unsupported"}.
+    """
+    with _lock:
+        conns = list(_connections)
+        for c in conns:
+            c["server_subs"] = None
+            c["probe_event"] = threading.Event()
+    for c in conns:
+        try:
+            c["ws"].subscriptions()
+        except AttributeError:
+            return {"connections": len(conns), "replied": 0, "expected": 0, "missing": 0, "unsupported": True}
+        except Exception as e:
+            print(f"LIVEWARRANT: conn {c.get('index', '?')} subscriptions query failed: {_error_detail(e)}", flush=True)
+    deadline = time.monotonic() + timeout
+    for c in conns:
+        c["probe_event"].wait(max(0.0, deadline - time.monotonic()))
+    with _lock:
+        # Underlying codes ride the same sockets, so they count as expected too.
+        expected = sum(len(c["codes"]) for c in conns)
+        replied = [c for c in conns if c["server_subs"] is not None]
+        missing = sum(len(c["codes"] - (c["server_subs"] or set())) for c in conns)
+    return {"connections": len(conns), "replied": len(replied), "expected": expected,
+            "missing": missing, "unsupported": False}
 
 
 def reconnect():

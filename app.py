@@ -1242,6 +1242,8 @@ def healthz():
             # downgrades several features at once, and "which path ran" has to
             # be answerable during an incident.
             "features": iv_engine.feature_engines(),
+            # Live websocket pools: silence, watchdog reconnects, last pre-open probe.
+            "feeds": scheduler.feed_status(),
         }
     )
 

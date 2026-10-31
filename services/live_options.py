@@ -87,6 +87,8 @@ REST_QUOTA_WINDOW_S = 60.0
 REST_BURST_LIMIT = 24
 REST_BURST_WINDOW_S = 1.0
 REST_ACQUIRE_TIMEOUT_S = 20.0
+# How long probe_subscriptions() waits for every socket's subscription list.
+PROBE_TIMEOUT_S = 10.0
 
 # v1 hard-coded to one underlying, same framing as live_warrant.py's
 # UNDERLYING_LIVE_PRICE_ALLOWLIST — trivially widened once the contract-field
@@ -107,6 +109,7 @@ _diagnostic_logged = False  # one-shot: log the first raw tickers() row so the f
 # Bumped on every books tick: a cheap "has anything changed" signal returned
 # by snapshot_for_underlying, mirroring live_warrant.py's per-code `_book_seq`.
 _tick_seq = 0
+_last_ws_data = None  # time.monotonic() of the pool's last books frame (or of the last session start)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -226,7 +229,8 @@ def _login_new_connection():
 
         sdk.init_realtime()
         ws = sdk.marketdata.websocket_client.futopt
-        conn = {"sdk": sdk, "ws": ws, "codes": set(), "sub_ids": {}, "state": "connecting", "last_error": None}
+        conn = {"sdk": sdk, "ws": ws, "codes": set(), "sub_ids": {}, "state": "connecting", "last_error": None,
+                "server_subs": None, "probe_event": None}
         ws.on("message", lambda raw: _handle_message(conn, raw))
         ws.on("connect", lambda *a, **k: _on_connect(conn))
         ws.on("disconnect", lambda *a, **k: _on_disconnect(conn))
@@ -249,9 +253,12 @@ def _ensure_connection(idx):
         if _stopped_by_user:
             raise RuntimeError("session disconnected — click Connect to resume")
     conn = _login_new_connection()
+    global _last_ws_data
     with _lock:
         conn["index"] = len(_connections)
         _connections.append(conn)
+        if conn["index"] == 0:
+            _last_ws_data = time.monotonic()  # silence is measured from the pool coming up
     return conn
 
 
@@ -274,7 +281,8 @@ def _handle_message(conn, raw):
     if not code:
         return
 
-    global _tick_seq
+    global _tick_seq, _last_ws_data
+    _last_ws_data = time.monotonic()
     new_bids, new_asks = data.get("bids") or [], data.get("asks") or []
     with _lock:
         _books[code] = {
@@ -331,6 +339,12 @@ def _handle_control(conn, event, message):
             conn["sub_ids"][data.get("symbol")] = data.get("id")
         elif event == "unsubscribed":
             conn["sub_ids"].pop(data.get("symbol"), None)
+        elif event == "subscriptions":
+            # The server's own list, in answer to probe_subscriptions().
+            rows = data if isinstance(data, list) else []
+            conn["server_subs"] = {r.get("symbol") for r in rows if isinstance(r, dict) and r.get("symbol")}
+            if conn.get("probe_event") is not None:
+                conn["probe_event"].set()
         elif event == "error":
             conn["last_error"] = f"{message.get('code', '?')}: {data.get('message', message)}"
             print(f"LIVEOPTIONS: conn {conn.get('index', '?')} error {conn['last_error']}", flush=True)
@@ -559,6 +573,8 @@ def start_session():
         codes = list(_tracked)
     _session_error = None
     failed = _track_many(codes, seed_budget=SEED_BUDGET_PER_LOAD)
+    global _last_ws_data
+    _last_ws_data = time.monotonic()  # silence is measured from here until the first frame
     if failed:
         _session_error = (f"{failed[0]}: subscribe failed"
                           + (f" (+{len(failed) - 1} more)" if len(failed) > 1 else ""))
@@ -626,6 +642,43 @@ def _teardown():
             conn["sdk"].logout()
         except Exception as e:
             print(f"LIVEOPTIONS: teardown logout failed: {e}", flush=True)
+
+
+def seconds_since_last_tick():
+    """Seconds since the pool last delivered a books frame (or since the session started), None when no session is up."""
+    with _lock:
+        if not _connections:
+            return None
+    return None if _last_ws_data is None else time.monotonic() - _last_ws_data
+
+
+def probe_subscriptions(timeout=PROBE_TIMEOUT_S):
+    """Ask every connection for the server's own subscription list — a socket that has silently died never answers.
+
+    Works before the open, when no books frame can prove the feed is alive.
+    Returns {"connections", "replied", "expected", "missing", "unsupported"}.
+    """
+    with _lock:
+        conns = list(_connections)
+        for c in conns:
+            c["server_subs"] = None
+            c["probe_event"] = threading.Event()
+    for c in conns:
+        try:
+            c["ws"].subscriptions()
+        except AttributeError:
+            return {"connections": len(conns), "replied": 0, "expected": 0, "missing": 0, "unsupported": True}
+        except Exception as e:
+            print(f"LIVEOPTIONS: conn {c.get('index', '?')} subscriptions query failed: {_error_detail(e)}", flush=True)
+    deadline = time.monotonic() + timeout
+    for c in conns:
+        c["probe_event"].wait(max(0.0, deadline - time.monotonic()))
+    with _lock:
+        expected = sum(len(c["codes"]) for c in conns)
+        replied = [c for c in conns if c["server_subs"] is not None]
+        missing = sum(len(c["codes"] - (c["server_subs"] or set())) for c in conns)
+    return {"connections": len(conns), "replied": len(replied), "expected": expected,
+            "missing": missing, "unsupported": False}
 
 
 def reconnect():
@@ -753,6 +806,18 @@ def load_chain(underlying=SUPPORTED_UNDERLYING):
         "parse_failures": parse_failures,
         "expiries": sorted({p["expiry"].isoformat() for p in parsed}),
     }
+
+
+def prune_expired(today):
+    """Untrack every contract that expired before `today` — load_chain is add-only, so nothing else drops them. Returns the count."""
+    with _lock:
+        expired = [c for c in _tracked
+                   if (_contracts.get(c) or {}).get("expiry") and _contracts[c]["expiry"] < today]
+    for code in expired:
+        remove_code(code)
+    if expired:
+        print(f"LIVEOPTIONS: pruned {len(expired)} expired contracts", flush=True)
+    return len(expired)
 
 
 def remove_code(code):

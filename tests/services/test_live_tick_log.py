@@ -117,27 +117,112 @@ def test_spot_ticks_go_to_their_own_file_and_follow_the_tick_file(rec):
     assert not os.path.exists(rec.spot_path_for(today)) and not os.path.exists(rec.path_for(today))
 
 
-def test_warrant_watchdog_reconnects_a_silent_feed_mid_session_only(monkeypatch):
-    """A warrant pool that stops delivering frames is reconnected, but not at the open, the close, or forever."""
+def test_feed_watchdog_reconnects_a_silent_feed_mid_session_only(monkeypatch):
+    """A pool that stops delivering frames is reconnected, but not at the open, the close, or forever."""
     from datetime import datetime
     from services import scheduler
     calls = []
     silence = {"s": 600.0}
-    monkeypatch.setattr(scheduler.live_warrant, "seconds_since_last_tick", lambda: silence["s"])
-    monkeypatch.setattr(scheduler.live_warrant, "reconnect", lambda: calls.append(1))
-    monkeypatch.setattr(scheduler, "_watchdog_reconnects", {})
+    for mod in (scheduler.live_warrant, scheduler.live_options):
+        monkeypatch.setattr(mod, "seconds_since_last_tick", lambda: silence["s"])
+    monkeypatch.setattr(scheduler, "_restore_feed", lambda pool: calls.append(pool))
+    monkeypatch.setattr(scheduler, "_feed_reconnects", {})
     day = datetime(2026, 10, 13)
 
-    assert scheduler.check_warrant_feed(day.replace(hour=9, minute=0)) is False    # before the window
-    assert scheduler.check_warrant_feed(day.replace(hour=13, minute=25)) is False  # closing auction
+    assert scheduler.check_feed("warrant", day.replace(hour=9, minute=0)) is False    # before the window
+    assert scheduler.check_feed("warrant", day.replace(hour=13, minute=25)) is False  # closing auction
     silence["s"] = 30.0
-    assert scheduler.check_warrant_feed(day.replace(hour=10)) is False             # ticking normally
+    assert scheduler.check_feed("warrant", day.replace(hour=10)) is False             # ticking normally
     silence["s"] = None
-    assert scheduler.check_warrant_feed(day.replace(hour=10)) is False             # no session up
+    assert scheduler.check_feed("warrant", day.replace(hour=10)) is False             # no session up
     silence["s"] = 600.0
-    results = [scheduler.check_warrant_feed(day.replace(hour=10, minute=m)) for m in (0, 5, 10, 15)]
-    assert results == [True, True, True, False]                                    # capped per day
-    assert len(calls) == 3
+    results = [scheduler.check_feed("warrant", day.replace(hour=10, minute=m)) for m in (0, 5, 10, 15)]
+    assert results == [True, True, True, False]                                       # capped per day
+    assert scheduler.check_feed("option", day.replace(hour=10)) is True               # separate budget per pool
+    assert calls == ["warrant"] * 3 + ["option"]
+
+
+def test_preopen_probe_reconnects_a_pool_the_server_does_not_confirm(monkeypatch):
+    """A pool whose socket never answers the subscriptions query is reconnected and re-probed; a healthy one is left alone."""
+    from datetime import datetime
+    from services import scheduler
+    calls = []
+    healthy = {"connections": 1, "replied": 1, "expected": 130, "missing": 0, "unsupported": False}
+    dead = {**healthy, "replied": 0, "missing": 130}
+    option_probes = iter([dead, healthy])
+    monkeypatch.setattr(scheduler.live_warrant, "probe_subscriptions", lambda: healthy)
+    monkeypatch.setattr(scheduler.live_options, "probe_subscriptions", lambda: next(option_probes))
+    monkeypatch.setattr(scheduler, "_restore_feed", lambda pool: calls.append(pool))
+    monkeypatch.setattr(scheduler, "_feed_reconnects", {})
+    monkeypatch.setattr(scheduler, "_feed_status", {})
+
+    assert scheduler.verify_feeds(datetime(2026, 10, 15, 8, 44)) == {"warrant": True, "option": True}
+    assert calls == ["option"]
+    assert scheduler.feed_status()["option"]["preopen"]["ok"] is True
+
+
+def test_probe_healthy_tolerates_a_few_rejected_codes_only():
+    from logic import live_warrant_logic as lwl
+    ok = {"connections": 4, "replied": 4, "expected": 1050, "missing": 3, "unsupported": False}
+    assert lwl.probe_healthy(ok)
+    assert not lwl.probe_healthy({**ok, "replied": 3})                 # one socket never answered
+    assert not lwl.probe_healthy({**ok, "missing": 300})               # subscriptions lost server-side
+    assert not lwl.probe_healthy({**ok, "connections": 0, "replied": 0})  # no session at all
+    assert lwl.probe_healthy({"unsupported": True})                    # SDK can't ask: never fail on it
+
+
+def test_option_probe_reads_the_servers_subscription_list(monkeypatch):
+    """probe_subscriptions counts tracked codes the server's own list is missing, and a socket that never answers."""
+    import json as _json
+    from services import live_options as lo
+
+    class _WS:
+        def __init__(self, conn, answer):
+            self.conn, self.answer = conn, answer
+
+        def subscriptions(self):
+            if self.answer is not None:
+                lo._handle_message(self.conn, _json.dumps({"event": "subscriptions", "data": [
+                    {"id": str(i), "channel": "books", "symbol": s} for i, s in enumerate(self.answer)]}))
+
+    live = {"codes": {"A", "B"}, "sub_ids": {}, "index": 0}
+    live["ws"] = _WS(live, ["A", "B"])
+    monkeypatch.setattr(lo, "_connections", [live])
+    assert lo.probe_subscriptions(timeout=0.5) == {
+        "connections": 1, "replied": 1, "expected": 2, "missing": 0, "unsupported": False}
+
+    lost = {"codes": {"A", "B"}, "sub_ids": {}, "index": 0}
+    lost["ws"] = _WS(lost, ["A"])
+    dead = {"codes": {"C"}, "sub_ids": {}, "index": 1}
+    dead["ws"] = _WS(dead, None)
+    monkeypatch.setattr(lo, "_connections", [lost, dead])
+    assert lo.probe_subscriptions(timeout=0.2) == {
+        "connections": 2, "replied": 1, "expected": 3, "missing": 2, "unsupported": False}
+
+
+def test_option_seconds_since_last_tick_tracks_books_frames(monkeypatch):
+    from services import live_options as lo
+    monkeypatch.setattr(lo, "_connections", [])
+    assert lo.seconds_since_last_tick() is None
+    monkeypatch.setattr(lo, "_connections", [{"codes": set()}])
+    monkeypatch.setattr(lo, "_last_ws_data", lo.time.monotonic() - 900)
+    assert lo.seconds_since_last_tick() > 800
+    lo._handle_message({}, json.dumps({"event": "data", "channel": lo.BOOKS_CHANNEL,
+                                       "data": {"symbol": "NOT_TRACKED", "bids": [], "asks": []}}))
+    assert lo.seconds_since_last_tick() < 5
+    lo._books.pop("NOT_TRACKED", None)
+
+
+def test_prune_expired_untracks_only_contracts_past_expiry(monkeypatch):
+    from datetime import date
+    from services import live_options as lo
+    monkeypatch.setattr(lo, "_tracked", ["OLD", "TODAY", "LATER"])
+    monkeypatch.setattr(lo, "_contracts", {"OLD": {"expiry": date(2026, 10, 14)},
+                                           "TODAY": {"expiry": date(2026, 10, 15)},
+                                           "LATER": {"expiry": date(2026, 11, 18)}})
+    monkeypatch.setattr(lo, "_connections", [])
+    assert lo.prune_expired(date(2026, 10, 15)) == 1
+    assert lo._tracked == ["TODAY", "LATER"]
 
 
 def test_seconds_since_last_tick_tracks_books_frames(monkeypatch):
