@@ -33,6 +33,14 @@ def _type_codes(warrant_rows, option_rows):
     return {t: i for i, t in enumerate(types)}
 
 
+def _quote(v):
+    """Positive book price, else None (Fubon shows a resting market order as price 0)."""
+    if v is None:
+        return None
+    v = float(v)
+    return v if v > 0 else None
+
+
 def build_direct_arrays(warrant_rows, option_rows, today):
     """Shape raw snapshot rows (live_warrant.snapshot_for_underlying /
     live_options.snapshot_for_underlying) into resolved per-leg dicts.
@@ -51,11 +59,12 @@ def build_direct_arrays(warrant_rows, option_rows, today):
         if dte <= 0:
             continue
         best = r["best"]
+        bid, ask = _quote(best.get("bid")), _quote(best.get("ask"))
         w.append({
             "code": r["code"], "name": r["name"], "type": r["type"],
             "strike": float(r["strike"]), "dte": dte, "ratio": float(r["exercise_ratio"]),
-            "ask": float(best["ask"]) if best.get("ask") is not None else float("nan"),
-            "bid": float(best["bid"]) if best.get("bid") is not None else float("nan"),
+            "ask": ask if ask is not None else float("nan"),
+            "bid": bid if bid is not None else float("nan"),
             "ask_size": best.get("ask_size"), "bid_size": best.get("bid_size"),
         })
 
@@ -67,12 +76,12 @@ def build_direct_arrays(warrant_rows, option_rows, today):
         if dte <= 0:
             continue
         best = r["best"]
-        bid, ask = best.get("bid"), best.get("ask")
+        bid, ask = _quote(best.get("bid")), _quote(best.get("ask"))
         o.append({
             "code": r["code"], "name": r["name"], "type": r["type"],
             "strike": float(r["strike"]), "dte": dte,
-            "bid": float(bid) if bid is not None else float("nan"),
-            "ask": float(ask) if ask is not None else float("nan"),
+            "bid": bid if bid is not None else float("nan"),
+            "ask": ask if ask is not None else float("nan"),
             # No settlement-fallback concept exists on the live book (unlike
             # the batch fetch's is_live flag) — any present price IS the live
             # quote, so "live" here just means "the book has a price at all".
