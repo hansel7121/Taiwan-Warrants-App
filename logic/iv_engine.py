@@ -232,12 +232,44 @@ if RUST_AVAILABLE and use_rust("arb"):
             list(short_lot_shares), list(short_depth_shares), float(min_edge),
         )
 
+    # An extension built before the whole-chain scan landed still imports and
+    # still serves every other kernel, so the caller degrades to the scipy loop
+    # rather than dying on a missing symbol.
+    SCAN_STATIC_ARB = hasattr(_rust, "scan_static_arb")
+
+    def scan_static_arb(w_dte, w_is_call, w_strike, w_ratio, w_ask, w_ask_qty,
+                        o_dte, o_is_call, o_strike, o_bid, o_bid_size, o_bid_live,
+                        o_ask, o_ask_size, o_ask_live, horizons, m, r, min_edge):
+        """See `rust/warrants_core/src/static_arb.rs::scan`.
+
+        Builds the per-share legs for every horizon and solves them in parallel,
+        so the whole chain costs one call. `logic/static_arb.py::_build_legs`
+        rebuilt the same legs row by row per horizon and cost as much as the
+        LPs themselves.
+        """
+        return _rust.scan_static_arb(
+            list(w_dte), list(w_is_call), list(w_strike), list(w_ratio),
+            list(w_ask), list(w_ask_qty),
+            list(o_dte), list(o_is_call), list(o_strike),
+            list(o_bid), list(o_bid_size), list(o_bid_live),
+            list(o_ask), list(o_ask_size), list(o_ask_live),
+            list(horizons), float(m), float(r), float(min_edge),
+        )
+
 else:
+    SCAN_STATIC_ARB = False
+
     def solve_static_arb_horizon(*_args, **_kwargs):
         raise RuntimeError(
             "solve_static_arb_horizon requires the Rust engine (no Python "
             "fallback exists for this kernel) — check iv_engine.RUST_AVAILABLE "
             "before calling it")
+
+    def scan_static_arb(*_args, **_kwargs):
+        raise RuntimeError(
+            "scan_static_arb requires the Rust engine (no Python fallback "
+            "exists for this kernel) — check iv_engine.RUST_AVAILABLE before "
+            "calling it")
 
 
 # ── warrant frame ───────────────────────────────────────────────────────────

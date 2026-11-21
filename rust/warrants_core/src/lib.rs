@@ -8,6 +8,7 @@
 mod arb;
 mod bs;
 mod frame;
+mod lp;
 mod static_arb;
 mod tick;
 
@@ -425,6 +426,104 @@ fn solve_static_arb_horizon<'py>(
     )))
 }
 
+/// The static-arb LP's continuous relaxation, before lot rounding: the entry
+/// credit plus the per-leg share weights. Exposed so the parity test can pin
+/// the one number scipy/HiGHS and this kernel must agree on exactly.
+#[pyfunction]
+#[pyo3(signature = (
+    long_price_ps, long_eff_strike, long_is_call, long_lot_shares, long_depth_shares,
+    short_price_ps, short_eff_strike, short_is_call, short_lot_shares, short_depth_shares,
+))]
+#[allow(clippy::too_many_arguments)]
+fn static_arb_relaxation(
+    py: Python<'_>,
+    long_price_ps: Vec<f64>, long_eff_strike: Vec<f64>, long_is_call: Vec<bool>,
+    long_lot_shares: Vec<f64>, long_depth_shares: Vec<f64>,
+    short_price_ps: Vec<f64>, short_eff_strike: Vec<f64>, short_is_call: Vec<bool>,
+    short_lot_shares: Vec<f64>, short_depth_shares: Vec<f64>,
+) -> PyResult<(f64, Vec<f64>, Vec<f64>)> {
+    py.allow_threads(|| {
+        static_arb::relaxation(
+            &long_price_ps, &long_eff_strike, &long_is_call, &long_lot_shares, &long_depth_shares,
+            &short_price_ps, &short_eff_strike, &short_is_call, &short_lot_shares, &short_depth_shares,
+        )
+    })
+    .map_err(PyValueError::new_err)
+}
+
+/// One horizon of a whole-chain scan: `(horizon_dte, dropped_no_depth,
+/// structure_or_None)`, where the structure is the same 9-tuple
+/// `solve_static_arb_horizon` returns plus a leading `long_kind` array
+/// (0 = warrant, 1 = option) saying which input array each long index is into.
+type ScanRow = (
+    i64,
+    usize,
+    Option<(Vec<u8>, Vec<i64>, Vec<i64>, Vec<i64>, Vec<i64>, f64, f64, f64, f64, f64)>,
+);
+
+/// Whole-chain static-arb scan: normalise both quoted chains to per-share legs
+/// at every horizon and solve each one, in parallel. Mirrors
+/// `logic/static_arb.py`'s `_build_legs` + per-horizon `_solve_horizon` loop,
+/// including its `round(price, 6)` — building the legs in Python cost as much
+/// as the LPs themselves.
+#[pyfunction]
+#[pyo3(signature = (
+    w_dte, w_is_call, w_strike, w_ratio, w_ask, w_ask_qty,
+    o_dte, o_is_call, o_strike, o_bid, o_bid_size, o_bid_live, o_ask, o_ask_size, o_ask_live,
+    horizons, m, r, min_edge,
+))]
+#[allow(clippy::too_many_arguments)]
+fn scan_static_arb(
+    py: Python<'_>,
+    w_dte: Vec<i64>, w_is_call: Vec<bool>, w_strike: Vec<f64>, w_ratio: Vec<f64>,
+    w_ask: Vec<f64>, w_ask_qty: Vec<i64>,
+    o_dte: Vec<i64>, o_is_call: Vec<bool>, o_strike: Vec<f64>,
+    o_bid: Vec<f64>, o_bid_size: Vec<i64>, o_bid_live: Vec<bool>,
+    o_ask: Vec<f64>, o_ask_size: Vec<i64>, o_ask_live: Vec<bool>,
+    horizons: Vec<i64>, m: f64, r: f64, min_edge: f64,
+) -> PyResult<Vec<ScanRow>> {
+    let nw = w_dte.len();
+    same_len(nw, w_is_call.len(), "w_is_call")?;
+    same_len(nw, w_strike.len(), "w_strike")?;
+    same_len(nw, w_ratio.len(), "w_ratio")?;
+    same_len(nw, w_ask.len(), "w_ask")?;
+    same_len(nw, w_ask_qty.len(), "w_ask_qty")?;
+    let no = o_dte.len();
+    for (got, name) in [
+        (o_is_call.len(), "o_is_call"), (o_strike.len(), "o_strike"),
+        (o_bid.len(), "o_bid"), (o_bid_size.len(), "o_bid_size"), (o_bid_live.len(), "o_bid_live"),
+        (o_ask.len(), "o_ask"), (o_ask_size.len(), "o_ask_size"), (o_ask_live.len(), "o_ask_live"),
+    ] {
+        same_len(no, got, name)?;
+    }
+
+    let chain = static_arb::Chain {
+        w_dte: &w_dte, w_is_call: &w_is_call, w_strike: &w_strike, w_ratio: &w_ratio,
+        w_ask: &w_ask, w_ask_qty: &w_ask_qty,
+        o_dte: &o_dte, o_is_call: &o_is_call, o_strike: &o_strike,
+        o_bid: &o_bid, o_bid_size: &o_bid_size, o_bid_live: &o_bid_live,
+        o_ask: &o_ask, o_ask_size: &o_ask_size, o_ask_live: &o_ask_live,
+        m, r,
+    };
+    let outcomes = py
+        .allow_threads(|| static_arb::scan(&chain, &horizons, min_edge))
+        .map_err(PyValueError::new_err)?;
+
+    Ok(outcomes
+        .into_iter()
+        .map(|o| {
+            (o.horizon_dte, o.dropped_no_depth, o.solved.map(|s| (
+                s.long_kind,
+                s.long_idx.into_iter().map(|i| i as i64).collect(),
+                s.long_lots,
+                s.short_idx.into_iter().map(|i| i as i64).collect(),
+                s.short_lots,
+                s.net_credit, s.min_payoff, s.guaranteed_profit, s.worst_spot, s.gross_debit,
+            )))
+        })
+        .collect())
+}
+
 /// Live Warrant tab tick kernel: time-value columns only for one warrant's
 /// current best bid/ask. No IV/delta/leverage solve — see `tick.rs`.
 #[pyfunction]
@@ -451,5 +550,7 @@ fn warrants_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_warrant_columns, m)?)?;
     m.add_function(wrap_pyfunction!(solve_tick, m)?)?;
     m.add_function(wrap_pyfunction!(solve_static_arb_horizon, m)?)?;
+    m.add_function(wrap_pyfunction!(scan_static_arb, m)?)?;
+    m.add_function(wrap_pyfunction!(static_arb_relaxation, m)?)?;
     Ok(())
 }
